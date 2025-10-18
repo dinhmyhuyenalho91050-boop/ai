@@ -1844,12 +1844,21 @@ class UIManager{
     this.windowManager.evaluate(total);
     
     const win=this.windowManager.window;
-    
+
+    // 预先建立当前窗口内消息id到索引的映射，避免在遍历节点时重复扫描history
+    const idToIndex=new Map();
+    if(win&&Number.isInteger(win.start)&&Number.isInteger(win.end)){
+      for(let i=win.start;i<=win.end;i++){
+        const msg=history[i];
+        if(msg&&msg.id)idToIndex.set(msg.id,i);
+      }
+    }
+
     // ✅ 移除窗口外的元素 - 使用msgId遍历
     const toRemove=[];
     for(let[msgId,el]of this.messageElements){
       // Find the index of this message in current history
-      const msgIdx=history.findIndex(m=>m.id===msgId);
+      const msgIdx=idToIndex.has(msgId)?idToIndex.get(msgId):-1;
       if(msgIdx===-1||msgIdx<win.start||msgIdx>win.end){
         toRemove.push({msgId,el});
       }
