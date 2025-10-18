@@ -24,6 +24,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -45,6 +46,13 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+
+    sourceSets {
+        getByName("main") {
+            res.srcDirs("src/main/res", "../android_res")
+            assets.setSrcDirs(listOf("src/main/assets"))
+        }
     }
 }
 
