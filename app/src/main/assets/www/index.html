@@ -4018,6 +4018,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     this._ime={
       active:false,
       baseVVH:(this._vvAvailable?visualViewport.height:null),
+      baseWinH:(window.innerHeight||0),
       nativeBottom:0,
       wasNearBottom:false,
     };
@@ -4059,10 +4060,12 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       this.events.on(input,'focus',()=>{
         this._ime.active=true;
         this._ime.wasNearBottom=this.isNearBottom(box);
+        this._ime.baseWinH=Math.max(this._ime.baseWinH||0,(window.innerHeight||0));
         updatePad();
       });
       this.events.on(input,'blur',()=>{
         this._ime.active=false;
+        this._ime.baseWinH=(window.innerHeight||0);
         setTimeout(()=>{
           updatePad();
           if(this.isNearBottom(box))this._smoothStickBottom(180);
@@ -4085,7 +4088,20 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       this.events.on(visualViewport,'scroll',updatePad,{passive:true});
     }
 
-    this.events.on(window,'resize',updatePad,{passive:true});
+    const onWindowResize=Utils.rafThrottle(()=>{
+      updatePad();
+      if(!this._vvAvailable&&this._ime){
+        const h=(window.innerHeight||0);
+        const base=(this._ime.baseWinH!=null?this._ime.baseWinH:h);
+        const delta=base-h;
+        const keyboardLikelyOpen=delta>80;
+        if(!keyboardLikelyOpen)this._ime.baseWinH=h;
+        if(keyboardLikelyOpen&&this._ime.active&&this._ime.wasNearBottom){
+          requestAnimationFrame(()=>this._smoothStickBottom(220));
+        }
+      }
+    });
+    this.events.on(window,'resize',onWindowResize,{passive:true});
     const onNativeIME=(evt)=>{
       if(!this._ime)return;
       const detail=evt?.detail||{};
