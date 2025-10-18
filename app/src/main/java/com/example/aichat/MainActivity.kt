@@ -25,6 +25,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private var isContentReady = false
     private var lastImeDispatch: Pair<Int, Int>? = null
+    private var baseViewportHeight: Int = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
@@ -136,7 +137,33 @@ class MainActivity : AppCompatActivity() {
             val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
             val systemInsets = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val topInset = systemInsets.top
-            val bottomInset = max(imeInsets.bottom, systemInsets.bottom)
+            val systemBottom = systemInsets.bottom
+
+            val rawHeight = when {
+                view.height > 0 -> view.height
+                view.measuredHeight > 0 -> view.measuredHeight
+                else -> 0
+            }
+
+            val viewportWithoutIme = if (rawHeight > 0) {
+                max(0, rawHeight - topInset - systemBottom)
+            } else {
+                0
+            }
+
+            if (viewportWithoutIme > 0) {
+                if (baseViewportHeight == 0 || viewportWithoutIme > baseViewportHeight) {
+                    baseViewportHeight = viewportWithoutIme
+                } else if (imeInsets.bottom <= systemBottom) {
+                    baseViewportHeight = viewportWithoutIme
+                }
+            }
+
+            val baselineViewport = if (baseViewportHeight > 0) baseViewportHeight else viewportWithoutIme
+            val consumedByResize = max(0, baselineViewport - viewportWithoutIme)
+            val effectiveImeInset = max(0, imeInsets.bottom - consumedByResize)
+            val bottomInset = systemBottom + effectiveImeInset
+
             view.setPadding(
                 view.paddingLeft,
                 topInset,
@@ -144,8 +171,16 @@ class MainActivity : AppCompatActivity() {
                 bottomInset
             )
 
-            val rawHeight = if (view.height > 0) view.height else view.measuredHeight
-            val viewportHeight = max(0, rawHeight - topInset - bottomInset)
+            val viewportHeight = if (rawHeight > 0) {
+                max(0, rawHeight - topInset - bottomInset)
+            } else {
+                viewportWithoutIme
+            }
+
+            if (effectiveImeInset == 0 && viewportHeight > 0) {
+                baseViewportHeight = viewportHeight
+            }
+
             dispatchImeInsets(bottomInset, viewportHeight)
 
             insets
