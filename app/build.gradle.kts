@@ -49,7 +49,7 @@ android {
 
     sourceSets {
         getByName("main") {
-            res.setSrcDirs(listOf("src/main/res", "../android_res"))
+            res.srcDirs("src/main/res", "../android_res")
             assets.setSrcDirs(listOf("src/main/assets"))
         }
     }
