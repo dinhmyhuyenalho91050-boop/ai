@@ -2388,6 +2388,7 @@ class UIManager{
     const session=this.state.getActiveSession();
     const sessionId=this.state.get('currentId');
     let sessionDirty=false;
+    let sessionMarkedDirty=false;
     const input=Utils.$('#input');
     if(!session||!input){
       this.isSending=false;
@@ -2409,6 +2410,10 @@ class UIManager{
       if (typeof this.flushUpdates === 'function') this.flushUpdates();
       input.value='';
       sessionDirty=true;
+      if(sessionId){
+        this.state.markSessionsDirty(sessionId);
+        sessionMarkedDirty=true;
+      }
     }
     
     const preset=this.state.getCurrentPreset();
@@ -2496,7 +2501,7 @@ this.appendMessage({
         sessionDirty=true;
       }
     }finally{
-      if(sessionDirty&&sessionId) this.state.markSessionsDirty(sessionId);
+      if(sessionDirty&&sessionId&&!sessionMarkedDirty) this.state.markSessionsDirty(sessionId);
       setTimeout(()=>{ try{ this._releaseAutoStick(); }catch{} }, 240);
       if(this._vvAvailable) setTimeout(()=>this.unfreezeViewport(), 200);
       this.isSending=false;
