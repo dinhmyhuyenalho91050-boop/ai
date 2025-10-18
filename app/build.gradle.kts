@@ -46,6 +46,13 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+
+    sourceSets {
+        getByName("main") {
+            res.srcDirs("src/main/res", "../android_res")
+            assets.setSrcDirs(listOf("src/main/assets"))
+        }
+    }
 }
 
 dependencies {
