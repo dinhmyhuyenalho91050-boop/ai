@@ -1898,10 +1898,18 @@ class UIManager{
   
   ensureBottom(retries=2, delay=120){
     const box=Utils.$('#messages'); if(!box) return;
-    const stick=()=>{ try{ box.scrollTop = box.scrollHeight; }catch(_){} };
+    const stick=()=>{
+      try{
+        if(typeof this._smoothStickBottom==='function'){
+          this._smoothStickBottom(200);
+        }else{
+          box.scrollTop = box.scrollHeight;
+        }
+      }catch(_){ }
+    };
     requestAnimationFrame(()=>{
       stick();
-      requestAnimationFrame(()=>{ stick(); });
+      requestAnimationFrame(()=>{ if(typeof this._smoothStickBottom!=='function'){ stick(); } });
     });
     if(retries>0){
       setTimeout(()=>this.ensureBottom(retries-1, delay), delay);
@@ -1914,7 +1922,13 @@ class UIManager{
     this._suppressAutoStick=false;
     this._pendingStick=false;
     if(doStick && box){
-      requestAnimationFrame(()=>{ box.scrollTop = box.scrollHeight; });
+      requestAnimationFrame(()=>{
+        if(typeof this._smoothStickBottom==='function'){
+          this._smoothStickBottom(200);
+        }else{
+          box.scrollTop = box.scrollHeight;
+        }
+      });
     }
   }
 
@@ -2227,7 +2241,13 @@ class UIManager{
     
     this.updateLoadTip(box,win);
     
-    if(scrollToBottom){ if(!this._suppressAutoStick){ requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; }); this.ensureBottom(1, 140); } else { this._pendingStick=true; } }
+    if(scrollToBottom){
+      if(!this._suppressAutoStick){
+        this.ensureBottom(1, 140);
+      }else{
+        this._pendingStick=true;
+      }
+    }
   }
   
   // ✅ 核心改进：复用子元素而不是重建
@@ -2461,9 +2481,15 @@ class UIManager{
     if(fragment.childNodes.length){
       box.appendChild(fragment);
       __addedEls.forEach(el=>this.animateIn(el));
-      
+
       if(isNearBottom && !this._suppressAutoStick){
-        requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
+        requestAnimationFrame(()=>{
+          if(typeof this._smoothStickBottom==='function'){
+            this._smoothStickBottom(200);
+          }else{
+            box.scrollTop=box.scrollHeight;
+          }
+        });
       }else if(isNearBottom){
         this._pendingStick=true;
       }
@@ -2680,8 +2706,14 @@ this.appendMessage({
     requestAnimationFrame(()=>{
   this.dom.batchUpdate(()=>{
 box.appendChild(el);
-      if(this.isNearBottom(box))box.scrollTop=box.scrollHeight;
-    
+      if(this.isNearBottom(box)){
+        if(typeof this._smoothStickBottom==='function'){
+          this._smoothStickBottom(160);
+        }else{
+          box.scrollTop=box.scrollHeight;
+        }
+      }
+
   });
 });
     
@@ -2772,7 +2804,11 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       
       if(shouldStick&&box && (typeof _lastDeltaChars!=='number' || _lastDeltaChars >= (window.__STREAM_CFG&&window.__STREAM_CFG.scrollDeltaMin||8))){ if(!this._scrollRAF){
           this._scrollRAF=requestAnimationFrame(()=>{
-            box.scrollTop=box.scrollHeight;
+            if(typeof this._smoothStickBottom==='function'){
+              this._smoothStickBottom(160);
+            }else{
+              box.scrollTop=box.scrollHeight;
+            }
             this._scrollRAF=null;
           });
         }
@@ -3553,8 +3589,6 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           this.renderMessages(true);
           this.renderSidebar();
           this.setupTopObserver();
-    if(this._setupIMEHandlers) this._setupIMEHandlers();
-    if(this._updateBottomPadding) this._updateBottomPadding();
           
           sidebar.classList.remove('open');
           backdrop.classList.remove('show');
@@ -3575,13 +3609,11 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
             
             this.state.set('sessions',sessions);
             this.state.set('currentId',newId);
-            
+
             if(newId){
               this.clearMessages();
               this.renderMessages(true);
               this.setupTopObserver();
-    if(this._setupIMEHandlers) this._setupIMEHandlers();
-    if(this._updateBottomPadding) this._updateBottomPadding();
             }else{
               this.createNewSession();
             }
@@ -4098,27 +4130,66 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     this._updateBottomPadding = ()=>{
       const composer = document.querySelector('.composer');
       const composerH = composer ? (composer.offsetHeight || 0) : 0;
-      let vvInset = 0;
+      const nativeState = window.__NATIVE_IME_STATE__;
+      const nativeActive = document.body.classList.contains('kb-open-native');
 
-      if(this._vvAvailable){
-        try{
-          const vv = visualViewport;
-          const vvHeight = Math.round(vv.height);
-          if(vvHeight>0){
-            root.style.setProperty('--vvh', vvHeight + 'px');
-          }
-          const innerH = window.innerHeight || vv.height;
-          vvInset = Math.max(0, Math.round(innerH - vv.height - vv.offsetTop));
-        }catch(e){}
-      }else{
-        const h = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
-        if(h>0){
-          root.style.setProperty('--vvh', h + 'px');
+      let imeOffset = 0;
+      let vvHeight = 0;
+
+      if(nativeActive && nativeState){
+        if(typeof nativeState.bottom === 'number'){
+          imeOffset = Math.max(0, Math.round(nativeState.bottom));
+        }else{
+          const pb = parseFloat(document.body.style.paddingBottom || '0');
+          imeOffset = Number.isFinite(pb) ? Math.max(0, Math.round(pb)) : 0;
+        }
+        if(typeof nativeState.viewport === 'number'){
+          vvHeight = Math.max(0, Math.round(nativeState.viewport));
         }
       }
 
-      root.style.setProperty('--ime-offset', Math.max(0, vvInset) + 'px');
-      const pad = Math.round(composerH + 16);
+      if(!nativeActive){
+        if(this._vvAvailable){
+          try{
+            const vv = visualViewport;
+            const vvHeightCandidate = Math.round(vv.height);
+            if(vvHeightCandidate>0){
+              vvHeight = vvHeightCandidate;
+            }
+            const innerH = window.innerHeight || vv.height;
+            const inset = Math.max(0, Math.round(innerH - vv.height - vv.offsetTop));
+            imeOffset = inset;
+          }catch(e){}
+        }else{
+          const h = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
+          if(h>0){
+            vvHeight = h;
+          }
+        }
+      }
+
+      if(!vvHeight){
+        const fallback = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
+        if(fallback>0){
+          vvHeight = fallback;
+        }
+      }
+
+      if(vvHeight>0){
+        root.style.setProperty('--vvh', vvHeight + 'px');
+        if(this._ime){
+          if(!this._ime.baseVVH || vvHeight > this._ime.baseVVH){
+            this._ime.baseVVH = vvHeight;
+          }
+        }
+      }
+
+      root.style.setProperty('--ime-offset', Math.max(0, imeOffset) + 'px');
+      if(!nativeActive){
+        document.body.style.paddingBottom = Math.max(0, imeOffset) + 'px';
+      }
+
+      const pad = Math.round(composerH + 8);
       box.style.setProperty('--composer-pad', pad + 'px');
     };
     const updatePad = Utils.rafThrottle(()=> this._updateBottomPadding());
@@ -4284,18 +4355,47 @@ if(document.readyState==='loading'){
 (function(){
   const root=document.documentElement;
   const state={bottom:0,viewport:null};
+  let lastBottom=-1;
+  window.__NATIVE_IME_STATE__=state;
   const apply=()=>{
     const bottom=Math.max(0,state.bottom||0);
-    root.style.setProperty('--ime-offset', bottom + 'px');
-    if(typeof state.viewport==='number' && state.viewport>0){
-      root.style.setProperty('--vvh', state.viewport + 'px');
-    }
+    const viewport=typeof state.viewport==='number'?Math.max(0,state.viewport):0;
     if(bottom>0){
       document.body.classList.add('kb-open-native');
     }else{
       document.body.classList.remove('kb-open-native');
     }
     document.body.style.paddingBottom=bottom+'px';
+    root.style.setProperty('--ime-offset', bottom + 'px');
+    if(viewport>0){
+      root.style.setProperty('--vvh', viewport + 'px');
+    }
+
+    const ui = window.chatApp && window.chatApp.ui;
+    if(ui){
+      try{
+        if(viewport>0 && ui._ime){
+          if(!ui._ime.baseVVH || viewport>ui._ime.baseVVH){
+            ui._ime.baseVVH=viewport;
+          }
+        }
+        if(typeof ui._updateBottomPadding==='function'){
+          ui._updateBottomPadding();
+        }
+        if(bottom>0 && bottom!==lastBottom && ui._ime && ui._ime.active){
+          const box=document.querySelector('#messages');
+          const near=ui._ime.wasNearBottom || (box && typeof ui.isNearBottom==='function' && ui.isNearBottom(box));
+          if(near && typeof ui._smoothStickBottom==='function'){
+            requestAnimationFrame(()=>{
+              ui._smoothStickBottom(220);
+              ui._ime.wasNearBottom=true;
+            });
+          }
+        }
+      }catch(e){}
+    }
+
+    lastBottom=bottom;
   };
   window.__NATIVE_IME__={
     update(payload){
