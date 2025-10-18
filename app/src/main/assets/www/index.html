@@ -10,7 +10,7 @@
     --accent3:#10b981;--danger:#ef4444;--border:#1f2937;--shadow:rgba(0,0,0,.3);--glow:rgba(96,165,250,.15);
     --transition-fast:.15s cubic-bezier(0.4,0,0.2,1);--transition-normal:.2s ease;--transition-slow:.3s cubic-bezier(.4,0,.2,1);
     --shadow-sm:0 2px 8px var(--shadow);--shadow-md:0 4px 16px var(--shadow);--shadow-lg:0 22px 60px rgba(0,0,0,.55);
-    --native-ime-bottom:0px;--native-ime-total-bottom:0px;--native-viewport-height:100vh;--composer-ime-offset:0px;
+    --native-ime-bottom:0px;--native-ime-total-bottom:0px;--native-viewport-height:100vh;
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%}
@@ -68,8 +68,7 @@
     #backdrop.show{opacity:1;pointer-events:auto}
   }
   .chat{flex:1;display:flex;flex-direction:column;overflow:hidden}
-  .messages{flex:1;overflow:auto;padding:1rem;min-height:120px;position:relative;padding-bottom:calc(var(--composer-pad, 0px) + 1rem);
-    transition:padding-bottom var(--transition-slow);}
+  .messages{flex:1;overflow:auto;padding:1rem;min-height:120px;position:relative;padding-bottom:calc(var(--composer-pad, 0px) + 1rem);}
   .messages::-webkit-scrollbar{width:0;height:0}
   .messages{scrollbar-width:none;-ms-overflow-style:none}
   @media (max-width:640px){.messages{padding:.75rem .5rem}}
@@ -96,8 +95,7 @@
   details summary:hover{color:var(--accent)!important}
   details summary::marker{color:var(--accent2)}
   .composer{flex-shrink:0;display:flex;flex-direction:column;gap:.75rem;padding:.75rem;border-top:1px solid var(--border);
-    background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1));transform:translateY(calc(-1 * var(--composer-ime-offset,0px)));
-    transition:transform var(--transition-slow);will-change:transform;}
+    background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1));}
   .composer-header{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
   .composer-header .model-selector{flex:1;max-width:400px}
   .composer-main{display:flex;gap:.6rem}
@@ -4020,10 +4018,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     this._ime={
       active:false,
       baseVVH:(this._vvAvailable?visualViewport.height:null),
-      baseInnerH:typeof window!=='undefined'?window.innerHeight:null,
       nativeBottom:0,
       wasNearBottom:false,
-      stickScheduled:false,
     };
     this._updateBottomPadding=()=>{
       const composer=document.querySelector('.composer');
@@ -4039,24 +4035,6 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       const keyboardInset=Math.max(vvInset,nativeInset);
       const pad=Math.round(composerH+keyboardInset+8);
       box.style.setProperty('--composer-pad',pad+'px');
-      const docEl=document.documentElement;
-      if(docEl){
-        const offset=Math.round(keyboardInset);
-        if(offset>0){
-          docEl.style.setProperty('--composer-ime-offset',offset+'px');
-        }else{
-          docEl.style.removeProperty('--composer-ime-offset');
-        }
-      }
-      if(this._ime?.active&&this._ime.wasNearBottom&&!this._ime.stickScheduled){
-        this._ime.stickScheduled=true;
-        requestAnimationFrame(()=>{
-          this._ime.stickScheduled=false;
-          if(!this.isNearBottom(box)){
-            this._smoothStickBottom(220);
-          }
-        });
-      }
     };
     const updatePad=Utils.rafThrottle(()=>this._updateBottomPadding());
 
@@ -4081,16 +4059,11 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       this.events.on(input,'focus',()=>{
         this._ime.active=true;
         this._ime.wasNearBottom=this.isNearBottom(box);
-        this._ime.baseVVH=this._vvAvailable?visualViewport.height:this._ime.baseVVH;
-        this._ime.baseInnerH=typeof window!=='undefined'?window.innerHeight:this._ime.baseInnerH;
-        this._ime.stickScheduled=false;
         updatePad();
       });
       this.events.on(input,'blur',()=>{
         this._ime.active=false;
         setTimeout(()=>{
-          this._ime.baseVVH=this._vvAvailable?visualViewport.height:this._ime.baseVVH;
-          this._ime.baseInnerH=typeof window!=='undefined'?window.innerHeight:this._ime.baseInnerH;
           updatePad();
           if(this.isNearBottom(box))this._smoothStickBottom(180);
         },60);
@@ -4103,32 +4076,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         const h=visualViewport.height;
         if(this._ime.baseVVH==null)this._ime.baseVVH=h;
         const delta=this._ime.baseVVH-h;
-        const keyboardLikelyOpen=delta>40;
+        const keyboardLikelyOpen=delta>80;
         if(keyboardLikelyOpen&&this._ime.active&&this._ime.wasNearBottom){
           requestAnimationFrame(()=>this._smoothStickBottom(220));
-        }else if(!keyboardLikelyOpen&&!this._ime.active){
-          this._ime.baseVVH=h;
         }
       });
       this.events.on(visualViewport,'resize',onVVResize,{passive:true});
       this.events.on(visualViewport,'scroll',updatePad,{passive:true});
     }
 
-    const onWindowResize=Utils.rafThrottle(()=>{
-      updatePad();
-      if(!this._ime)return;
-      const innerH=typeof window!=='undefined'?window.innerHeight:null;
-      if(innerH==null)return;
-      if(this._ime.baseInnerH==null)this._ime.baseInnerH=innerH;
-      const delta=this._ime.baseInnerH-innerH;
-      const keyboardLikelyOpen=delta>40;
-      if(keyboardLikelyOpen&&this._ime.active&&this._ime.wasNearBottom){
-        requestAnimationFrame(()=>this._smoothStickBottom(220));
-      }else if(!keyboardLikelyOpen&&!this._ime.active){
-        this._ime.baseInnerH=innerH;
-      }
-    });
-    this.events.on(window,'resize',onWindowResize,{passive:true});
+    this.events.on(window,'resize',updatePad,{passive:true});
     const onNativeIME=(evt)=>{
       if(!this._ime)return;
       const detail=evt?.detail||{};
@@ -4137,19 +4094,13 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       this._ime.nativeBottom=Math.max(0,Number(nativeBottom)||0);
       if((detail.bottom??0)>0){
         this._ime.wasNearBottom=this.isNearBottom(box);
+        if(this._ime.active&&this._ime.wasNearBottom){
+          requestAnimationFrame(()=>this._smoothStickBottom(220));
+        }
       }else{
         this._ime.wasNearBottom=false;
       }
       updatePad();
-      if(this._ime.nativeBottom>0&&this._ime.wasNearBottom&&!this._ime.stickScheduled){
-        this._ime.stickScheduled=true;
-        requestAnimationFrame(()=>{
-          this._ime.stickScheduled=false;
-          if(this._ime.nativeBottom>0&&!this.isNearBottom(box)){
-            this._smoothStickBottom(220);
-          }
-        });
-      }
     };
     this.events.on(window,'nativeimechange',onNativeIME,{passive:true});
     requestAnimationFrame(()=>this._updateBottomPadding());
