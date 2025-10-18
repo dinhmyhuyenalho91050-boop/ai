@@ -1044,6 +1044,33 @@ class StorageManager{
   }
 }
 
+if(window.AndroidStorage){
+  console.info('Using Android native storage bridge');
+  StorageManager.init=async()=>true;
+  StorageManager.load=async(key,fallback)=>{
+    try{
+      const raw=window.AndroidStorage.getItem(key);
+      if(raw===null||raw===undefined||raw==='')return fallback;
+      return JSON.parse(raw);
+    }catch(e){
+      console.error('Android storage load error:',e);
+      return fallback;
+    }
+  };
+  StorageManager.save=async(key,value)=>{
+    try{
+      const raw=value===undefined?null:JSON.stringify(value);
+      window.AndroidStorage.setItem(key,raw);
+      return true;
+    }catch(e){
+      console.error('Android storage save error:',e);
+      ErrorHandler.show('数据保存失败: '+e.message,4000);
+      return false;
+    }
+  };
+  StorageManager.flush=async()=>true;
+}
+
 // ===== ErrorHandler =====
 class ErrorHandler{
   static show(message,duration=3000){
