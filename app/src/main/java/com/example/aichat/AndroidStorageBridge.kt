@@ -1,12 +1,20 @@
 package com.example.aichat
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.webkit.JavascriptInterface
+import android.widget.Toast
+import java.io.File
+import java.io.FileOutputStream
 
 class AndroidStorageBridge(context: Context) {
+    private val appContext = context.applicationContext
     private val prefs: SharedPreferences =
-        context.getSharedPreferences("storage_manager", Context.MODE_PRIVATE)
+        appContext.getSharedPreferences("storage_manager", Context.MODE_PRIVATE)
 
     @JavascriptInterface
     fun getItem(key: String): String? = prefs.getString(key, null)
@@ -30,5 +38,69 @@ class AndroidStorageBridge(context: Context) {
     @JavascriptInterface
     fun clear() {
         prefs.edit().clear().apply()
+    }
+
+    @JavascriptInterface
+    fun exportJson(filename: String, content: String): Boolean {
+        val trimmed = filename.trim()
+        val baseName = if (trimmed.isEmpty()) {
+            "chat-export-${System.currentTimeMillis()}"
+        } else {
+            trimmed
+        }
+        val sanitized = baseName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+        val safeName = if (sanitized.endsWith(".json", ignoreCase = true)) {
+            sanitized
+        } else {
+            "$sanitized.json"
+        }
+
+        return try {
+            val bytes = content.toByteArray(Charsets.UTF_8)
+            var savedPath: String? = null
+            val success = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = appContext.contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, safeName)
+                    put(MediaStore.Downloads.MIME_TYPE, "application/json")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    resolver.openOutputStream(uri)?.use { output ->
+                        output.write(bytes)
+                    } ?: return false
+                    values.clear()
+                    values.put(MediaStore.Downloads.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                    savedPath = "下载/$safeName"
+                    true
+                } else {
+                    false
+                }
+            } else {
+                val dir = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                    ?: appContext.filesDir
+                if (!dir.exists()) {
+                    dir.mkdirs()
+                }
+                val file = File(dir, safeName)
+                FileOutputStream(file).use { output ->
+                    output.write(bytes)
+                }
+                savedPath = file.absolutePath
+                true
+            }
+
+            if (success) {
+                val message = savedPath?.let { "已导出: $it" } ?: "已导出到下载目录: $safeName"
+                Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show()
+            }
+
+            success
+        } catch (e: Exception) {
+            Toast.makeText(appContext, "导出失败: ${e.message}", Toast.LENGTH_LONG).show()
+            false
+        }
     }
 }
