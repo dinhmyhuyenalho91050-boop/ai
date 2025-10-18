@@ -1898,10 +1898,18 @@ class UIManager{
   
   ensureBottom(retries=2, delay=120){
     const box=Utils.$('#messages'); if(!box) return;
-    const stick=()=>{ try{ box.scrollTop = box.scrollHeight; }catch(_){} };
+    const stick=()=>{
+      try{
+        if(typeof this._smoothStickBottom==='function'){
+          this._smoothStickBottom(200);
+        }else{
+          box.scrollTop = box.scrollHeight;
+        }
+      }catch(_){ }
+    };
     requestAnimationFrame(()=>{
       stick();
-      requestAnimationFrame(()=>{ stick(); });
+      requestAnimationFrame(()=>{ if(typeof this._smoothStickBottom!=='function'){ stick(); } });
     });
     if(retries>0){
       setTimeout(()=>this.ensureBottom(retries-1, delay), delay);
@@ -1914,7 +1922,13 @@ class UIManager{
     this._suppressAutoStick=false;
     this._pendingStick=false;
     if(doStick && box){
-      requestAnimationFrame(()=>{ box.scrollTop = box.scrollHeight; });
+      requestAnimationFrame(()=>{
+        if(typeof this._smoothStickBottom==='function'){
+          this._smoothStickBottom(200);
+        }else{
+          box.scrollTop = box.scrollHeight;
+        }
+      });
     }
   }
 
@@ -2227,7 +2241,13 @@ class UIManager{
     
     this.updateLoadTip(box,win);
     
-    if(scrollToBottom){ if(!this._suppressAutoStick){ requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; }); this.ensureBottom(1, 140); } else { this._pendingStick=true; } }
+    if(scrollToBottom){
+      if(!this._suppressAutoStick){
+        this.ensureBottom(1, 140);
+      }else{
+        this._pendingStick=true;
+      }
+    }
   }
   
   // ✅ 核心改进：复用子元素而不是重建
@@ -2461,9 +2481,15 @@ class UIManager{
     if(fragment.childNodes.length){
       box.appendChild(fragment);
       __addedEls.forEach(el=>this.animateIn(el));
-      
+
       if(isNearBottom && !this._suppressAutoStick){
-        requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
+        requestAnimationFrame(()=>{
+          if(typeof this._smoothStickBottom==='function'){
+            this._smoothStickBottom(200);
+          }else{
+            box.scrollTop=box.scrollHeight;
+          }
+        });
       }else if(isNearBottom){
         this._pendingStick=true;
       }
@@ -2680,8 +2706,14 @@ this.appendMessage({
     requestAnimationFrame(()=>{
   this.dom.batchUpdate(()=>{
 box.appendChild(el);
-      if(this.isNearBottom(box))box.scrollTop=box.scrollHeight;
-    
+      if(this.isNearBottom(box)){
+        if(typeof this._smoothStickBottom==='function'){
+          this._smoothStickBottom(160);
+        }else{
+          box.scrollTop=box.scrollHeight;
+        }
+      }
+
   });
 });
     
@@ -2772,7 +2804,11 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       
       if(shouldStick&&box && (typeof _lastDeltaChars!=='number' || _lastDeltaChars >= (window.__STREAM_CFG&&window.__STREAM_CFG.scrollDeltaMin||8))){ if(!this._scrollRAF){
           this._scrollRAF=requestAnimationFrame(()=>{
-            box.scrollTop=box.scrollHeight;
+            if(typeof this._smoothStickBottom==='function'){
+              this._smoothStickBottom(160);
+            }else{
+              box.scrollTop=box.scrollHeight;
+            }
             this._scrollRAF=null;
           });
         }
@@ -3553,8 +3589,6 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           this.renderMessages(true);
           this.renderSidebar();
           this.setupTopObserver();
-    if(this._setupIMEHandlers) this._setupIMEHandlers();
-    if(this._updateBottomPadding) this._updateBottomPadding();
           
           sidebar.classList.remove('open');
           backdrop.classList.remove('show');
@@ -3575,13 +3609,11 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
             
             this.state.set('sessions',sessions);
             this.state.set('currentId',newId);
-            
+
             if(newId){
               this.clearMessages();
               this.renderMessages(true);
               this.setupTopObserver();
-    if(this._setupIMEHandlers) this._setupIMEHandlers();
-    if(this._updateBottomPadding) this._updateBottomPadding();
             }else{
               this.createNewSession();
             }
@@ -4117,8 +4149,12 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         }
       }
 
-      root.style.setProperty('--ime-offset', Math.max(0, vvInset) + 'px');
-      const pad = Math.round(composerH + 16);
+      const imeOffset = Math.max(0, vvInset);
+      root.style.setProperty('--ime-offset', imeOffset + 'px');
+      if(!document.body.classList.contains('kb-open-native')){
+        document.body.style.paddingBottom = imeOffset + 'px';
+      }
+      const pad = Math.round(composerH + 8);
       box.style.setProperty('--composer-pad', pad + 'px');
     };
     const updatePad = Utils.rafThrottle(()=> this._updateBottomPadding());
