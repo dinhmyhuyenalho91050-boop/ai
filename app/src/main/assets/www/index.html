@@ -3952,76 +3952,110 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
 
   /* ===== IME-aware auto scroll & bottom padding ===== */
   _setupIMEHandlers(){
-    const box = Utils.$('#messages');
-    const input = Utils.$('#input');
-    if(!box) return;
-    this._ime = {
-      active: false,
-      baseVVH: (this._vvAvailable ? visualViewport.height : null),
-      wasNearBottom: false,
+    const box=Utils.$('#messages');
+    const input=Utils.$('#input');
+    if(!box)return;
+    this._ime={
+      active:false,
+      baseVVH:(this._vvAvailable?visualViewport.height:null),
+      baseInnerH:typeof window!=='undefined'?window.innerHeight:null,
+      wasNearBottom:false,
+      stickScheduled:false,
     };
-    // updater
-    this._updateBottomPadding = ()=>{
-      const composer = document.querySelector('.composer');
-      const composerH = composer ? (composer.offsetHeight || 0) : 0;
-      let vvInset = 0;
+    this._updateBottomPadding=()=>{
+      const composer=document.querySelector('.composer');
+      const composerH=composer?(composer.offsetHeight||0):0;
+      let vvInset=0;
       if(this._vvAvailable){
         try{
-          const ov = Math.max(0, (window.innerHeight - visualViewport.height - visualViewport.offsetTop));
-          vvInset = ov;
+          const ov=Math.max(0,(window.innerHeight-visualViewport.height-visualViewport.offsetTop));
+          vvInset=ov;
         }catch(e){}
       }
-      const pad = Math.round(composerH + vvInset + 8);
-      box.style.setProperty('--composer-pad', pad + 'px');
+      const pad=Math.round(composerH+vvInset+8);
+      box.style.setProperty('--composer-pad',pad+'px');
+      if(this._ime?.active&&this._ime.wasNearBottom&&!this._ime.stickScheduled){
+        this._ime.stickScheduled=true;
+        requestAnimationFrame(()=>{
+          this._ime.stickScheduled=false;
+          if(!this.isNearBottom(box)){
+            this._smoothStickBottom(220);
+          }
+        });
+      }
     };
-    const updatePad = Utils.rafThrottle(()=> this._updateBottomPadding());
+    const updatePad=Utils.rafThrottle(()=>this._updateBottomPadding());
 
-    this._smoothStickBottom = (duration=220)=>{
-      const start = box.scrollTop;
-      const target = box.scrollHeight - box.clientHeight;
-      if(target - start < 2) return;
-      const t0 = performance.now();
-      const ease = t => (t<.5 ? 2*t*t : 1 - Math.pow(-2*t+2,2)/2);
-      const step = (now)=>{
-        const p = Math.min(1,(now - t0)/duration);
-        box.scrollTop = start + (target - start) * ease(p);
-        if(p<1) requestAnimationFrame(step);
+    this._smoothStickBottom=(duration=220)=>{
+      const start=box.scrollTop;
+      const target=box.scrollHeight-box.clientHeight;
+      if(target-start<2){
+        box.scrollTop=target;
+        return;
+      }
+      const t0=performance.now();
+      const ease=t=>(t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2);
+      const step=(now)=>{
+        const p=Math.min(1,(now-t0)/duration);
+        box.scrollTop=start+(target-start)*ease(p);
+        if(p<1)requestAnimationFrame(step);
       };
       requestAnimationFrame(step);
     };
 
     if(input){
-      this.events.on(input, 'focus', ()=>{
-        this._ime.active = true;
-        this._ime.wasNearBottom = this.isNearBottom(box);
+      this.events.on(input,'focus',()=>{
+        this._ime.active=true;
+        this._ime.wasNearBottom=this.isNearBottom(box);
+        this._ime.baseVVH=this._vvAvailable?visualViewport.height:this._ime.baseVVH;
+        this._ime.baseInnerH=typeof window!=='undefined'?window.innerHeight:this._ime.baseInnerH;
+        this._ime.stickScheduled=false;
         updatePad();
       });
-      this.events.on(input, 'blur', ()=>{
-        this._ime.active = false;
+      this.events.on(input,'blur',()=>{
+        this._ime.active=false;
         setTimeout(()=>{
+          this._ime.baseVVH=this._vvAvailable?visualViewport.height:this._ime.baseVVH;
+          this._ime.baseInnerH=typeof window!=='undefined'?window.innerHeight:this._ime.baseInnerH;
           updatePad();
-          if(this.isNearBottom(box)) this._smoothStickBottom(180);
-        }, 60);
+          if(this.isNearBottom(box))this._smoothStickBottom(180);
+        },60);
       });
     }
 
     if(this._vvAvailable){
-      const onVVResize = Utils.rafThrottle(()=>{
+      const onVVResize=Utils.rafThrottle(()=>{
         updatePad();
-        const h = visualViewport.height;
-        if(this._ime.baseVVH == null) this._ime.baseVVH = h;
-        const delta = (this._ime.baseVVH - h);
-        const keyboardLikelyOpen = delta > 80;
-        if(keyboardLikelyOpen && this._ime.active && this._ime.wasNearBottom){
-          requestAnimationFrame(()=> this._smoothStickBottom(220));
+        const h=visualViewport.height;
+        if(this._ime.baseVVH==null)this._ime.baseVVH=h;
+        const delta=this._ime.baseVVH-h;
+        const keyboardLikelyOpen=delta>40;
+        if(keyboardLikelyOpen&&this._ime.active&&this._ime.wasNearBottom){
+          requestAnimationFrame(()=>this._smoothStickBottom(220));
+        }else if(!keyboardLikelyOpen&&!this._ime.active){
+          this._ime.baseVVH=h;
         }
       });
-      this.events.on(visualViewport, 'resize', onVVResize, {passive:true});
-      this.events.on(visualViewport, 'scroll', updatePad, {passive:true});
+      this.events.on(visualViewport,'resize',onVVResize,{passive:true});
+      this.events.on(visualViewport,'scroll',updatePad,{passive:true});
     }
 
-    this.events.on(window, 'resize', updatePad, {passive:true});
-    requestAnimationFrame(()=> this._updateBottomPadding());
+    const onWindowResize=Utils.rafThrottle(()=>{
+      updatePad();
+      if(!this._ime)return;
+      const innerH=typeof window!=='undefined'?window.innerHeight:null;
+      if(innerH==null)return;
+      if(this._ime.baseInnerH==null)this._ime.baseInnerH=innerH;
+      const delta=this._ime.baseInnerH-innerH;
+      const keyboardLikelyOpen=delta>40;
+      if(keyboardLikelyOpen&&this._ime.active&&this._ime.wasNearBottom){
+        requestAnimationFrame(()=>this._smoothStickBottom(220));
+      }else if(!keyboardLikelyOpen&&!this._ime.active){
+        this._ime.baseInnerH=innerH;
+      }
+    });
+    this.events.on(window,'resize',onWindowResize,{passive:true});
+    requestAnimationFrame(()=>this._updateBottomPadding());
   }
 }
 
