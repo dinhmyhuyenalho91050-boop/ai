@@ -10,17 +10,24 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.webkit.JavascriptInterface
 import android.widget.Toast
+import android.webkit.WebView
 import java.io.File
 import java.io.FileOutputStream
+import java.lang.ref.WeakReference
+import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import org.json.JSONObject
 
-class AndroidStorageBridge(context: Context) {
+class AndroidStorageBridge(context: Context, webView: WebView) {
     private val appContext = context.applicationContext
     private val prefs: SharedPreferences =
         appContext.getSharedPreferences("storage_manager", Context.MODE_PRIVATE)
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val webViewRef = WeakReference(webView)
+    private val exportScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @JavascriptInterface
     fun getItem(key: String): String? = prefs.getString(key, null)
@@ -47,7 +54,7 @@ class AndroidStorageBridge(context: Context) {
     }
 
     @JavascriptInterface
-    fun exportJson(filename: String, content: String): Boolean {
+    fun exportJson(filename: String, content: String): String {
         val trimmed = filename.trim()
         val baseName = if (trimmed.isEmpty()) {
             "chat-export-${System.currentTimeMillis()}"
@@ -61,13 +68,14 @@ class AndroidStorageBridge(context: Context) {
             "$sanitized.json"
         }
         val bytes = content.toByteArray(Charsets.UTF_8)
-        return try {
-            val (success, savedPath) = runBlocking {
-                withContext(Dispatchers.IO) {
-                    performExport(safeName, bytes)
-                }
-            }
+        val requestId = "android_export_${UUID.randomUUID()}"
 
+        exportScope.launch {
+            val result = runCatching { performExport(safeName, bytes) }
+            val (success, savedPath) = result.getOrElse { false to null }
+            val errorMessage = result.exceptionOrNull()?.message
+
+            var failureForJs: String? = null
             if (success) {
                 val message = savedPath?.let { "已导出: $it" }
                     ?: "已导出到下载目录: $safeName"
@@ -75,17 +83,39 @@ class AndroidStorageBridge(context: Context) {
                     Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show()
                 }
             } else {
+                val failureMessage = errorMessage?.let { "导出失败: $it" }
+                    ?: "导出失败: 未能写入文件"
+                failureForJs = failureMessage
                 mainHandler.post {
-                    Toast.makeText(appContext, "导出失败: 未能写入文件", Toast.LENGTH_LONG)
-                        .show()
+                    Toast.makeText(appContext, failureMessage, Toast.LENGTH_LONG).show()
                 }
             }
-            success
-        } catch (e: Exception) {
-            mainHandler.post {
-                Toast.makeText(appContext, "导出失败: ${e.message}", Toast.LENGTH_LONG).show()
-            }
-            false
+
+            notifyJs(requestId, success, savedPath, failureForJs)
+        }
+
+        return requestId
+    }
+
+    private fun notifyJs(
+        requestId: String,
+        success: Boolean,
+        savedPath: String?,
+        errorMessage: String?
+    ) {
+        val js = buildString {
+            append("if(window.__handleAndroidExportResult){window.__handleAndroidExportResult(")
+            append(JSONObject.quote(requestId))
+            append(',')
+            append(if (success) "true" else "false")
+            append(',')
+            append(savedPath?.let { JSONObject.quote(it) } ?: "null")
+            append(',')
+            append(errorMessage?.let { JSONObject.quote(it) } ?: "null")
+            append(");}")
+        }
+        webViewRef.get()?.post {
+            it.evaluateJavascript(js, null)
         }
     }
 
@@ -109,7 +139,7 @@ class AndroidStorageBridge(context: Context) {
                 savedPath = "下载/$safeName"
                 true
             } else {
-                false
+                throw IllegalStateException("无法创建下载文件")
             }
         } else {
             val dir = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)

@@ -94,7 +94,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView.addJavascriptInterface(AndroidStorageBridge(this), "AndroidStorage")
+        webView.addJavascriptInterface(AndroidStorageBridge(this, webView), "AndroidStorage")
 
         ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
             val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
