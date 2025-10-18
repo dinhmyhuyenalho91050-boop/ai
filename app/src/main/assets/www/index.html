@@ -10,13 +10,12 @@
     --accent3:#10b981;--danger:#ef4444;--border:#1f2937;--shadow:rgba(0,0,0,.3);--glow:rgba(96,165,250,.15);
     --transition-fast:.15s cubic-bezier(0.4,0,0.2,1);--transition-normal:.2s ease;--transition-slow:.3s cubic-bezier(.4,0,.2,1);
     --shadow-sm:0 2px 8px var(--shadow);--shadow-md:0 4px 16px var(--shadow);--shadow-lg:0 22px 60px rgba(0,0,0,.55);
-    --native-ime-bottom:0px;--native-ime-total-bottom:0px;--native-viewport-height:100vh;--composer-ime-offset:0px;
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%}
   body{overflow:hidden;background:linear-gradient(135deg,#0a0e14 0%,#141824 100%);color:var(--fg);
        font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
-  .app{display:flex;flex-direction:column;height:var(--native-viewport-height,100vh);min-height:var(--native-viewport-height,100vh);}
+  .app{display:flex;flex-direction:column;height:100vh}
   header{flex-shrink:0;height:60px;display:flex;align-items:center;justify-content:space-between;padding:0 1.25rem;
     background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1));border-bottom:1px solid var(--border);
     box-shadow:var(--shadow-sm);z-index:100}
@@ -68,8 +67,7 @@
     #backdrop.show{opacity:1;pointer-events:auto}
   }
   .chat{flex:1;display:flex;flex-direction:column;overflow:hidden}
-  .messages{flex:1;overflow:auto;padding:1rem;min-height:120px;position:relative;padding-bottom:calc(var(--composer-pad, 0px) + 1rem);
-    transition:padding-bottom var(--transition-slow);}
+  .messages{flex:1;overflow:auto;padding:1rem;min-height:120px;position:relative;padding-bottom:calc(var(--composer-pad, 0px) + 1rem);}
   .messages::-webkit-scrollbar{width:0;height:0}
   .messages{scrollbar-width:none;-ms-overflow-style:none}
   @media (max-width:640px){.messages{padding:.75rem .5rem}}
@@ -96,8 +94,7 @@
   details summary:hover{color:var(--accent)!important}
   details summary::marker{color:var(--accent2)}
   .composer{flex-shrink:0;display:flex;flex-direction:column;gap:.75rem;padding:.75rem;border-top:1px solid var(--border);
-    background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1));transform:translateY(calc(-1 * var(--composer-ime-offset,0px)));
-    transition:transform var(--transition-slow);will-change:transform;}
+    background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1))}
   .composer-header{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
   .composer-header .model-selector{flex:1;max-width:400px}
   .composer-main{display:flex;gap:.6rem}
@@ -106,16 +103,8 @@
   .composer textarea:focus{outline:none;border-color:var(--accent2);box-shadow:0 0 0 3px var(--glow)}
   .composer textarea::placeholder{color:var(--muted)}
   dialog{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);margin:0;border:none;border-radius:1rem;background:var(--panel);color:var(--fg);
-    width:min(960px,94vw);max-height:88vh;padding:0;box-shadow:var(--shadow-lg);z-index:1200;transition:top var(--transition-slow),transform var(--transition-slow);}
+    width:min(960px,94vw);max-height:88vh;padding:0;box-shadow:var(--shadow-lg);z-index:1200}
   dialog::backdrop{background:rgba(0,0,0,.7)}
-  body.ime-open dialog{
-    top:max(24px,calc(50% - var(--native-ime-bottom,0px)/2));
-    transform:translate(-50%,-50%);
-    max-height:max(320px,calc(var(--native-viewport-height,100vh) - 32px));
-    margin-bottom:var(--native-ime-total-bottom,0px);
-  }
-  body.ime-open dialog .settings{max-height:max(280px,calc(var(--native-viewport-height,100vh) - 80px));}
-  body.ime-open dialog .pane{max-height:max(160px,calc(var(--native-viewport-height,100vh) - 212px));}
   .settings{display:grid;grid-template-columns:200px 1fr;min-height:500px}
   .settings .tabs{border-right:1px solid var(--border);background:rgba(0,0,0,.2);overflow:auto}
   .settings .tabs::-webkit-scrollbar{width:0;height:0}
@@ -3430,14 +3419,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       this.events.on(btnSettings,'click',()=>{
         this.loadSettingsUI();
         this.updateStorageInfo();
-        const dlg=Utils.$('#dlgSettings');
-        dlg?.showModal();
-        if(dlg){
-          dlg.addEventListener('close',()=>{
-            requestAnimationFrame(()=>window.__NATIVE_IME__?.refresh?.());
-          },{once:true});
-        }
-        window.__NATIVE_IME__?.refresh?.();
+        Utils.$('#dlgSettings')?.showModal();
       });
     }
   }
@@ -4014,145 +3996,96 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
 
   /* ===== IME-aware auto scroll & bottom padding ===== */
   _setupIMEHandlers(){
-    const box=Utils.$('#messages');
-    const input=Utils.$('#input');
-    if(!box)return;
-    this._ime={
-      active:false,
-      baseVVH:(this._vvAvailable?visualViewport.height:null),
-      baseInnerH:typeof window!=='undefined'?window.innerHeight:null,
-      nativeBottom:0,
-      wasNearBottom:false,
-      stickScheduled:false,
+    const box = Utils.$('#messages');
+    const input = Utils.$('#input');
+    if(!box) return;
+    this._ime = {
+      active: false,
+      baseVVH: (this._vvAvailable ? visualViewport.height : null),
+      nativeBottom: 0,
+      wasNearBottom: false,
     };
-    this._updateBottomPadding=()=>{
-      const composer=document.querySelector('.composer');
-      const composerH=composer?(composer.offsetHeight||0):0;
-      let vvInset=0;
+    // updater
+    this._updateBottomPadding = ()=>{
+      const composer = document.querySelector('.composer');
+      const composerH = composer ? (composer.offsetHeight || 0) : 0;
+      let vvInset = 0;
       if(this._vvAvailable){
         try{
-          const ov=Math.max(0,(window.innerHeight-visualViewport.height-visualViewport.offsetTop));
-          vvInset=ov;
+          const ov = Math.max(0, (window.innerHeight - visualViewport.height - visualViewport.offsetTop));
+          vvInset = ov;
         }catch(e){}
       }
-      const nativeInset=this._ime?.nativeBottom||0;
-      const keyboardInset=Math.max(vvInset,nativeInset);
-      const pad=Math.round(composerH+keyboardInset+8);
-      box.style.setProperty('--composer-pad',pad+'px');
-      const docEl=document.documentElement;
-      if(docEl){
-        const offset=Math.round(keyboardInset);
-        if(offset>0){
-          docEl.style.setProperty('--composer-ime-offset',offset+'px');
-        }else{
-          docEl.style.removeProperty('--composer-ime-offset');
-        }
-      }
-      if(this._ime?.active&&this._ime.wasNearBottom&&!this._ime.stickScheduled){
-        this._ime.stickScheduled=true;
-        requestAnimationFrame(()=>{
-          this._ime.stickScheduled=false;
-          if(!this.isNearBottom(box)){
-            this._smoothStickBottom(220);
-          }
-        });
-      }
+      const nativeInset = this._ime?.nativeBottom || 0;
+      const keyboardInset = Math.max(vvInset, nativeInset);
+      const pad = Math.round(composerH + keyboardInset + 8);
+      box.style.setProperty('--composer-pad', pad + 'px');
     };
-    const updatePad=Utils.rafThrottle(()=>this._updateBottomPadding());
+    const updatePad = Utils.rafThrottle(()=> this._updateBottomPadding());
 
-    this._smoothStickBottom=(duration=220)=>{
-      const start=box.scrollTop;
-      const target=box.scrollHeight-box.clientHeight;
-      if(target-start<2){
-        box.scrollTop=target;
-        return;
-      }
-      const t0=performance.now();
-      const ease=t=>(t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2);
-      const step=(now)=>{
-        const p=Math.min(1,(now-t0)/duration);
-        box.scrollTop=start+(target-start)*ease(p);
-        if(p<1)requestAnimationFrame(step);
+    this._smoothStickBottom = (duration=220)=>{
+      const start = box.scrollTop;
+      const target = box.scrollHeight - box.clientHeight;
+      if(target - start < 2) return;
+      const t0 = performance.now();
+      const ease = t => (t<.5 ? 2*t*t : 1 - Math.pow(-2*t+2,2)/2);
+      const step = (now)=>{
+        const p = Math.min(1,(now - t0)/duration);
+        box.scrollTop = start + (target - start) * ease(p);
+        if(p<1) requestAnimationFrame(step);
       };
       requestAnimationFrame(step);
     };
 
     if(input){
-      this.events.on(input,'focus',()=>{
-        this._ime.active=true;
-        this._ime.wasNearBottom=this.isNearBottom(box);
-        this._ime.baseVVH=this._vvAvailable?visualViewport.height:this._ime.baseVVH;
-        this._ime.baseInnerH=typeof window!=='undefined'?window.innerHeight:this._ime.baseInnerH;
-        this._ime.stickScheduled=false;
+      this.events.on(input, 'focus', ()=>{
+        this._ime.active = true;
+        this._ime.wasNearBottom = this.isNearBottom(box);
         updatePad();
       });
-      this.events.on(input,'blur',()=>{
-        this._ime.active=false;
+      this.events.on(input, 'blur', ()=>{
+        this._ime.active = false;
         setTimeout(()=>{
-          this._ime.baseVVH=this._vvAvailable?visualViewport.height:this._ime.baseVVH;
-          this._ime.baseInnerH=typeof window!=='undefined'?window.innerHeight:this._ime.baseInnerH;
           updatePad();
-          if(this.isNearBottom(box))this._smoothStickBottom(180);
-        },60);
+          if(this.isNearBottom(box)) this._smoothStickBottom(180);
+        }, 60);
       });
     }
 
     if(this._vvAvailable){
-      const onVVResize=Utils.rafThrottle(()=>{
+      const onVVResize = Utils.rafThrottle(()=>{
         updatePad();
-        const h=visualViewport.height;
-        if(this._ime.baseVVH==null)this._ime.baseVVH=h;
-        const delta=this._ime.baseVVH-h;
-        const keyboardLikelyOpen=delta>40;
-        if(keyboardLikelyOpen&&this._ime.active&&this._ime.wasNearBottom){
-          requestAnimationFrame(()=>this._smoothStickBottom(220));
-        }else if(!keyboardLikelyOpen&&!this._ime.active){
-          this._ime.baseVVH=h;
+        const h = visualViewport.height;
+        if(this._ime.baseVVH == null) this._ime.baseVVH = h;
+        const delta = (this._ime.baseVVH - h);
+        const keyboardLikelyOpen = delta > 80;
+        if(keyboardLikelyOpen && this._ime.active && this._ime.wasNearBottom){
+          requestAnimationFrame(()=> this._smoothStickBottom(220));
         }
       });
-      this.events.on(visualViewport,'resize',onVVResize,{passive:true});
-      this.events.on(visualViewport,'scroll',updatePad,{passive:true});
+      this.events.on(visualViewport, 'resize', onVVResize, {passive:true});
+      this.events.on(visualViewport, 'scroll', updatePad, {passive:true});
     }
 
-    const onWindowResize=Utils.rafThrottle(()=>{
-      updatePad();
-      if(!this._ime)return;
-      const innerH=typeof window!=='undefined'?window.innerHeight:null;
-      if(innerH==null)return;
-      if(this._ime.baseInnerH==null)this._ime.baseInnerH=innerH;
-      const delta=this._ime.baseInnerH-innerH;
-      const keyboardLikelyOpen=delta>40;
-      if(keyboardLikelyOpen&&this._ime.active&&this._ime.wasNearBottom){
-        requestAnimationFrame(()=>this._smoothStickBottom(220));
-      }else if(!keyboardLikelyOpen&&!this._ime.active){
-        this._ime.baseInnerH=innerH;
-      }
-    });
-    this.events.on(window,'resize',onWindowResize,{passive:true});
-    const onNativeIME=(evt)=>{
-      if(!this._ime)return;
-      const detail=evt?.detail||{};
-      const bottomValue=detail.bottom;
-      const nativeBottom=(bottomValue!=null?bottomValue:detail.total)??0;
-      this._ime.nativeBottom=Math.max(0,Number(nativeBottom)||0);
-      if((detail.bottom??0)>0){
-        this._ime.wasNearBottom=this.isNearBottom(box);
+    this.events.on(window, 'resize', updatePad, {passive:true});
+    const onNativeIME = (evt)=>{
+      if(!this._ime) return;
+      const detail = evt?.detail || {};
+      const bottomValue = detail.bottom;
+      const nativeBottom = (bottomValue!=null ? bottomValue : detail.total) ?? 0;
+      this._ime.nativeBottom = Math.max(0, Number(nativeBottom) || 0);
+      if((detail.bottom ?? 0) > 0){
+        this._ime.wasNearBottom = this.isNearBottom(box);
+        if(this._ime.active && this._ime.wasNearBottom){
+          requestAnimationFrame(()=> this._smoothStickBottom(220));
+        }
       }else{
-        this._ime.wasNearBottom=false;
+        this._ime.wasNearBottom = false;
       }
       updatePad();
-      if(this._ime.nativeBottom>0&&this._ime.wasNearBottom&&!this._ime.stickScheduled){
-        this._ime.stickScheduled=true;
-        requestAnimationFrame(()=>{
-          this._ime.stickScheduled=false;
-          if(this._ime.nativeBottom>0&&!this.isNearBottom(box)){
-            this._smoothStickBottom(220);
-          }
-        });
-      }
     };
-    this.events.on(window,'nativeimechange',onNativeIME,{passive:true});
-    requestAnimationFrame(()=>this._updateBottomPadding());
+    this.events.on(window, 'nativeimechange', onNativeIME, {passive:true});
+    requestAnimationFrame(()=> this._updateBottomPadding());
   }
 }
 
@@ -4308,6 +4241,57 @@ if(document.readyState==='loading'){
     window.addEventListener('focusin', apply);
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', apply);
+    }
+  })();
+})();
+</script>
+
+<script src="cordova.js"></script>
+
+<!-- Cordova immersive & IME script -->
+<script>
+(function(){
+  function enterImmersive(){
+    try{
+      if(window.StatusBar&&typeof StatusBar.hide==='function'){
+        StatusBar.overlaysWebView(true);
+        StatusBar.hide();
+      }
+      if(window.AndroidFullScreen&&typeof AndroidFullScreen.immersiveMode==='function'){
+        AndroidFullScreen.immersiveMode(function(){},function(){});
+      }
+    }catch(e){}
+  }
+
+  document.addEventListener('deviceready',function(){
+    enterImmersive();
+    document.addEventListener('resume',enterImmersive,false);
+    window.addEventListener('focus',enterImmersive,true);
+
+    window.addEventListener('keyboardWillShow',function(){
+      document.body.classList.add('kb-open');
+    },false);
+    window.addEventListener('keyboardDidHide',function(){
+      document.body.classList.remove('kb-open');
+      enterImmersive();
+    },false);
+  },false);
+
+  (function(){
+    const apply=()=>{
+      const el=document.activeElement;
+      let kb=0;
+      if(window.visualViewport){
+        kb=Math.max(0,window.innerHeight-window.visualViewport.height);
+      }
+      document.body.style.paddingBottom=kb+'px';
+      if(el&&/^(input|textarea|select)$/i.test(el.tagName)){
+        setTimeout(()=>el.scrollIntoView({block:'center',behavior:'smooth'}),50);
+      }
+    };
+    window.addEventListener('focusin',apply);
+    if(window.visualViewport){
+      window.visualViewport.addEventListener('resize',apply);
     }
   })();
 })();
