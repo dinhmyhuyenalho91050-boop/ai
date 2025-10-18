@@ -10,13 +10,12 @@
     --accent3:#10b981;--danger:#ef4444;--border:#1f2937;--shadow:rgba(0,0,0,.3);--glow:rgba(96,165,250,.15);
     --transition-fast:.15s cubic-bezier(0.4,0,0.2,1);--transition-normal:.2s ease;--transition-slow:.3s cubic-bezier(.4,0,.2,1);
     --shadow-sm:0 2px 8px var(--shadow);--shadow-md:0 4px 16px var(--shadow);--shadow-lg:0 22px 60px rgba(0,0,0,.55);
-    --vvh:100svh;--ime-offset:0px;--safe-bottom:env(safe-area-inset-bottom,0px);
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%}
   body{overflow:hidden;background:linear-gradient(135deg,#0a0e14 0%,#141824 100%);color:var(--fg);
        font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
-  .app{display:flex;flex-direction:column;min-height:var(--vvh,100vh);height:var(--vvh,100vh)}
+  .app{display:flex;flex-direction:column;height:100vh}
   header{flex-shrink:0;height:60px;display:flex;align-items:center;justify-content:space-between;padding:0 1.25rem;
     background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1));border-bottom:1px solid var(--border);
     box-shadow:var(--shadow-sm);z-index:100}
@@ -68,10 +67,10 @@
     #backdrop.show{opacity:1;pointer-events:auto}
   }
   .chat{flex:1;display:flex;flex-direction:column;overflow:hidden}
-  .messages{flex:1;overflow:auto;padding:1rem;min-height:120px;position:relative;padding-bottom:calc(var(--composer-pad, 0px) + var(--ime-offset, 0px));}
+  .messages{flex:1;overflow:auto;padding:1rem;min-height:120px;position:relative;padding-bottom:calc(var(--composer-pad, 0px) + 1rem);}
   .messages::-webkit-scrollbar{width:0;height:0}
   .messages{scrollbar-width:none;-ms-overflow-style:none}
-  @media (max-width:640px){.messages{padding:.75rem .5rem;padding-bottom:calc(var(--composer-pad, 0px) + var(--ime-offset, 0px));}}
+  @media (max-width:640px){.messages{padding:.75rem .5rem}}
   .msg{max-width:900px;margin:0 auto 1rem;border:1px solid var(--border);border-radius:1rem;
     background:linear-gradient(135deg,rgba(21,25,33,.8),rgba(15,18,25,.9));box-shadow:var(--shadow-md)}
   .msg header{display:flex;justify-content:space-between;align-items:center;padding:.7rem 1rem;border-bottom:1px solid var(--border);background:rgba(0,0,0,.2)}
@@ -95,9 +94,7 @@
   details summary:hover{color:var(--accent)!important}
   details summary::marker{color:var(--accent2)}
   .composer{flex-shrink:0;display:flex;flex-direction:column;gap:.75rem;padding:.75rem;border-top:1px solid var(--border);
-    background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1));
-    transform:translateY(calc(-1 * var(--ime-offset, 0px)));transition:transform var(--transition-fast);
-    padding-bottom:calc(.75rem + var(--safe-bottom));will-change:transform;}
+    background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1))}
   .composer-header{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
   .composer-header .model-selector{flex:1;max-width:400px}
   .composer-main{display:flex;gap:.6rem}
@@ -208,12 +205,12 @@
 
   /* === Mobile viewport stability & IME flicker fixes === */
   html,body{height:100%}
-  #app{min-height:var(--vvh,100svh);height:var(--vvh,100svh)}
+  #app{min-height:100svh;height:100dvh}
   @supports not (height:100dvh){
-    #app{height:var(--vvh,100vh)}
+    #app{height:100vh}
   }
   /* During viewport freeze, lock height and disable scroll anchoring that can cause jumps */
-  body.vp-freeze #app{height:var(--vp-lock-h,var(--vvh,100svh))}
+  body.vp-freeze #app{height:var(--vp-lock-h,100dvh)}
   #messages{overflow-anchor:auto}
   body.vp-freeze #messages{overflow-anchor:none}
   /* Avoid transitions fighting during viewport changes */
@@ -222,10 +219,10 @@
 
   /* === Mobile IME flicker hardening (override) === */
   /* Prefer the STABLE viewport units to avoid jumps when address bar/IME changes */
-  #app{min-height:var(--vvh,100svh) !important;height:var(--vvh,100svh) !important}
+  #app{min-height:100svh !important;height:100svh !important}
   @supports (height:100dvh){
     /* Use svh as authoritative; dvh can still jump when IME hides */
-    #app{min-height:var(--vvh,100svh) !important;height:var(--vvh,100svh) !important}
+    #app{min-height:100svh !important;height:100svh !important}
   }
   /* Prevent rubber-banding from interfering with scroll position during transitions */
   html,body{overscroll-behavior-y:contain}
@@ -359,6 +356,16 @@
       <div class="pane" id="pane-backup" hidden>
         <h2 style="font-size:16px;margin-bottom:1rem">数据备份与恢复</h2>
         
+        <div style="background:rgba(96,165,250,.08);border:1px solid var(--accent2);border-radius:.75rem;padding:1rem;margin-bottom:1.5rem">
+          <div style="font-weight:600;margin-bottom:.5rem;color:var(--accent2)">✅ 存储说明</div>
+          <div style="font-size:13px;line-height:1.6;color:var(--fg)">
+            使用 IndexedDB 存储，容量更大（几百MB），性能更好！<br/>
+            • 浏览器存储限制：通常为可用磁盘的 50%<br/>
+            • 清除浏览器数据会导致数据丢失<br/>
+            <strong style="color:var(--accent)">建议定期导出备份重要对话！</strong>
+          </div>
+        </div>
+
         <div class="model-preset-card">
           <h3>导出数据</h3>
           <p style="font-size:13px;color:var(--muted);margin-bottom:1rem">
@@ -935,9 +942,6 @@ class StorageManager{
   static _messagesObserver=null;
   static _messagesObserverTarget=null;
   static _messagesObserverHandler=null;
-  static _useLocalStorage=false;
-  static _localKeyPrefix='chatApp.';
-  static _sessionCache=null;
 
   static registerMessagesObserverHandler(handler){
     this._messagesObserverHandler=typeof handler==='function'?handler:null;
@@ -989,41 +993,17 @@ class StorageManager{
   static async init(){
     this._ensureMessagesObserver();
     if(this._db)return this._db;
-    if(this._useLocalStorage)return null;
     if(this._initPromise)return this._initPromise;
-
-    if(!('indexedDB'in window)){
-      this._useLocalStorage=true;
-      console.warn('IndexedDB not available, falling back to localStorage');
-      return null;
-    }
-
+    
     this._initPromise=new Promise((resolve,reject)=>{
-      let request;
-      try{
-        request=indexedDB.open(this._dbName,this._dbVersion);
-      }catch(err){
-        console.warn('IndexedDB open failed, falling back to localStorage',err);
-        this._useLocalStorage=true;
-        this._initPromise=null;
-        resolve(null);
-        return;
-      }
-
-      request.onerror=()=>{
-        console.warn('IndexedDB unavailable, falling back to localStorage',request.error);
-        this._useLocalStorage=true;
-        resolve(null);
-      };
+      const request=indexedDB.open(this._dbName,this._dbVersion);
+      
+      request.onerror=()=>reject(request.error);
       request.onsuccess=()=>{
-        if(this._useLocalStorage){
-          resolve(null);
-          return;
-        }
         this._db=request.result;
         resolve(this._db);
       };
-
+      
       request.onupgradeneeded=(e)=>{
         const db=e.target.result;
         if(!db.objectStoreNames.contains(this._storeName)){
@@ -1031,18 +1011,14 @@ class StorageManager{
         }
       };
     });
-
+    
     return this._initPromise;
   }
   
   static async load(key,fallback){
     try{
       await this.init();
-
-      if(this._useLocalStorage||!this._db){
-        return this._readLocal(key,fallback);
-      }
-
+      
       return new Promise((resolve)=>{
         const tx=this._db.transaction([this._storeName],'readonly');
         const store=tx.objectStore(this._storeName);
@@ -1083,12 +1059,7 @@ class StorageManager{
   static async _executeWrite(key,value){
     try{
       await this.init();
-
-      if(this._useLocalStorage||!this._db){
-        this._writeLocal(key,value);
-        return true;
-      }
-
+      
       return new Promise((resolve,reject)=>{
         const tx=this._db.transaction([this._storeName],'readwrite');
         const store=tx.objectStore(this._storeName);
@@ -1112,14 +1083,10 @@ class StorageManager{
     const promises=[];
     for(const[key,item]of this._queue){
       if(item.timer)clearTimeout(item.timer);
-      if(this._useLocalStorage){
-        this._writeLocal(key,item.value);
-      }else{
-        promises.push(this._executeWrite(key,item.value));
-      }
+      promises.push(this._executeWrite(key,item.value));
     }
     this._queue.clear();
-    return this._useLocalStorage?Promise.resolve(true):Promise.all(promises);
+    return Promise.all(promises);
   }
 
   static _clone(value){
@@ -1151,11 +1118,6 @@ class StorageManager{
     try{
       await this.init();
 
-      if(this._useLocalStorage||!this._db){
-        this._deleteLocal(key);
-        return true;
-      }
-
       return new Promise((resolve,reject)=>{
         const tx=this._db.transaction([this._storeName],'readwrite');
         const store=tx.objectStore(this._storeName);
@@ -1167,48 +1129,6 @@ class StorageManager{
     }catch(e){
       console.error('IndexedDB delete error:',e);
       return false;
-    }
-  }
-
-  static _localKey(key){
-    return `${this._localKeyPrefix}${key}`;
-  }
-
-  static _readLocal(key,fallback){
-    try{
-      if(!('localStorage'in window))return fallback;
-      const raw=localStorage.getItem(this._localKey(key));
-      if(raw===null||raw==='')return fallback;
-      return JSON.parse(raw);
-    }catch(e){
-      console.error('localStorage load error:',e);
-      return fallback;
-    }
-  }
-
-  static _writeLocal(key,value){
-    try{
-      if(!('localStorage'in window))return false;
-      const storageKey=this._localKey(key);
-      if(value===undefined||value===null){
-        localStorage.removeItem(storageKey);
-      }else{
-        localStorage.setItem(storageKey,JSON.stringify(value));
-      }
-      return true;
-    }catch(e){
-      console.error('localStorage write error:',e);
-      ErrorHandler.show('数据保存失败: '+e.message,4000);
-      return false;
-    }
-  }
-
-  static _deleteLocal(key){
-    try{
-      if(!('localStorage'in window))return;
-      localStorage.removeItem(this._localKey(key));
-    }catch(e){
-      console.error('localStorage delete error:',e);
     }
   }
 
@@ -1292,49 +1212,6 @@ class StorageManager{
     writes.push(this.save(this._sessionIndexKey(),Object.keys(this._sessionCache)));
     return Promise.all(writes);
   }
-}
-
-if(window.AndroidStorage){
-  console.info('Using Android native storage bridge');
-  StorageManager._useLocalStorage=false;
-  StorageManager._db=null;
-  StorageManager._initPromise=null;
-  StorageManager.init=async()=>{
-    StorageManager._ensureMessagesObserver();
-    return true;
-  };
-  StorageManager.load=async(key,fallback)=>{
-    try{
-      const raw=window.AndroidStorage.getItem(key);
-      if(raw===null||raw===undefined||raw==='')return fallback;
-      return JSON.parse(raw);
-    }catch(e){
-      console.error('Android storage load error:',e);
-      return fallback;
-    }
-  };
-  StorageManager.save=async(key,value)=>{
-    try{
-      const raw=value===undefined||value===null?null:JSON.stringify(value);
-      window.AndroidStorage.setItem(key,raw);
-      return true;
-    }catch(e){
-      console.error('Android storage save error:',e);
-      ErrorHandler.show('数据保存失败: '+e.message,4000);
-      return false;
-    }
-  };
-  StorageManager.flush=async()=>true;
-  StorageManager._executeWrite=StorageManager.save;
-  StorageManager._executeDelete=async(key)=>{
-    try{
-      window.AndroidStorage.removeItem(key);
-      return true;
-    }catch(e){
-      console.error('Android storage delete error:',e);
-      return false;
-    }
-  };
 }
 
 // ===== ErrorHandler =====
@@ -1898,18 +1775,10 @@ class UIManager{
   
   ensureBottom(retries=2, delay=120){
     const box=Utils.$('#messages'); if(!box) return;
-    const stick=()=>{
-      try{
-        if(typeof this._smoothStickBottom==='function'){
-          this._smoothStickBottom(200);
-        }else{
-          box.scrollTop = box.scrollHeight;
-        }
-      }catch(_){ }
-    };
+    const stick=()=>{ try{ box.scrollTop = box.scrollHeight; }catch(_){} };
     requestAnimationFrame(()=>{
       stick();
-      requestAnimationFrame(()=>{ if(typeof this._smoothStickBottom!=='function'){ stick(); } });
+      requestAnimationFrame(()=>{ stick(); });
     });
     if(retries>0){
       setTimeout(()=>this.ensureBottom(retries-1, delay), delay);
@@ -1922,13 +1791,7 @@ class UIManager{
     this._suppressAutoStick=false;
     this._pendingStick=false;
     if(doStick && box){
-      requestAnimationFrame(()=>{
-        if(typeof this._smoothStickBottom==='function'){
-          this._smoothStickBottom(200);
-        }else{
-          box.scrollTop = box.scrollHeight;
-        }
-      });
+      requestAnimationFrame(()=>{ box.scrollTop = box.scrollHeight; });
     }
   }
 
@@ -2241,13 +2104,7 @@ class UIManager{
     
     this.updateLoadTip(box,win);
     
-    if(scrollToBottom){
-      if(!this._suppressAutoStick){
-        this.ensureBottom(1, 140);
-      }else{
-        this._pendingStick=true;
-      }
-    }
+    if(scrollToBottom){ if(!this._suppressAutoStick){ requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; }); this.ensureBottom(1, 140); } else { this._pendingStick=true; } }
   }
   
   // ✅ 核心改进：复用子元素而不是重建
@@ -2481,15 +2338,9 @@ class UIManager{
     if(fragment.childNodes.length){
       box.appendChild(fragment);
       __addedEls.forEach(el=>this.animateIn(el));
-
+      
       if(isNearBottom && !this._suppressAutoStick){
-        requestAnimationFrame(()=>{
-          if(typeof this._smoothStickBottom==='function'){
-            this._smoothStickBottom(200);
-          }else{
-            box.scrollTop=box.scrollHeight;
-          }
-        });
+        requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
       }else if(isNearBottom){
         this._pendingStick=true;
       }
@@ -2706,14 +2557,8 @@ this.appendMessage({
     requestAnimationFrame(()=>{
   this.dom.batchUpdate(()=>{
 box.appendChild(el);
-      if(this.isNearBottom(box)){
-        if(typeof this._smoothStickBottom==='function'){
-          this._smoothStickBottom(160);
-        }else{
-          box.scrollTop=box.scrollHeight;
-        }
-      }
-
+      if(this.isNearBottom(box))box.scrollTop=box.scrollHeight;
+    
   });
 });
     
@@ -2804,11 +2649,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       
       if(shouldStick&&box && (typeof _lastDeltaChars!=='number' || _lastDeltaChars >= (window.__STREAM_CFG&&window.__STREAM_CFG.scrollDeltaMin||8))){ if(!this._scrollRAF){
           this._scrollRAF=requestAnimationFrame(()=>{
-            if(typeof this._smoothStickBottom==='function'){
-              this._smoothStickBottom(160);
-            }else{
-              box.scrollTop=box.scrollHeight;
-            }
+            box.scrollTop=box.scrollHeight;
             this._scrollRAF=null;
           });
         }
@@ -3276,16 +3117,6 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   downloadJSONCompat(data, filename){
   try{
     const text = JSON.stringify(data, null, 2);
-
-    if(window.AndroidStorage && typeof window.AndroidStorage.exportJson === 'function'){
-      try{
-        const ok = window.AndroidStorage.exportJson(filename, text);
-        if(ok){
-          return;
-        }
-      }catch(_){}
-    }
-
     const blob = new Blob([text], { type: 'application/json' });
 
     const saveWithAnchor = () => {
@@ -3589,6 +3420,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           this.renderMessages(true);
           this.renderSidebar();
           this.setupTopObserver();
+    if(this._setupIMEHandlers) this._setupIMEHandlers();
+    if(this._updateBottomPadding) this._updateBottomPadding();
           
           sidebar.classList.remove('open');
           backdrop.classList.remove('show');
@@ -3609,11 +3442,13 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
             
             this.state.set('sessions',sessions);
             this.state.set('currentId',newId);
-
+            
             if(newId){
               this.clearMessages();
               this.renderMessages(true);
               this.setupTopObserver();
+    if(this._setupIMEHandlers) this._setupIMEHandlers();
+    if(this._updateBottomPadding) this._updateBottomPadding();
             }else{
               this.createNewSession();
             }
@@ -4126,70 +3961,17 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       wasNearBottom: false,
     };
     // updater
-    const root = document.documentElement;
     this._updateBottomPadding = ()=>{
       const composer = document.querySelector('.composer');
       const composerH = composer ? (composer.offsetHeight || 0) : 0;
-      const nativeState = window.__NATIVE_IME_STATE__;
-      const nativeActive = document.body.classList.contains('kb-open-native');
-
-      let imeOffset = 0;
-      let vvHeight = 0;
-
-      if(nativeActive && nativeState){
-        if(typeof nativeState.bottom === 'number'){
-          imeOffset = Math.max(0, Math.round(nativeState.bottom));
-        }else{
-          const pb = parseFloat(document.body.style.paddingBottom || '0');
-          imeOffset = Number.isFinite(pb) ? Math.max(0, Math.round(pb)) : 0;
-        }
-        if(typeof nativeState.viewport === 'number'){
-          vvHeight = Math.max(0, Math.round(nativeState.viewport));
-        }
+      let vvInset = 0;
+      if(this._vvAvailable){
+        try{
+          const ov = Math.max(0, (window.innerHeight - visualViewport.height - visualViewport.offsetTop));
+          vvInset = ov;
+        }catch(e){}
       }
-
-      if(!nativeActive){
-        if(this._vvAvailable){
-          try{
-            const vv = visualViewport;
-            const vvHeightCandidate = Math.round(vv.height);
-            if(vvHeightCandidate>0){
-              vvHeight = vvHeightCandidate;
-            }
-            const innerH = window.innerHeight || vv.height;
-            const inset = Math.max(0, Math.round(innerH - vv.height - vv.offsetTop));
-            imeOffset = inset;
-          }catch(e){}
-        }else{
-          const h = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
-          if(h>0){
-            vvHeight = h;
-          }
-        }
-      }
-
-      if(!vvHeight){
-        const fallback = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
-        if(fallback>0){
-          vvHeight = fallback;
-        }
-      }
-
-      if(vvHeight>0){
-        root.style.setProperty('--vvh', vvHeight + 'px');
-        if(this._ime){
-          if(!this._ime.baseVVH || vvHeight > this._ime.baseVVH){
-            this._ime.baseVVH = vvHeight;
-          }
-        }
-      }
-
-      root.style.setProperty('--ime-offset', Math.max(0, imeOffset) + 'px');
-      if(!nativeActive){
-        document.body.style.paddingBottom = Math.max(0, imeOffset) + 'px';
-      }
-
-      const pad = Math.round(composerH + 8);
+      const pad = Math.round(composerH + vvInset + 8);
       box.style.setProperty('--composer-pad', pad + 'px');
     };
     const updatePad = Utils.rafThrottle(()=> this._updateBottomPadding());
@@ -4227,10 +4009,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       const onVVResize = Utils.rafThrottle(()=>{
         updatePad();
         const h = visualViewport.height;
-        if(this._ime.baseVVH == null || (!this._ime.active && h>0) || h > this._ime.baseVVH){
-          this._ime.baseVVH = h;
-        }
-        const delta = ((this._ime.baseVVH || h) - h);
+        if(this._ime.baseVVH == null) this._ime.baseVVH = h;
+        const delta = (this._ime.baseVVH - h);
         const keyboardLikelyOpen = delta > 80;
         if(keyboardLikelyOpen && this._ime.active && this._ime.wasNearBottom){
           requestAnimationFrame(()=> this._smoothStickBottom(220));
@@ -4350,63 +4130,6 @@ if(document.readyState==='loading'){
 </script>
 
 <script src="cordova.js"></script>
-
-<script>
-(function(){
-  const root=document.documentElement;
-  const state={bottom:0,viewport:null};
-  let lastBottom=-1;
-  window.__NATIVE_IME_STATE__=state;
-  const apply=()=>{
-    const bottom=Math.max(0,state.bottom||0);
-    const viewport=typeof state.viewport==='number'?Math.max(0,state.viewport):0;
-    if(bottom>0){
-      document.body.classList.add('kb-open-native');
-    }else{
-      document.body.classList.remove('kb-open-native');
-    }
-    document.body.style.paddingBottom=bottom+'px';
-    root.style.setProperty('--ime-offset', bottom + 'px');
-    if(viewport>0){
-      root.style.setProperty('--vvh', viewport + 'px');
-    }
-
-    const ui = window.chatApp && window.chatApp.ui;
-    if(ui){
-      try{
-        if(viewport>0 && ui._ime){
-          if(!ui._ime.baseVVH || viewport>ui._ime.baseVVH){
-            ui._ime.baseVVH=viewport;
-          }
-        }
-        if(typeof ui._updateBottomPadding==='function'){
-          ui._updateBottomPadding();
-        }
-        if(bottom>0 && bottom!==lastBottom && ui._ime && ui._ime.active){
-          const box=document.querySelector('#messages');
-          const near=ui._ime.wasNearBottom || (box && typeof ui.isNearBottom==='function' && ui.isNearBottom(box));
-          if(near && typeof ui._smoothStickBottom==='function'){
-            requestAnimationFrame(()=>{
-              ui._smoothStickBottom(220);
-              ui._ime.wasNearBottom=true;
-            });
-          }
-        }
-      }catch(e){}
-    }
-
-    lastBottom=bottom;
-  };
-  window.__NATIVE_IME__={
-    update(payload){
-      if(!payload)return;
-      if(typeof payload.bottom==='number'){ state.bottom=payload.bottom; }
-      if(typeof payload.viewport==='number'){ state.viewport=payload.viewport; }
-      requestAnimationFrame(apply);
-    }
-  };
-})();
-</script>
 
 <!-- Cordova immersive & IME script -->
 <script>
