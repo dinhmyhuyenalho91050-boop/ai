@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Launch theme for pre-Android 12 -->
+    <style name="Theme.App.Launch" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowBackground">@drawable/launch_screen_legacy</item>
+    </style>
+
+    <!-- Normal app theme -->
+    <style name="Theme.App" parent="Theme.Material3.DayNight.NoActionBar"/>
+</resources>
