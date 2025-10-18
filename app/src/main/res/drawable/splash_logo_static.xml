@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="240dp"
+    android:height="240dp"
+    android:viewportWidth="240"
+    android:viewportHeight="240">
+
+    <group
+        android:name="pulse"
+        android:pivotX="120"
+        android:pivotY="120">
+        <path
+            android:name="outerHalo"
+            android:pathData="M120,24a96,96 0 1,1 0,192a96,96 0 1,1 0,-192"
+            android:fillAlpha="0.15"
+            android:fillColor="#FFFFFFFF" />
+        <path
+            android:name="innerHalo"
+            android:pathData="M120,48a72,72 0 1,1 0,144a72,72 0 1,1 0,-144"
+            android:fillAlpha="0.28"
+            android:fillColor="#FFFFFFFF" />
+    </group>
+
+    <group
+        android:name="logo"
+        android:pivotX="120"
+        android:pivotY="120">
+        <path
+            android:name="ring"
+            android:pathData="M120,72a48,48 0 1,1 0,96a48,48 0 1,1 0,-96m0,12a36,36 0 1,0 0,72a36,36 0 1,0 0,-72"
+            android:fillColor="#FFFFFFFF"
+            android:fillType="evenOdd"
+            android:fillAlpha="0.88" />
+        <path
+            android:name="spark"
+            android:pathData="M120,90a30,30 0 1,1 0,60a30,30 0 1,1 0,-60"
+            android:fillColor="#FFE0F4"
+            android:fillAlpha="0.9" />
+        <path
+            android:name="glyphA"
+            android:pathData="M108,84l-24,72h12l6.4,-19.2h27.2L146,156h12l-24,-72h-26Zm3.6,45.6l10.4,-31.2l10.4,31.2h-20.8Z"
+            android:fillColor="#FFFFFFFF"
+            android:fillAlpha="0.95" />
+        <path
+            android:name="glyphI"
+            android:pathData="M156,84h12v72h-12z"
+            android:fillColor="#FFB0FF"
+            android:fillAlpha="0.92" />
+    </group>
+
+    <group
+        android:name="orbiter"
+        android:pivotX="120"
+        android:pivotY="120">
+        <path
+            android:name="orbit"
+            android:pathData="M120,48a12,12 0 1,1 0,24a12,12 0 1,1 0,-24"
+            android:fillColor="#FFFFFFFF"
+            android:fillAlpha="0.85" />
+    </group>
+</vector>

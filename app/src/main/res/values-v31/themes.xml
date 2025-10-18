@@ -8,9 +8,12 @@
         <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="o_mr1">shortEdges</item>
         <item name="android:enforceStatusBarContrast">false</item>
         <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_logo_animated</item>
+        <item name="android:windowSplashScreenBackground">@drawable/splash_background</item>
+        <item name="android:windowSplashScreenAnimationDuration">420</item>
     </style>
 
     <style name="Theme.AIChatApp.Launch" parent="Theme.AIChatApp">
-        <item name="android:windowBackground">@drawable/launch_screen_legacy</item>
+        <item name="android:windowBackground">@drawable/splash_background</item>
     </style>
 </resources>

@@ -4,6 +4,7 @@ import android.graphics.Color
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.OvershootInterpolator
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -11,6 +12,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -22,7 +24,24 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val splashScreen = installSplashScreen()
+        setTheme(R.style.Theme_AIChatApp)
         super.onCreate(savedInstanceState)
+        splashScreen.setOnExitAnimationListener { provider ->
+            val iconView = provider.iconView
+            if (iconView != null) {
+                iconView.animate()
+                    .setDuration(420)
+                    .setInterpolator(OvershootInterpolator())
+                    .scaleX(1.18f)
+                    .scaleY(1.18f)
+                    .alpha(0f)
+                    .withEndAction { provider.remove() }
+                    .start()
+            } else {
+                provider.remove()
+            }
+        }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.setSoftInputMode(
             WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or

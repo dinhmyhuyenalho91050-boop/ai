@@ -19,7 +19,7 @@
             android:launchMode="singleTop"
             android:resizeableActivity="true"
             android:screenOrientation="unspecified"
-            android:theme="@style/Theme.AIChatApp"
+            android:theme="@style/Theme.AIChatApp.Launch"
             android:windowSoftInputMode="adjustResize|stateHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
