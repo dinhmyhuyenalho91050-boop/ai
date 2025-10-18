@@ -4120,7 +4120,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const onNativeIME=(evt)=>{
       if(!this._ime)return;
       const detail=evt?.detail||{};
-      const nativeBottom=detail.total??detail.bottom??0;
+      const nativeBottom=detail.bottom??detail.total??0;
       this._ime.nativeBottom=Math.max(0,Number(nativeBottom)||0);
       if((detail.bottom??0)>0){
         this._ime.wasNearBottom=this.isNearBottom(box);
