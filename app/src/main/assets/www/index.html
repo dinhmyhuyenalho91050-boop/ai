@@ -3212,9 +3212,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       currentId:this.state.get('currentId')
     };
     this.downloadJSONCompat(data,`chat-backup-all-${this.formatDate()}.json`);
-    ErrorHandler.show('导出成功',2000);
   }
-  
+
   exportSessions(){
     const data={
       version:'9.3',
@@ -3223,9 +3222,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       currentId:this.state.get('currentId')
     };
     this.downloadJSONCompat(data,`chat-backup-sessions-${this.formatDate()}.json`);
-    ErrorHandler.show('对话导出成功',2000);
   }
-  
+
   exportPresets(){
     const data={
       version:'9.3',
@@ -3234,65 +3232,112 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       promptPresets:this.state.get('promptPresets')
     };
     this.downloadJSONCompat(data,`chat-backup-presets-${this.formatDate()}.json`);
-    ErrorHandler.show('预设导出成功',2000);
   }
-  
+
   downloadJSONCompat(data, filename){
   try{
     const text = JSON.stringify(data, null, 2);
 
+    if(!window.__androidExportCallbacks){
+      window.__androidExportCallbacks={};
+    }
+    if(typeof window.__handleAndroidExportResult!=='function'){
+      window.__handleAndroidExportResult=function(requestId, success, savedPath, errorMessage){
+        const callbacks=window.__androidExportCallbacks||{};
+        const cb=callbacks[requestId];
+        if(typeof cb==='function'){
+          delete callbacks[requestId];
+          cb(success, savedPath, errorMessage);
+        }
+      };
+    }
+
+    let fallbackTriggered=false;
+    const ensureFallback=()=>{
+      if(fallbackTriggered) return;
+      fallbackTriggered=true;
+      const blob = new Blob([text], { type: 'application/json' });
+
+      const saveWithAnchor = () => {
+        try{
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          a.style.display='none';
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 1200);
+          try { ErrorHandler.show('导出成功',2000); } catch(_) {}
+          return true;
+        }catch(e){ return false; }
+      };
+
+      const saveWithCordova = () => new Promise((resolve,reject)=>{
+        try{
+          if(!window.cordova || !window.cordova.file || !window.resolveLocalFileSystemURL){
+            return reject(new Error('cordova unavailable'));
+          }
+          const baseDir = window.cordova.file.externalDataDirectory || window.cordova.file.dataDirectory;
+          window.resolveLocalFileSystemURL(baseDir, (dirEntry)=>{
+            dirEntry.getFile(filename, {create:true, exclusive:false}, (fileEntry)=>{
+              fileEntry.createWriter((writer)=>{
+                writer.onwriteend = ()=> resolve((fileEntry.nativeURL||fileEntry.toURL()));
+                writer.onerror = (e)=> reject(e);
+                writer.write(blob);
+              }, reject);
+            }, reject);
+          }, reject);
+        }catch(e){ reject(e); }
+      });
+
+      if(window.cordova){
+        saveWithCordova()
+          .then((uri)=>{
+            try { ErrorHandler.show('已保存到: ' + (uri||'应用目录'), 3500); } catch(_) {}
+          })
+          .catch(()=>{ if(!saveWithAnchor()){
+            try { ErrorHandler.show('导出失败: 未能写入文件', 4000); } catch(_) {}
+          }});
+      }else{
+        if(!saveWithAnchor()){
+          try { ErrorHandler.show('导出失败: 未能写入文件', 4000); } catch(_) {}
+        }
+      }
+    };
+
     if(window.AndroidStorage && typeof window.AndroidStorage.exportJson === 'function'){
       try{
-        const ok = window.AndroidStorage.exportJson(filename, text);
-        if(ok){
+        const token = window.AndroidStorage.exportJson(filename, text);
+        if(token && typeof token === 'string'){
+          window.__androidExportCallbacks[token]=(success, savedPath, errorMessage)=>{
+            if(window.__androidExportCallbacks){
+              delete window.__androidExportCallbacks[token];
+            }
+            if(success){
+              return;
+            }
+            if(errorMessage){
+              try { ErrorHandler.show(errorMessage, 4000); } catch(_) {}
+            }
+            ensureFallback();
+          };
+          setTimeout(()=>{
+            if(window.__androidExportCallbacks && window.__androidExportCallbacks[token]){
+              delete window.__androidExportCallbacks[token];
+              ensureFallback();
+            }
+          }, 20000);
+          return;
+        }
+        if(token === true){
+          try { ErrorHandler.show('导出成功',2000); } catch(_) {}
           return;
         }
       }catch(_){}
     }
 
-    const blob = new Blob([text], { type: 'application/json' });
-
-    const saveWithAnchor = () => {
-      try{
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.style.display='none';
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 1200);
-        return true;
-      }catch(e){ return false; }
-    };
-
-    const saveWithCordova = () => new Promise((resolve,reject)=>{
-      try{
-        if(!window.cordova || !window.cordova.file || !window.resolveLocalFileSystemURL){
-          return reject(new Error('cordova unavailable'));
-        }
-        const baseDir = window.cordova.file.externalDataDirectory || window.cordova.file.dataDirectory;
-        window.resolveLocalFileSystemURL(baseDir, (dirEntry)=>{
-          dirEntry.getFile(filename, {create:true, exclusive:false}, (fileEntry)=>{
-            fileEntry.createWriter((writer)=>{
-              writer.onwriteend = ()=> resolve((fileEntry.nativeURL||fileEntry.toURL()));
-              writer.onerror = (e)=> reject(e);
-              writer.write(blob);
-            }, reject);
-          }, reject);
-        }, reject);
-      }catch(e){ reject(e); }
-    });
-
-    if(window.cordova){
-      saveWithCordova()
-        .then((uri)=>{
-          try { ErrorHandler.show('已保存到: ' + (uri||'应用目录'), 3500); } catch(_) {}
-        })
-        .catch(()=>{ saveWithAnchor(); });
-    }else{
-      saveWithAnchor();
-    }
+    ensureFallback();
   }catch(e){
     try { ErrorHandler.show('导出失败: ' + e.message, 4000); } catch(_) {}
   }
