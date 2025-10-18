@@ -161,7 +161,8 @@ class MainActivity : AppCompatActivity() {
 
             val baselineViewport = if (baseViewportHeight > 0) baseViewportHeight else viewportWithoutIme
             val consumedByResize = max(0, baselineViewport - viewportWithoutIme)
-            val effectiveImeInset = max(0, imeInsets.bottom - consumedByResize)
+            val imeHeight = max(0, imeInsets.bottom - systemBottom)
+            val effectiveImeInset = max(0, imeHeight - consumedByResize)
             val bottomInset = systemBottom + effectiveImeInset
 
             view.setPadding(
