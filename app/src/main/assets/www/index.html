@@ -937,7 +937,9 @@ class StorageManager{
   static _storeName='chatData';
   static _queue=new Map();
   static _initPromise=null;
-  
+  static _useLocalStorage=false;
+  static _localKeyPrefix='chatApp.';
+
   static async init(){
     const box=Utils.$('#messages');
     if(box){
@@ -947,17 +949,41 @@ class StorageManager{
       mo.observe(box,{childList:true});
     }
     if(this._db)return this._db;
+    if(this._useLocalStorage)return null;
     if(this._initPromise)return this._initPromise;
-    
+
+    if(!('indexedDB'in window)){
+      this._useLocalStorage=true;
+      console.warn('IndexedDB not available, falling back to localStorage');
+      return null;
+    }
+
     this._initPromise=new Promise((resolve,reject)=>{
-      const request=indexedDB.open(this._dbName,this._dbVersion);
-      
-      request.onerror=()=>reject(request.error);
+      let request;
+      try{
+        request=indexedDB.open(this._dbName,this._dbVersion);
+      }catch(err){
+        console.warn('IndexedDB open failed, falling back to localStorage',err);
+        this._useLocalStorage=true;
+        this._initPromise=null;
+        resolve(null);
+        return;
+      }
+
+      request.onerror=()=>{
+        console.warn('IndexedDB unavailable, falling back to localStorage',request.error);
+        this._useLocalStorage=true;
+        resolve(null);
+      };
       request.onsuccess=()=>{
+        if(this._useLocalStorage){
+          resolve(null);
+          return;
+        }
         this._db=request.result;
         resolve(this._db);
       };
-      
+
       request.onupgradeneeded=(e)=>{
         const db=e.target.result;
         if(!db.objectStoreNames.contains(this._storeName)){
@@ -968,11 +994,15 @@ class StorageManager{
     
     return this._initPromise;
   }
-  
+
   static async load(key,fallback){
     try{
       await this.init();
-      
+
+      if(this._useLocalStorage||!this._db){
+        return this._readLocal(key,fallback);
+      }
+
       return new Promise((resolve)=>{
         const tx=this._db.transaction([this._storeName],'readonly');
         const store=tx.objectStore(this._storeName);
@@ -990,11 +1020,11 @@ class StorageManager{
       return fallback;
     }
   }
-  
+
   static async save(key,value){
     const existing=this._queue.get(key);
     if(existing)clearTimeout(existing.timer);
-    
+
     return new Promise((resolve)=>{
       const timer=setTimeout(async()=>{
         try{
@@ -1009,43 +1039,92 @@ class StorageManager{
       this._queue.set(key,{value,timer});
     });
   }
-  
+
   static async _executeWrite(key,value){
     try{
       await this.init();
-      
+
+      if(this._useLocalStorage||!this._db){
+        this._writeLocal(key,value);
+        return true;
+      }
+
       return new Promise((resolve,reject)=>{
         const tx=this._db.transaction([this._storeName],'readwrite');
         const store=tx.objectStore(this._storeName);
         const request=store.put(value,key);
-        
+
         request.onsuccess=()=>resolve(true);
         request.onerror=()=>reject(request.error);
       });
     }catch(e){
       console.error('IndexedDB write error:',e);
       if(e.name==='QuotaExceededError'){
-        ErrorHandler.show('存储空间已满，请导出备份后清理数据',5000);
-      }else{
+        if(typeof ErrorHandler!=='undefined'){
+          ErrorHandler.show('存储空间已满，请导出备份后清理数据',5000);
+        }
+      }else if(typeof ErrorHandler!=='undefined'){
         ErrorHandler.show('数据保存失败: '+e.message,4000);
       }
       return false;
     }
   }
-  
+
   static async flush(){
     const promises=[];
     for(const[key,item]of this._queue){
       if(item.timer)clearTimeout(item.timer);
-      promises.push(this._executeWrite(key,item.value));
+      if(this._useLocalStorage){
+        this._writeLocal(key,item.value);
+      }else{
+        promises.push(this._executeWrite(key,item.value));
+      }
     }
     this._queue.clear();
-    return Promise.all(promises);
+    return this._useLocalStorage?Promise.resolve(true):Promise.all(promises);
+  }
+
+  static _localKey(key){
+    return `${this._localKeyPrefix}${key}`;
+  }
+
+  static _readLocal(key,fallback){
+    try{
+      if(!('localStorage'in window))return fallback;
+      const raw=localStorage.getItem(this._localKey(key));
+      if(raw===null||raw==='')return fallback;
+      return JSON.parse(raw);
+    }catch(e){
+      console.error('localStorage load error:',e);
+      return fallback;
+    }
+  }
+
+  static _writeLocal(key,value){
+    try{
+      if(!('localStorage'in window))return false;
+      const storageKey=this._localKey(key);
+      if(value===undefined||value===null){
+        localStorage.removeItem(storageKey);
+      }else{
+        localStorage.setItem(storageKey,JSON.stringify(value));
+      }
+      return true;
+    }catch(e){
+      console.error('localStorage write error:',e);
+      if(typeof ErrorHandler!=='undefined'){
+        ErrorHandler.show('数据保存失败: '+e.message,4000);
+      }
+      return false;
+    }
   }
 }
 
 if(window.AndroidStorage){
   console.info('Using Android native storage bridge');
+  StorageManager._useLocalStorage=false;
+  StorageManager._db=null;
+  StorageManager._initPromise=null;
   StorageManager.init=async()=>true;
   StorageManager.load=async(key,fallback)=>{
     try{
