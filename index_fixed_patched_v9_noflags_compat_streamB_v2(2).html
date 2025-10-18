@@ -465,7 +465,9 @@ const CONFIG={
     modelPresets:'chat.modelPresets',
     sessions:'chat.sessions',
     currentId:'chat.currentId',
-    promptPresets:'chat.promptPresets'
+    promptPresets:'chat.promptPresets',
+    sessionIndex:'chat.sessions.index',
+    sessionPrefix:'chat.session.'
   }
 };
 
@@ -1086,6 +1088,130 @@ class StorageManager{
     this._queue.clear();
     return Promise.all(promises);
   }
+
+  static _clone(value){
+    try{
+      if(typeof structuredClone==='function')return structuredClone(value);
+      return JSON.parse(JSON.stringify(value));
+    }catch(_){
+      try{
+        return JSON.parse(JSON.stringify(value));
+      }catch(__){
+        return value;
+      }
+    }
+  }
+
+  static _sessionIndexKey(){
+    return CONFIG.STORAGE_KEYS.sessionIndex||'chat.sessions.index';
+  }
+
+  static _sessionKey(id){
+    return (CONFIG.STORAGE_KEYS.sessionPrefix||'chat.session.')+id;
+  }
+
+  static seedSessionsCache(sessions){
+    this._sessionCache=this._clone(sessions||{});
+  }
+
+  static async _executeDelete(key){
+    try{
+      await this.init();
+
+      return new Promise((resolve,reject)=>{
+        const tx=this._db.transaction([this._storeName],'readwrite');
+        const store=tx.objectStore(this._storeName);
+        const request=store.delete(key);
+
+        request.onsuccess=()=>resolve(true);
+        request.onerror=()=>reject(request.error);
+      });
+    }catch(e){
+      console.error('IndexedDB delete error:',e);
+      return false;
+    }
+  }
+
+  static async loadSessions(fallback={}){
+    const indexKey=this._sessionIndexKey();
+    const index=await this.load(indexKey,null);
+
+    if(Array.isArray(index)&&index.length){
+      const entries=await Promise.all(index.map(async id=>{
+        const data=await this.load(this._sessionKey(id),undefined);
+        return[data,id];
+      }));
+
+      const sessions={};
+      entries.forEach(([data,id])=>{
+        if(data!==undefined)sessions[id]=data;
+      });
+      this.seedSessionsCache(sessions);
+      return sessions;
+    }
+
+    const legacy=await this.load(CONFIG.STORAGE_KEYS.sessions,fallback);
+    this.seedSessionsCache(legacy);
+    if(legacy&&Object.keys(legacy).length){
+      await this.saveSessionsSnapshot(legacy);
+    }
+    return legacy||fallback;
+  }
+
+  static async saveSessionsSnapshot(allSessions){
+    const previousIds=new Set(this._sessionCache?Object.keys(this._sessionCache):[]);
+    const snapshot=this._clone(allSessions||{});
+    this._sessionCache=snapshot;
+
+    const ids=Object.keys(snapshot);
+    const indexKey=this._sessionIndexKey();
+
+    const writePromises=ids.map(id=>{
+      previousIds.delete(id);
+      return this.save(this._sessionKey(id),snapshot[id]);
+    });
+
+    const deletePromises=[];
+    previousIds.forEach(id=>{
+      deletePromises.push(this._executeDelete(this._sessionKey(id)));
+    });
+
+    writePromises.push(this.save(indexKey,ids));
+    writePromises.push(this.save(CONFIG.STORAGE_KEYS.sessions,snapshot));
+
+    return Promise.all([...writePromises,...deletePromises]);
+  }
+
+  static async saveSessionsPartial(allSessions,dirtyIds=new Set(),removedIds=new Set()){
+    if(!this._sessionCache){
+      this._sessionCache=this._clone(await this.loadSessions({}));
+    }
+
+    const writes=[];
+    let changed=false;
+
+    dirtyIds.forEach(id=>{
+      if(id==null)return;
+      if(allSessions&&id in allSessions){
+        this._sessionCache[id]=this._clone(allSessions[id]);
+        writes.push(this.save(this._sessionKey(id),this._sessionCache[id]));
+        changed=true;
+      }
+    });
+
+    removedIds.forEach(id=>{
+      if(id==null)return;
+      if(this._sessionCache&&id in this._sessionCache){
+        delete this._sessionCache[id];
+        writes.push(this._executeDelete(this._sessionKey(id)));
+        changed=true;
+      }
+    });
+
+    if(!changed)return Promise.resolve();
+    writes.push(this.save(this._sessionIndexKey(),Object.keys(this._sessionCache)));
+    return Promise.all(writes);
+  }
 }
 
 // ===== ErrorHandler =====
@@ -1238,6 +1364,9 @@ class StateManager{
     this.saveTimer=null;
     this.pendingSaves=new Set();
     this.initialized=false;
+    this.dirtySessions=new Set();
+    this.removedSessions=new Set();
+    this.sessionsDirtyAll=false;
   }
   
   async init(){
@@ -1246,7 +1375,7 @@ class StateManager{
     // 异步加载所有数据
     const [modelPresets,sessions,currentId,promptPresets]=await Promise.all([
       StorageManager.load(CONFIG.STORAGE_KEYS.modelPresets,this.state.modelPresets),
-      StorageManager.load(CONFIG.STORAGE_KEYS.sessions,this.state.sessions),
+      StorageManager.loadSessions(this.state.sessions),
       StorageManager.load(CONFIG.STORAGE_KEYS.currentId,this.state.currentId),
       StorageManager.load(CONFIG.STORAGE_KEYS.promptPresets,this.state.promptPresets)
     ]);
@@ -1255,38 +1384,75 @@ class StateManager{
     this.state.sessions=sessions;
     this.state.currentId=currentId;
     this.state.promptPresets=promptPresets;
-    
+
+    StorageManager.seedSessionsCache(this.state.sessions);
     this.initialized=true;
   }
-  
+
   get(key){
     return this.state[key];
   }
-  
+
   set(key,value){
+    if(key==='sessions'){
+      if(value!==this.state.sessions){
+        this.state.sessions=value;
+        this.sessionsDirtyAll=true;
+      }
+      this.pendingSaves.add(key);
+      this.debounceSave();
+      return;
+    }
+
     this.state[key]=value;
     this.pendingSaves.add(key);
     this.debounceSave();
   }
-  
+
+  markSessionsDirty(sessionIds){
+    if(!sessionIds)return;
+    const ids=Array.isArray(sessionIds)?sessionIds:[sessionIds];
+    ids.forEach(id=>{ if(id) this.dirtySessions.add(id); });
+    if(ids.length>0)this.pendingSaves.add('sessions');
+    this.debounceSave();
+  }
+
+  markSessionRemoved(sessionId){
+    if(!sessionId)return;
+    this.removedSessions.add(sessionId);
+    this.pendingSaves.add('sessions');
+    this.debounceSave();
+  }
+
   debounceSave(){
     clearTimeout(this.saveTimer);
-    this.saveTimer=setTimeout(()=>{
-      for(const key of this.pendingSaves){
+    this.saveTimer=setTimeout(()=>this.flushPendingSaves(),CONFIG.PERSIST_DELAY);
+  }
+
+  forceSave(){
+    clearTimeout(this.saveTimer);
+    this.flushPendingSaves(true);
+  }
+
+  flushPendingSaves(forceFullSessions=false){
+    const keys=[...this.pendingSaves];
+    this.pendingSaves.clear();
+
+    keys.forEach(key=>{
+      if(key==='sessions'){
+        if(this.sessionsDirtyAll||forceFullSessions){
+          StorageManager.saveSessionsSnapshot(this.state.sessions);
+        }else{
+          StorageManager.saveSessionsPartial(this.state.sessions,this.dirtySessions,this.removedSessions);
+        }
+        this.dirtySessions.clear();
+        this.removedSessions.clear();
+        this.sessionsDirtyAll=false;
+      }else{
         const storageKey=CONFIG.STORAGE_KEYS[key];
         if(storageKey)StorageManager.save(storageKey,this.state[key]);
       }
-      this.pendingSaves.clear();
-    },CONFIG.PERSIST_DELAY);
-  }
-  
-  forceSave(){
-    clearTimeout(this.saveTimer);
-    for(const key of this.pendingSaves){
-      const storageKey=CONFIG.STORAGE_KEYS[key];
-      if(storageKey)StorageManager.save(storageKey,this.state[key]);
-    }
-    this.pendingSaves.clear();
+    });
   }
   
   getActiveSession(){
@@ -2251,6 +2417,8 @@ class UIManager{
     this.setSending(true);
     
     const session=this.state.getActiveSession();
+    const sessionId=this.state.get('currentId');
+    let sessionDirty=false;
     const input=Utils.$('#input');
     if(!session||!input){
       this.isSending=false;
@@ -2270,8 +2438,8 @@ class UIManager{
       if(this._vvAvailable) this.freezeViewport();
       this.appendMessage({role:'user',content:text});
       if (typeof this.flushUpdates === 'function') this.flushUpdates();
-input.value='';
-      this.state.set('sessions',this.state.get('sessions'));
+      input.value='';
+      sessionDirty=true;
     }
     
     const preset=this.state.getCurrentPreset();
@@ -2325,8 +2493,7 @@ this.appendMessage({
         thinking:thinking||'',
         modelName:preset?.name
       });
-      
-      this.state.set('sessions',this.state.get('sessions'));
+      sessionDirty=true;
     }catch(error){
       if(batcher)batcher.stop();
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
@@ -2348,6 +2515,7 @@ this.appendMessage({
           thinking:partialThinking||'',
           modelName:preset?.name
         });
+        sessionDirty=true;
       }else if(!isAbort){
         (function(){ try{ if (this.typingElement) this.typingElement.removeAttribute('data-streaming'); }catch(_){} }).call(this);
 this.appendMessage({
@@ -2356,10 +2524,10 @@ this.appendMessage({
           modelName:preset?.name
         });
         ErrorHandler.show('API调用失败: '+error.message);
+        sessionDirty=true;
       }
-      
-      this.state.set('sessions',this.state.get('sessions'));
     }finally{
+      if(sessionDirty&&sessionId) this.state.markSessionsDirty(sessionId);
       setTimeout(()=>{ try{ this._releaseAutoStick(); }catch{} }, 240);
       if(this._vvAvailable) setTimeout(()=>this.unfreezeViewport(), 200);
       this.isSending=false;
@@ -3133,7 +3301,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const newName=prompt('输入新的对话名称:',session.name);
     if(newName&&newName.trim()&&newName.trim()!==session.name){
       session.name=newName.trim();
-      this.state.set('sessions',sessions);
+      this.state.markSessionsDirty(sessionId);
       this.renderSidebar();
     }
   }
@@ -3378,7 +3546,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
             });
           }
           this.windowManager.evaluate(session.history.length);
-          this.state.set('sessions',this.state.get('sessions'));
+          this.state.markSessionsDirty(this.state.get('currentId'));
         });
 
         
@@ -3429,7 +3597,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         });
         
         this.windowManager.evaluate(session.history.length);
-        this.state.set('sessions',this.state.get('sessions'));
+        this.state.markSessionsDirty(this.state.get('currentId'));
         this.sendMessage();
         
       }else if(btn.dataset.act==='rename-session'){
@@ -3536,7 +3704,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     // ✅ 清理编辑状态
     this.editingState=null;
     
-    this.state.set('sessions',this.state.get('sessions'));
+    this.state.markSessionsDirty(this.state.get('currentId'));
   }
   
   cancelEditMessage(msgId){
@@ -3591,11 +3759,24 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
     
     const newContent=textarea.value.trim();
-    
+
     // 如果内容有变化且不为空，自动保存
     if(newContent&&newContent!==this.editingState.originalContent){
+      let finalContent=newContent;
+      try{
+        const pc=this.state.getSessionPromptConfig(session);
+        if(pc&&pc.regexRules&&pc.regexRules.length){
+          const compiled=this.regexProcessor?.compileRules?.(pc.regexRules);
+          if(compiled&&this.regexProcessor?.process){
+            finalContent=this.regexProcessor.process(newContent,compiled);
+          }
+        }
+      }catch(e){
+        console?.warn?.('Regex processing failed during autoSaveEditingMessage:',e);
+        finalContent=newContent;
+      }
       msg.content=finalContent;
-      this.state.set('sessions',this.state.get('sessions'));
+      this.state.markSessionsDirty(this.state.get('currentId'));
     }
     
     // 清理编辑状态
