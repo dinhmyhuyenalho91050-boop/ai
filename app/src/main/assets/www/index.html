@@ -4280,6 +4280,34 @@ if(document.readyState==='loading'){
 
 <script src="cordova.js"></script>
 
+<script>
+(function(){
+  const root=document.documentElement;
+  const state={bottom:0,viewport:null};
+  const apply=()=>{
+    const bottom=Math.max(0,state.bottom||0);
+    root.style.setProperty('--ime-offset', bottom + 'px');
+    if(typeof state.viewport==='number' && state.viewport>0){
+      root.style.setProperty('--vvh', state.viewport + 'px');
+    }
+    if(bottom>0){
+      document.body.classList.add('kb-open-native');
+    }else{
+      document.body.classList.remove('kb-open-native');
+    }
+    document.body.style.paddingBottom=bottom+'px';
+  };
+  window.__NATIVE_IME__={
+    update(payload){
+      if(!payload)return;
+      if(typeof payload.bottom==='number'){ state.bottom=payload.bottom; }
+      if(typeof payload.viewport==='number'){ state.viewport=payload.viewport; }
+      requestAnimationFrame(apply);
+    }
+  };
+})();
+</script>
+
 <!-- Cordova immersive & IME script -->
 <script>
 (function(){

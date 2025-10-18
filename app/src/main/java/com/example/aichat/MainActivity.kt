@@ -24,6 +24,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private var isContentReady = false
+    private var lastImeDispatch: Pair<Int, Int>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
@@ -134,12 +135,19 @@ class MainActivity : AppCompatActivity() {
         ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
             val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
             val systemInsets = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val topInset = systemInsets.top
+            val bottomInset = max(imeInsets.bottom, systemInsets.bottom)
             view.setPadding(
                 view.paddingLeft,
-                systemInsets.top,
+                topInset,
                 view.paddingRight,
-                max(imeInsets.bottom, systemInsets.bottom)
+                bottomInset
             )
+
+            val rawHeight = if (view.height > 0) view.height else view.measuredHeight
+            val viewportHeight = max(0, rawHeight - topInset - bottomInset)
+            dispatchImeInsets(bottomInset, viewportHeight)
+
             insets
         }
 
@@ -151,5 +159,17 @@ class MainActivity : AppCompatActivity() {
         controller.hide(WindowInsetsCompat.Type.systemBars())
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
+
+    private fun dispatchImeInsets(bottomInset: Int, viewportHeight: Int) {
+        val lastDispatch = lastImeDispatch
+        val current = bottomInset to viewportHeight
+        if (lastDispatch == current) {
+            return
+        }
+
+        lastImeDispatch = current
+        val script = "window.__NATIVE_IME__ && window.__NATIVE_IME__.update({bottom:$bottomInset,viewport:$viewportHeight});"
+        webView.evaluateJavascript(script, null)
     }
 }
