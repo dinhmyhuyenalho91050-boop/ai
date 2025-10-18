@@ -47,7 +47,7 @@ class MainActivity : AppCompatActivity() {
         splashScreen.setKeepOnScreenCondition { !isContentReady }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.setSoftInputMode(
-            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING or
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN
         )
         setContentView(R.layout.activity_main)
