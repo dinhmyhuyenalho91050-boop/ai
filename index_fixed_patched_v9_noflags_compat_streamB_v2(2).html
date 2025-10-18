@@ -937,15 +937,59 @@ class StorageManager{
   static _storeName='chatData';
   static _queue=new Map();
   static _initPromise=null;
-  
-  static async init(){
-    const box=Utils.$('#messages');
-    if(box){
-      const mo=new MutationObserver((muts)=>{
-        for(const m of muts){ for(const n of m.addedNodes){ if(n.nodeType===1 && n.classList.contains('msg')) this.animateIn(n); }}
-      });
-      mo.observe(box,{childList:true});
+  static _messagesObserver=null;
+  static _messagesObserverTarget=null;
+  static _messagesObserverHandler=null;
+
+  static registerMessagesObserverHandler(handler){
+    this._messagesObserverHandler=typeof handler==='function'?handler:null;
+    if(this._messagesObserverHandler){
+      this._ensureMessagesObserver();
+    }else{
+      this._teardownMessagesObserver();
     }
+  }
+
+  static _ensureMessagesObserver(){
+    if(!this._messagesObserverHandler){
+      this._teardownMessagesObserver();
+      return;
+    }
+    const box=Utils.$('#messages');
+    if(!box){
+      this._teardownMessagesObserver();
+      return;
+    }
+
+    if(!this._messagesObserver){
+      this._messagesObserver=new MutationObserver((muts)=>{
+        if(!this._messagesObserverHandler)return;
+        for(const m of muts){
+          for(const n of m.addedNodes||[]){
+            if(n&&n.nodeType===1&&n.classList&&n.classList.contains('msg')){
+              try{ this._messagesObserverHandler(n); }catch{}
+            }
+          }
+        }
+      });
+    }
+
+    if(this._messagesObserverTarget!==box){
+      try{ this._messagesObserver.disconnect(); }catch{}
+      try{ this._messagesObserver.observe(box,{childList:true}); }catch{}
+      this._messagesObserverTarget=box;
+    }
+  }
+
+  static _teardownMessagesObserver(){
+    if(this._messagesObserver){
+      try{ this._messagesObserver.disconnect(); }catch{}
+    }
+    this._messagesObserverTarget=null;
+  }
+
+  static async init(){
+    this._ensureMessagesObserver();
     if(this._db)return this._db;
     if(this._initPromise)return this._initPromise;
     
@@ -1602,7 +1646,7 @@ class UIManager{
     this.regexProcessor=new RegexProcessor();
     this.observerMgr=new LeakSafeObserverManager();
     this.windowManager=new MessageWindowManager();
-    
+
     // ✅ 核心改进1：维护idx到element的映射
     this.messageElements=new Map();
     
@@ -1622,8 +1666,10 @@ class UIManager{
     this._settingsRendered=false;
     this.isLoadingEarlier=false;
     this._regexInputDebounced=null;
-    
+
     window._sanitizer=this.sanitizer;
+
+    StorageManager.registerMessagesObserverHandler((el)=>this.animateIn(el));
   }
 
   /* === Motion & Scroll helpers (added) === */
@@ -1711,20 +1757,6 @@ class UIManager{
 
   
   async init(){
-    // 自动动效：对新加入的消息元素添加入场动画
-    const __boxMOBox=Utils.$('#messages');
-    if(__boxMOBox && !this._moSetup){
-      this._moSetup=true;
-      const __mo=new MutationObserver((muts)=>{
-        for(const m of muts){
-          for(const n of m.addedNodes){
-            if(n && n.nodeType===1 && n.classList && n.classList.contains('msg')) this.animateIn(n);
-          }
-        }
-      });
-      __mo.observe(__boxMOBox,{childList:true});
-    }
-
     // 等待状态初始化完成
     await this.state.init();
     
@@ -3713,6 +3745,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   }
   
   cleanup(){
+    StorageManager.registerMessagesObserverHandler(null);
     this.observerMgr.cleanupAll();
     this.api.abort();
     this.events.cleanup();
