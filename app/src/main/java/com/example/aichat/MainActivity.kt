@@ -25,6 +25,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private var isContentReady = false
     private var lastImeDispatch: Pair<Int, Int>? = null
+    private var pendingImeDispatch: Pair<Int, Int>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
@@ -118,6 +119,7 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 isContentReady = true
+                flushPendingImeDispatch()
             }
 
             override fun onReceivedError(
@@ -161,15 +163,45 @@ class MainActivity : AppCompatActivity() {
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
-    private fun dispatchImeInsets(bottomInset: Int, viewportHeight: Int) {
-        val lastDispatch = lastImeDispatch
+    private fun dispatchImeInsets(bottomInset: Int, viewportHeight: Int, force: Boolean = false) {
         val current = bottomInset to viewportHeight
-        if (lastDispatch == current) {
+        if (!force && pendingImeDispatch == current) {
             return
         }
 
-        lastImeDispatch = current
-        val script = "window.__NATIVE_IME__ && window.__NATIVE_IME__.update({bottom:$bottomInset,viewport:$viewportHeight});"
-        webView.evaluateJavascript(script, null)
+        if (!force && pendingImeDispatch == null && lastImeDispatch == current) {
+            return
+        }
+
+        val script = """
+            (function() {
+                if (window.__NATIVE_IME__ && typeof window.__NATIVE_IME__.update === 'function') {
+                    window.__NATIVE_IME__.update({bottom:$bottomInset,viewport:$viewportHeight});
+                    return 'sent';
+                }
+                return 'queue';
+            })();
+        """.trimIndent()
+
+        webView.evaluateJavascript(script) { result ->
+            when (result?.trim('"')) {
+                "sent" -> {
+                    lastImeDispatch = current
+                    if (pendingImeDispatch == current) {
+                        pendingImeDispatch = null
+                    }
+                }
+
+                else -> {
+                    pendingImeDispatch = current
+                }
+            }
+        }
+    }
+
+    private fun flushPendingImeDispatch() {
+        val pending = pendingImeDispatch ?: return
+        pendingImeDispatch = null
+        dispatchImeInsets(pending.first, pending.second, force = true)
     }
 }
