@@ -10,6 +10,7 @@
     --accent3:#10b981;--danger:#ef4444;--border:#1f2937;--shadow:rgba(0,0,0,.3);--glow:rgba(96,165,250,.15);
     --transition-fast:.15s cubic-bezier(0.4,0,0.2,1);--transition-normal:.2s ease;--transition-slow:.3s cubic-bezier(.4,0,.2,1);
     --shadow-sm:0 2px 8px var(--shadow);--shadow-md:0 4px 16px var(--shadow);--shadow-lg:0 22px 60px rgba(0,0,0,.55);
+    --native-ime-bottom:0px;--native-viewport-height:100vh;
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%}
@@ -105,6 +106,10 @@
   dialog{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);margin:0;border:none;border-radius:1rem;background:var(--panel);color:var(--fg);
     width:min(960px,94vw);max-height:88vh;padding:0;box-shadow:var(--shadow-lg);z-index:1200}
   dialog::backdrop{background:rgba(0,0,0,.7)}
+  body.ime-open dialog{top:auto;bottom:calc(var(--native-ime-bottom,0px) + 16px);transform:translate(-50%,0);
+    max-height:max(320px,calc(var(--native-viewport-height,100vh) - 32px));}
+  body.ime-open dialog .settings{max-height:max(280px,calc(var(--native-viewport-height,100vh) - 64px));}
+  body.ime-open dialog .pane{max-height:max(160px,calc(var(--native-viewport-height,100vh) - 200px));}
   .settings{display:grid;grid-template-columns:200px 1fr;min-height:500px}
   .settings .tabs{border-right:1px solid var(--border);background:rgba(0,0,0,.2);overflow:auto}
   .settings .tabs::-webkit-scrollbar{width:0;height:0}
@@ -449,6 +454,36 @@
 </div>
 <script>
 (function(){'use strict';
+
+const NativeImeBridge=(()=>{
+  const docEl=document.documentElement;
+  const body=document.body;
+  let lastBottom=0;
+  let lastViewport=0;
+
+  const applyState=({bottom=0,viewport=0}={})=>{
+    lastBottom=Number.isFinite(bottom)&&bottom>0?bottom:0;
+    if(Number.isFinite(viewport)&&viewport>0){
+      lastViewport=viewport;
+    }
+    docEl.style.setProperty('--native-ime-bottom',`${lastBottom}px`);
+    if(lastViewport>0){
+      docEl.style.setProperty('--native-viewport-height',`${lastViewport}px`);
+    }else{
+      docEl.style.removeProperty('--native-viewport-height');
+    }
+    body.classList.toggle('ime-open',lastBottom>0);
+  };
+
+  const refresh=()=>applyState({bottom:lastBottom,viewport:lastViewport});
+
+  return{update:applyState,refresh};
+})();
+
+if(!window.__NATIVE_IME__){
+  window.__NATIVE_IME__=NativeImeBridge;
+}
+
 
 // ===== 配置 - 降低虚拟化阈值 =====
 const CONFIG={
@@ -3375,7 +3410,14 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       this.events.on(btnSettings,'click',()=>{
         this.loadSettingsUI();
         this.updateStorageInfo();
-        Utils.$('#dlgSettings')?.showModal();
+        const dlg=Utils.$('#dlgSettings');
+        dlg?.showModal();
+        if(dlg){
+          dlg.addEventListener('close',()=>{
+            requestAnimationFrame(()=>window.__NATIVE_IME__?.refresh?.());
+          },{once:true});
+        }
+        window.__NATIVE_IME__?.refresh?.();
       });
     }
   }
