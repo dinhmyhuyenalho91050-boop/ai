@@ -187,9 +187,7 @@ class MainActivity : AppCompatActivity() {
             when (result?.trim('"')) {
                 "sent" -> {
                     lastImeDispatch = current
-                    if (pendingImeDispatch == current) {
-                        pendingImeDispatch = null
-                    }
+                    pendingImeDispatch = null
                 }
 
                 else -> {
