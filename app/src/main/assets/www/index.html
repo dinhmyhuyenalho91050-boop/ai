@@ -10,6 +10,7 @@
     --accent3:#10b981;--danger:#ef4444;--border:#1f2937;--shadow:rgba(0,0,0,.3);--glow:rgba(96,165,250,.15);
     --transition-fast:.15s cubic-bezier(0.4,0,0.2,1);--transition-normal:.2s ease;--transition-slow:.3s cubic-bezier(.4,0,.2,1);
     --shadow-sm:0 2px 8px var(--shadow);--shadow-md:0 4px 16px var(--shadow);--shadow-lg:0 22px 60px rgba(0,0,0,.55);
+    --native-ime-bottom:0px;--native-ime-total-bottom:0px;--native-viewport-height:100vh;
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%}
@@ -105,6 +106,14 @@
   dialog{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);margin:0;border:none;border-radius:1rem;background:var(--panel);color:var(--fg);
     width:min(960px,94vw);max-height:88vh;padding:0;box-shadow:var(--shadow-lg);z-index:1200}
   dialog::backdrop{background:rgba(0,0,0,.7)}
+  body.ime-open dialog{
+    top:max(24px,calc(50% - var(--native-ime-bottom,0px)/2));
+    transform:translate(-50%,-50%);
+    max-height:max(320px,calc(var(--native-viewport-height,100vh) - 32px));
+    margin-bottom:var(--native-ime-total-bottom,0px);
+  }
+  body.ime-open dialog .settings{max-height:max(280px,calc(var(--native-viewport-height,100vh) - 80px));}
+  body.ime-open dialog .pane{max-height:max(160px,calc(var(--native-viewport-height,100vh) - 212px));}
   .settings{display:grid;grid-template-columns:200px 1fr;min-height:500px}
   .settings .tabs{border-right:1px solid var(--border);background:rgba(0,0,0,.2);overflow:auto}
   .settings .tabs::-webkit-scrollbar{width:0;height:0}
@@ -449,6 +458,50 @@
 </div>
 <script>
 (function(){'use strict';
+
+const NativeImeBridge=(()=>{
+  const docEl=document.documentElement;
+  const body=document.body;
+  let lastBottom=0;
+  let lastTotal=0;
+  let lastViewport=0;
+
+  const applyState=({bottom=0,total=0,viewport=0}={})=>{
+    lastBottom=Number.isFinite(bottom)&&bottom>0?bottom:0;
+    lastTotal=Number.isFinite(total)&&total>0?total:0;
+    if(Number.isFinite(viewport)&&viewport>0){
+      lastViewport=viewport;
+    }
+    if(lastBottom>0){
+      docEl.style.setProperty('--native-ime-bottom',`${lastBottom}px`);
+    }else{
+      docEl.style.removeProperty('--native-ime-bottom');
+    }
+    if(lastTotal>0){
+      docEl.style.setProperty('--native-ime-total-bottom',`${lastTotal}px`);
+    }else{
+      docEl.style.removeProperty('--native-ime-total-bottom');
+    }
+    if(lastViewport>0){
+      docEl.style.setProperty('--native-viewport-height',`${lastViewport}px`);
+    }else{
+      docEl.style.removeProperty('--native-viewport-height');
+    }
+    body.classList.toggle('ime-open',lastBottom>0);
+    window.dispatchEvent(new CustomEvent('nativeimechange',{
+      detail:{bottom:lastBottom,total:lastTotal,viewport:lastViewport}
+    }));
+  };
+
+  const refresh=()=>applyState({bottom:lastBottom,total:lastTotal,viewport:lastViewport});
+
+  return{update:applyState,refresh};
+})();
+
+if(!window.__NATIVE_IME__){
+  window.__NATIVE_IME__=NativeImeBridge;
+}
+
 
 // ===== 配置 - 降低虚拟化阈值 =====
 const CONFIG={
@@ -3375,7 +3428,14 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       this.events.on(btnSettings,'click',()=>{
         this.loadSettingsUI();
         this.updateStorageInfo();
-        Utils.$('#dlgSettings')?.showModal();
+        const dlg=Utils.$('#dlgSettings');
+        dlg?.showModal();
+        if(dlg){
+          dlg.addEventListener('close',()=>{
+            requestAnimationFrame(()=>window.__NATIVE_IME__?.refresh?.());
+          },{once:true});
+        }
+        window.__NATIVE_IME__?.refresh?.();
       });
     }
   }
@@ -3959,6 +4019,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       active:false,
       baseVVH:(this._vvAvailable?visualViewport.height:null),
       baseInnerH:typeof window!=='undefined'?window.innerHeight:null,
+      nativeBottom:0,
       wasNearBottom:false,
       stickScheduled:false,
     };
@@ -3972,7 +4033,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           vvInset=ov;
         }catch(e){}
       }
-      const pad=Math.round(composerH+vvInset+8);
+      const nativeInset=this._ime?.nativeBottom||0;
+      const pad=Math.round(composerH+Math.max(vvInset,nativeInset)+8);
       box.style.setProperty('--composer-pad',pad+'px');
       if(this._ime?.active&&this._ime.wasNearBottom&&!this._ime.stickScheduled){
         this._ime.stickScheduled=true;
@@ -4055,6 +4117,28 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       }
     });
     this.events.on(window,'resize',onWindowResize,{passive:true});
+    const onNativeIME=(evt)=>{
+      if(!this._ime)return;
+      const detail=evt?.detail||{};
+      const nativeBottom=detail.total??detail.bottom??0;
+      this._ime.nativeBottom=Math.max(0,Number(nativeBottom)||0);
+      if((detail.bottom??0)>0){
+        this._ime.wasNearBottom=this.isNearBottom(box);
+      }else{
+        this._ime.wasNearBottom=false;
+      }
+      updatePad();
+      if(this._ime.nativeBottom>0&&this._ime.wasNearBottom&&!this._ime.stickScheduled){
+        this._ime.stickScheduled=true;
+        requestAnimationFrame(()=>{
+          this._ime.stickScheduled=false;
+          if(this._ime.nativeBottom>0&&!this.isNearBottom(box)){
+            this._smoothStickBottom(220);
+          }
+        });
+      }
+    };
+    this.events.on(window,'nativeimechange',onNativeIME,{passive:true});
     requestAnimationFrame(()=>this._updateBottomPadding());
   }
 }

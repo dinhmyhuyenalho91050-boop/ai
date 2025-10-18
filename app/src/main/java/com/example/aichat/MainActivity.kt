@@ -161,18 +161,19 @@ class MainActivity : AppCompatActivity() {
 
             val baselineViewport = if (baseViewportHeight > 0) baseViewportHeight else viewportWithoutIme
             val consumedByResize = max(0, baselineViewport - viewportWithoutIme)
-            val effectiveImeInset = max(0, imeInsets.bottom - consumedByResize)
-            val bottomInset = systemBottom + effectiveImeInset
+            val imeHeight = max(0, imeInsets.bottom - systemBottom)
+            val effectiveImeInset = max(0, imeHeight - consumedByResize)
+            val totalBottomInset = systemBottom + effectiveImeInset
 
             view.setPadding(
                 view.paddingLeft,
                 topInset,
                 view.paddingRight,
-                bottomInset
+                totalBottomInset
             )
 
             val viewportHeight = if (rawHeight > 0) {
-                max(0, rawHeight - topInset - bottomInset)
+                max(0, rawHeight - topInset - totalBottomInset)
             } else {
                 viewportWithoutIme
             }
@@ -181,7 +182,7 @@ class MainActivity : AppCompatActivity() {
                 baseViewportHeight = viewportHeight
             }
 
-            dispatchImeInsets(bottomInset, viewportHeight)
+            dispatchImeInsets(effectiveImeInset, viewportHeight, totalBottomInset)
 
             insets
         }
@@ -196,15 +197,15 @@ class MainActivity : AppCompatActivity() {
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
-    private fun dispatchImeInsets(bottomInset: Int, viewportHeight: Int) {
+    private fun dispatchImeInsets(imeInset: Int, viewportHeight: Int, totalInset: Int) {
         val lastDispatch = lastImeDispatch
-        val current = bottomInset to viewportHeight
+        val current = totalInset to viewportHeight
         if (lastDispatch == current) {
             return
         }
 
         lastImeDispatch = current
-        val script = "window.__NATIVE_IME__ && window.__NATIVE_IME__.update({bottom:$bottomInset,viewport:$viewportHeight});"
+        val script = "window.__NATIVE_IME__ && window.__NATIVE_IME__.update({bottom:$imeInset,total:$totalInset,viewport:$viewportHeight});"
         webView.evaluateJavascript(script, null)
     }
 }
