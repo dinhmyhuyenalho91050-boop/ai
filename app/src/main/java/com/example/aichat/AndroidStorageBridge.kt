@@ -114,8 +114,10 @@ class AndroidStorageBridge(context: Context, webView: WebView) {
             append(errorMessage?.let { JSONObject.quote(it) } ?: "null")
             append(");}")
         }
-        webViewRef.get()?.post {
-            it.evaluateJavascript(js, null)
+        webViewRef.get()?.let { webView ->
+            webView.post {
+                webView.evaluateJavascript(js, null)
+            }
         }
     }
 
