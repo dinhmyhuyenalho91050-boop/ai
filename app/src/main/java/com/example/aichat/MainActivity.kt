@@ -6,6 +6,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.OvershootInterpolator
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -22,26 +23,26 @@ import kotlin.math.max
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private var isContentReady = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
         setTheme(R.style.Theme_AIChatApp)
         super.onCreate(savedInstanceState)
+        isContentReady = savedInstanceState != null
         splashScreen.setOnExitAnimationListener { provider ->
             val iconView = provider.iconView
-            if (iconView != null) {
-                iconView.animate()
-                    .setDuration(420)
-                    .setInterpolator(OvershootInterpolator())
-                    .scaleX(1.18f)
-                    .scaleY(1.18f)
-                    .alpha(0f)
-                    .withEndAction { provider.remove() }
-                    .start()
-            } else {
-                provider.remove()
-            }
+            val targetView = iconView ?: provider.view
+            targetView.animate()
+                .setDuration(420)
+                .setInterpolator(OvershootInterpolator())
+                .scaleX(1.18f)
+                .scaleY(1.18f)
+                .alpha(0f)
+                .withEndAction { provider.remove() }
+                .start()
         }
+        splashScreen.setKeepOnScreenCondition { !isContentReady }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.setSoftInputMode(
             WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
@@ -54,6 +55,7 @@ class MainActivity : AppCompatActivity() {
 
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
+            isContentReady = true
         } else {
             webView.loadUrl("file:///android_asset/www/index.html")
         }
@@ -110,6 +112,20 @@ class MainActivity : AppCompatActivity() {
                 request: WebResourceRequest?
             ): Boolean {
                 return false
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                isContentReady = true
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                super.onReceivedError(view, request, error)
+                isContentReady = true
             }
         }
 
