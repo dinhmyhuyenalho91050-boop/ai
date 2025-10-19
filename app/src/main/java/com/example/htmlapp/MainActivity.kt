@@ -12,10 +12,8 @@ import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
 
@@ -81,27 +79,9 @@ class MainActivity : AppCompatActivity() {
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, max(ime.bottom, systemBars.bottom))
-            WindowInsetsCompat.CONSUMED
+            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+            insets
         }
-
-        ViewCompat.setWindowInsetsAnimationCallback(
-            root,
-            object : WindowInsetsAnimationCompat.Callback(
-                WindowInsetsAnimationCompat.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE
-            ) {
-                override fun onProgress(
-                    insets: WindowInsetsCompat,
-                    runningAnimations: MutableList<WindowInsetsAnimationCompat>
-                ): WindowInsetsCompat {
-                    val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-                    val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom
-                    root.setPadding(root.paddingLeft, root.paddingTop, root.paddingRight, max(ime, systemBars))
-                    return insets
-                }
-            }
-        )
     }
 
     private fun setupBackNavigation() {
