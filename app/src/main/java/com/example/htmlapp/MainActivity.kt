@@ -3,8 +3,11 @@ package com.example.htmlapp
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -14,6 +17,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.IBinder
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.view.View
@@ -38,6 +42,8 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.webkit.WebSettingsCompat
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import kotlin.math.max
 import java.io.File
 import java.io.FileOutputStream
@@ -47,6 +53,11 @@ import android.util.Base64
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import org.json.JSONObject
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -63,6 +74,9 @@ class MainActivity : AppCompatActivity() {
     private var lastRendererWaived: Boolean? = null
     private var isPageReady = false
     private var pendingVisibilityState: String? = null
+    private var connectionService: ConnectionService? = null
+    private var connectionServiceBound = false
+    private var connectionEventJob: Job? = null
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
             handleAppVisibility(true)
@@ -70,6 +84,31 @@ class MainActivity : AppCompatActivity() {
 
         override fun onStop(owner: LifecycleOwner) {
             handleAppVisibility(false)
+        }
+    }
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as? ConnectionService.LocalBinder ?: return
+            val instance = binder.getService()
+            connectionService = instance
+            connectionServiceBound = true
+            instance.setClientActive(isAppInForeground)
+            instance.startConnection()
+            connectionEventJob?.cancel()
+            connectionEventJob = lifecycleScope.launch {
+                instance.events.collectLatest { event ->
+                    handleConnectionEvent(event)
+                }
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            connectionEventJob?.cancel()
+            connectionEventJob = null
+            connectionService?.setClientActive(false)
+            connectionService = null
+            connectionServiceBound = false
         }
     }
 
@@ -111,6 +150,7 @@ class MainActivity : AppCompatActivity() {
         configureWebView()
         setupWindowInsets(root)
         setupBackNavigation()
+        startConnectionService()
         handleAppVisibility(true)
         notifyWebVisibility("foreground")
         ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver)
@@ -300,6 +340,7 @@ class MainActivity : AppCompatActivity() {
         if (this::downloadBridge.isInitialized) {
             downloadBridge.dispose()
         }
+        unbindConnectionService()
         ProcessLifecycleOwner.get().lifecycle.removeObserver(appVisibilityObserver)
         super.onDestroy()
     }
@@ -335,6 +376,13 @@ class MainActivity : AppCompatActivity() {
     private fun handleAppVisibility(isForeground: Boolean) {
         val changed = isAppInForeground != isForeground
         isAppInForeground = isForeground
+        if (isForeground) {
+            bindConnectionService()
+        } else {
+            connectionService?.setClientActive(false)
+            unbindConnectionService()
+        }
+        connectionService?.setClientActive(isForeground)
         updateWebViewActivityState()
         if (changed) {
             notifyWebVisibility(if (isForeground) "foreground" else "background")
@@ -350,8 +398,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateWebViewActivityState() {
         if (!this::webView.isInitialized) return
-        val keepActive = isAppInForeground || isStreaming
-        if (keepActive) {
+        if (isAppInForeground) {
             if (areImagesBlocked) {
                 webView.settings.blockNetworkImage = false
                 areImagesBlocked = false
@@ -374,17 +421,62 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val desiredPriority = if (!isAppInForeground && isStreaming) {
-                WebView.RENDERER_PRIORITY_IMPORTANT
-            } else {
+            val desiredPriority = if (isAppInForeground) {
                 WebView.RENDERER_PRIORITY_BOUND
+            } else {
+                WebView.RENDERER_PRIORITY_IMPORTANT
             }
-            val desiredWaived = !isAppInForeground && !isStreaming
+            val desiredWaived = !isAppInForeground
             if (desiredPriority != lastRendererPriority || desiredWaived != lastRendererWaived) {
                 webView.setRendererPriorityPolicy(desiredPriority, desiredWaived)
                 lastRendererPriority = desiredPriority
                 lastRendererWaived = desiredWaived
             }
+        }
+    }
+
+    private fun startConnectionService() {
+        val intent = Intent(this, ConnectionService::class.java)
+        ContextCompat.startForegroundService(this, intent)
+        bindConnectionService()
+    }
+
+    private fun bindConnectionService() {
+        if (connectionServiceBound) return
+        val intent = Intent(this, ConnectionService::class.java)
+        connectionServiceBound = bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        if (!connectionServiceBound) {
+            connectionService = null
+        }
+    }
+
+    private fun unbindConnectionService() {
+        if (!connectionServiceBound) return
+        connectionService?.setClientActive(false)
+        try {
+            unbindService(serviceConnection)
+        } catch (_: IllegalArgumentException) {
+        }
+        connectionEventJob?.cancel()
+        connectionEventJob = null
+        connectionService = null
+        connectionServiceBound = false
+    }
+
+    private fun handleConnectionEvent(event: ConnectionService.ConnectionEvent) {
+        if (!this::downloadBridge.isInitialized) return
+        val payload = JSONObject().apply {
+            put("type", event.type.name.lowercase(Locale.ROOT))
+            event.payload?.let { put("payload", it) }
+        }
+        downloadBridge.dispatchConnectionEvent(payload.toString())
+    }
+
+    internal fun dispatchConnectionEventToWeb(eventJson: String) {
+        if (!this::webView.isInitialized) return
+        webView.post {
+            val script = "window.dispatchEvent(new CustomEvent('native-connection',{detail:$eventJson}));"
+            webView.evaluateJavascript(script, null)
         }
     }
 }
@@ -427,6 +519,12 @@ private class DownloadBridge(activity: MainActivity) {
             activity.runOnUiThread {
                 activity.onStreamingStateChanged(active)
             }
+        }
+    }
+
+    fun dispatchConnectionEvent(eventJson: String) {
+        mainHandler.post {
+            activityRef.get()?.dispatchConnectionEventToWeb(eventJson)
         }
     }
 
