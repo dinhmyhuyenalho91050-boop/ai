@@ -2346,18 +2346,21 @@ class UIManager{
   
   flushUpdates(){
     if(this.pendingUpdates.size===0)return;
-    
+
     const session=this.state.getActiveSession();
     if(!session)return;
-    
+
     const history=session.history;
     const total=history.length;
     const box=Utils.$('#messages');
     if(!box)return;
-    
+
     const isNearBottom=this.isNearBottom(box);
+    const prevScrollHeight=box.scrollHeight;
+    const prevScrollTop=box.scrollTop;
+
     this.windowManager.appendNew(total,isNearBottom);
-    
+
     const win=this.windowManager.window;
     const fragment=document.createDocumentFragment();
     const __addedEls=[];
@@ -2373,6 +2376,27 @@ class UIManager{
       }
     }
 
+    const toRemove=[];
+    for(const[msgId,el]of this.messageElements){
+      const idx=visibleIndexMap.get(msgId);
+      if(idx===undefined){
+        toRemove.push({msgId,el});
+      }
+    }
+
+    if(this.editingState){
+      const isEditingBeingRemoved=toRemove.some(({msgId})=>msgId===this.editingState.msgId);
+      if(isEditingBeingRemoved){
+        this.autoSaveEditingMessage();
+      }
+    }
+
+    toRemove.forEach(({msgId,el})=>{
+      this.domPool.release('article',el);
+      el.remove();
+      this.messageElements.delete(msgId);
+    });
+
     for(const msgId of this.pendingUpdates){
       const idx=visibleIndexMap.get(msgId);
       if(idx===undefined)continue;
@@ -2385,18 +2409,23 @@ class UIManager{
       fragment.appendChild(el);
       __addedEls.push(el);
     }
-    
+
     if(fragment.childNodes.length){
       box.appendChild(fragment);
       __addedEls.forEach(el=>this.animateIn(el));
-      
-      if(isNearBottom && !this._suppressAutoStick){
+    }
+
+    const scrollAdjust=prevScrollHeight-box.scrollHeight;
+    if(scrollAdjust>0 && !isNearBottom){
+      box.scrollTop=Math.max(0,prevScrollTop-scrollAdjust);
+    }else if(isNearBottom){
+      if(!this._suppressAutoStick){
         requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
-      }else if(isNearBottom){
+      }else{
         this._pendingStick=true;
       }
     }
-    
+
     this.updateLoadTip(box,win);
     this.pendingUpdates.clear();
   }
