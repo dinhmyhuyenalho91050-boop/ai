@@ -124,6 +124,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureWebView() {
         webView.setBackgroundColor(Color.TRANSPARENT)
+        webView.overScrollMode = View.OVER_SCROLL_NEVER
         with(webView.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -266,6 +267,22 @@ class MainActivity : AppCompatActivity() {
         if (this::webView.isInitialized) {
             webView.postInvalidate()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (this::webView.isInitialized) {
+            webView.onResume()
+            webView.resumeTimers()
+        }
+    }
+
+    override fun onPause() {
+        if (this::webView.isInitialized) {
+            webView.onPause()
+            webView.pauseTimers()
+        }
+        super.onPause()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
