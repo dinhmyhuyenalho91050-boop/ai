@@ -548,11 +548,27 @@ class AdaptiveStreamBatcher{
   }
   
   scheduleUpdate(){
-    if(this.rafId)return;
+    const isBackground=typeof document!=='undefined'&&(document.hidden||window.__APP_VISIBILITY__==='background');
+    if(isBackground&&this.rafId){
+      cancelAnimationFrame(this.rafId);
+      this.rafId=null;
+    }else if(this.rafId){
+      return;
+    }
     const now=performance.now();
     const elapsed=now-this.lastUpdate;
     this.adjustInterval();
-    
+
+    if(isBackground){
+      const delay=Math.max(this.currentInterval,120);
+      if(this.timeoutId)clearTimeout(this.timeoutId);
+      this.timeoutId=setTimeout(()=>{
+        this.timeoutId=null;
+        this.flush();
+      },delay);
+      return;
+    }
+
     if(elapsed>=this.currentInterval){
       this.rafId=requestAnimationFrame(()=>this.flush());
     }else{
@@ -1811,10 +1827,15 @@ class UIManager{
     this._settingsRendered=false;
     this.isLoadingEarlier=false;
     this._regexInputDebounced=null;
+    this._pendingTypingUpdate=null;
+    this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
 
     window._sanitizer=this.sanitizer;
 
     StorageManager.registerMessagesObserverHandler((el)=>this.animateIn(el));
+    this.events.on(document,'visibilitychange',()=>{
+      this._handleVisibilityChange(document.hidden);
+    });
   }
 
   /* === Motion & Scroll helpers (added) === */
@@ -1839,6 +1860,43 @@ class UIManager{
       el.addEventListener('transitionend',done);
       setTimeout(done, 280);
     });
+  }
+
+  _handleVisibilityChange(isHidden){
+    const hidden=!!isHidden;
+    if(this._appHidden===hidden)return;
+    this._appHidden=hidden;
+    if(hidden){
+      this.dom.stopAutoCleanup();
+    }else{
+      this.dom.startAutoCleanup();
+      this.flushPendingTyping(true);
+    }
+  }
+
+  _isBackgroundActive(){
+    return !!this._appHidden;
+  }
+
+  flushPendingTyping(forceStick=false){
+    const pending=this._pendingTypingUpdate;
+    if(!pending)return;
+    this._pendingTypingUpdate=null;
+    const {el,text,thinking}=pending;
+    if(!el||!el.isConnected)return;
+    this.updateTyping(el,text,thinking,true);
+    if(forceStick){
+      try{
+        const box=Utils.$('#messages');
+        if(box&&this.isNearBottom(box)){
+          requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
+        }
+      }catch(e){}
+    }
+  }
+
+  onNativeVisibilityChange(state){
+    this._handleVisibilityChange(state==='background');
   }
   preserveScroll(fn){
     const box=Utils.$('#messages');
@@ -2557,12 +2615,18 @@ box.appendChild(el);
     return el;
   }
   
-  updateTyping(el,text,thinking){
+  updateTyping(el,text,thinking,forceRender=false){
     if(!el)return;
-    
+
+    if(!forceRender&&this._isBackgroundActive()){
+      this._pendingTypingUpdate={el,text,thinking};
+      return;
+    }
+    this._pendingTypingUpdate=null;
+
     const box=Utils.$('#messages');
     const shouldStick=box?this.isNearBottom(box):false;
-    
+
     // ✅ 使用缓存的body元素
     const body=this.typingBodyCache;
     if(body){
@@ -2652,14 +2716,17 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       cancelAnimationFrame(this._scrollRAF);
       this._scrollRAF=null;
     }
-    
+
     if(el){
       if(el.parentNode){
         this.domPool.release('article',el);
         el.remove();
       }
     }
-    
+
+    if(this._pendingTypingUpdate&&this._pendingTypingUpdate.el===el){
+      this._pendingTypingUpdate=null;
+    }
     this.typingElement=null;
     this.typingBodyCache=null;  // ✅ 清理缓存
   }
@@ -4079,11 +4146,16 @@ class ChatApp{
   
   async init(){
     await this.ui.init();
-    
+
+    const visibility=window.__APP_VISIBILITY__||(document.hidden?'background':'foreground');
+    if(typeof this.ui.onNativeVisibilityChange==='function'){
+      try{ this.ui.onNativeVisibilityChange(visibility); }catch(e){}
+    }
+
     window.addEventListener('beforeunload',()=>{
       this.ui.cleanup();
     });
-    
+
     window.addEventListener('visibilitychange',()=>{
       if(document.hidden){
         this.state.forceSave();
@@ -4242,6 +4314,31 @@ if(document.readyState==='loading'){
       window.visualViewport.addEventListener('resize', applyThrottled);
     }
   })();
+})();
+</script>
+
+<script>
+(function(){
+  'use strict';
+  const applyState=(state)=>{
+    const normalized=state==='background'?'background':'foreground';
+    window.__APP_VISIBILITY__=normalized;
+    const ui=window.chatApp?.ui;
+    if(ui&&typeof ui.onNativeVisibilityChange==='function'){
+      try{ ui.onNativeVisibilityChange(normalized); }catch(e){}
+    }
+  };
+
+  window.__APP_VISIBILITY__=window.__APP_VISIBILITY__||(document.hidden?'background':'foreground');
+  window.__setNativeVisibility=(state)=>{
+    applyState(state);
+  };
+
+  document.addEventListener('visibilitychange',()=>{
+    applyState(document.hidden?'background':'foreground');
+  },{passive:true});
+
+  applyState(window.__APP_VISIBILITY__);
 })();
 </script>
 
