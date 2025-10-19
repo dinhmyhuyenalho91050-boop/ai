@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ContentValues
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -35,13 +36,16 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.webkit.WebSettingsCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
 import android.util.Base64
-import java.util.concurrent.Executors
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -119,9 +123,23 @@ class MainActivity : AppCompatActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             useWideViewPort = true
             loadWithOverviewMode = true
+            setSupportZoom(false)
+            builtInZoomControls = false
+            displayZoomControls = false
+            offscreenPreRaster = false
         }
 
         webView.isVerticalScrollBarEnabled = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WebView.setSafeBrowsingEnabled(false)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            WebSettingsCompat.setForceDark(webView.settings, WebSettingsCompat.FORCE_DARK_ON)
+            try {
+                WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, true)
+            } catch (_: Throwable) {
+            }
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         }
@@ -209,6 +227,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val root = findViewById<View>(R.id.root_container)
+        setupWindowInsets(root)
+        if (this::webView.isInitialized) {
+            webView.postInvalidate()
+        }
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
@@ -259,8 +286,19 @@ class MainActivity : AppCompatActivity() {
 private class DownloadBridge(activity: MainActivity) {
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "DownloadBridgeIo").apply { isDaemon = true }
+    private val ioExecutor: ExecutorService = ThreadPoolExecutor(
+        0,
+        Runtime.getRuntime().availableProcessors(),
+        30L,
+        TimeUnit.SECONDS,
+        SynchronousQueue()
+    ) { runnable ->
+        Thread(runnable, "bg-io").apply {
+            priority = Thread.MIN_PRIORITY
+            isDaemon = true
+        }
+    }.apply {
+        allowCoreThreadTimeOut(true)
     }
 
     fun dispose() {
