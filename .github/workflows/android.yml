@@ -1,0 +1,34 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ work ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build release APK
+        uses: gradle/gradle-build-action@v2
+        with:
+          gradle-version: '8.7'
+          arguments: assembleRelease
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: app/build/outputs/apk/release/*.apk
