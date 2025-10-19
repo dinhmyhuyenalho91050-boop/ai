@@ -2321,18 +2321,29 @@ class UIManager{
     const win=this.windowManager.window;
     const fragment=document.createDocumentFragment();
     const __addedEls=[];
-    
-    for(let msgId of this.pendingUpdates){
-      const msg=history.find(m=>m.id===msgId);
-      if(!msg)continue;
-      
-      const idx=history.indexOf(msg);
-      if(idx>=win.start&&idx<=win.end&&!this.messageElements.has(msgId)){
-        const el=this.buildMessageElement(msg,idx);
-        this.messageElements.set(msgId,el);
-        fragment.appendChild(el);
-        __addedEls.push(el);
+
+    const start=Math.max(0,win.start|0);
+    const end=Math.min(total-1,win.end|0);
+    const visibleIndexMap=new Map();
+
+    for(let i=start;i<=end;i++){
+      const msg=history[i];
+      if(msg&&msg.id){
+        visibleIndexMap.set(msg.id,i);
       }
+    }
+
+    for(const msgId of this.pendingUpdates){
+      const idx=visibleIndexMap.get(msgId);
+      if(idx===undefined)continue;
+
+      const msg=history[idx];
+      if(!msg||this.messageElements.has(msgId))continue;
+
+      const el=this.buildMessageElement(msg,idx);
+      this.messageElements.set(msgId,el);
+      fragment.appendChild(el);
+      __addedEls.push(el);
     }
     
     if(fragment.childNodes.length){
