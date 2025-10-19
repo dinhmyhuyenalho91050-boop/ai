@@ -37,7 +37,6 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.webkit.WebSettingsCompat
-import androidx.webkit.WebViewCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -133,7 +132,11 @@ class MainActivity : AppCompatActivity() {
         webView.isVerticalScrollBarEnabled = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
-                WebViewCompat.setSafeBrowsingEnabled(webView, false)
+                val method = WebView::class.java.getMethod(
+                    "setSafeBrowsingEnabled",
+                    Boolean::class.javaPrimitiveType
+                )
+                method.invoke(null, false)
             } catch (_: Throwable) {
             }
         }
