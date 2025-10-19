@@ -214,9 +214,20 @@
 
   /* === Mobile viewport stability & IME flicker fixes === */
   html,body{height:100%}
-  #app{min-height:var(--native-viewport-height,100svh);height:var(--native-viewport-height,100svh)}
+  #app{
+    min-height:var(--native-viewport-height, 100svh);
+    height:var(--native-viewport-height, 100svh);
+  }
+  @supports (height:100dvh){
+    #app{
+      min-height:var(--native-viewport-height, 100dvh);
+      height:var(--native-viewport-height, 100dvh);
+    }
+  }
   @supports not (height:100dvh){
-    #app{height:var(--native-viewport-height,100vh)}
+    #app{
+      height:var(--native-viewport-height, 100vh);
+    }
   }
   /* During viewport freeze, lock height and disable scroll anchoring that can cause jumps */
   body.vp-freeze #app{height:var(--vp-lock-h,var(--native-viewport-height,100dvh))}
@@ -228,10 +239,16 @@
 
   /* === Mobile IME flicker hardening (override) === */
   /* Prefer the STABLE viewport units to avoid jumps when address bar/IME changes */
-  #app{min-height:var(--native-viewport-height,100svh) !important;height:var(--native-viewport-height,100svh) !important}
+  #app{
+    min-height:var(--native-viewport-height, 100svh);
+    height:var(--native-viewport-height, 100svh);
+  }
   @supports (height:100dvh){
     /* Use svh as authoritative; dvh can still jump when IME hides */
-    #app{min-height:var(--native-viewport-height,100svh) !important;height:var(--native-viewport-height,100svh) !important}
+    #app{
+      min-height:var(--native-viewport-height, 100dvh);
+      height:var(--native-viewport-height, 100dvh);
+    }
   }
   /* Prevent rubber-banding from interfering with scroll position during transitions */
   html,body{overscroll-behavior-y:contain}
