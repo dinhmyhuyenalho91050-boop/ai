@@ -2928,8 +2928,15 @@ const res = __st.fmt.feed(deltaText);
 // 限制我们自己的 DOM 写频率：即便 120Hz，也不会每帧重绘
 if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs || 16)) {
   __st.lastFlush = now;
-  if (prefixEl.innerHTML !== res.prefixHTML) prefixEl.innerHTML = res.prefixHTML;
-  tailEl.innerHTML = res.tailHTML + '<span class="typing-cursor"></span>';
+  if (res.prefixHTML !== __st.lastPrefixHTML) {
+    prefixEl.innerHTML = res.prefixHTML;
+    __st.lastPrefixHTML = res.prefixHTML;
+  }
+  const nextTail = res.tailHTML + '<span class="typing-cursor"></span>';
+  if (nextTail !== __st.lastTailHTML) {
+    tailEl.innerHTML = nextTail;
+    __st.lastTailHTML = nextTail;
+  }
 }
       
       if(shouldStick&&box && (typeof _lastDeltaChars!=='number' || _lastDeltaChars >= (window.__STREAM_CFG&&window.__STREAM_CFG.scrollDeltaMin||8))){ if(!this._scrollRAF){
@@ -4582,11 +4589,15 @@ if(document.readyState==='loading'){
     scrollDeltaMin: 12
   };
   class StreamFormatterB {
-    constructor(){ this.reset(); }
+    constructor(owner=null){ this._owner = owner; this.reset(); }
     reset(){
       this.prefixHTML = "";
       this.open = { dq:false, cq:false, bold:false };
       this.buf  = { dq:"", cq:"", bold:"", plain:"" };
+      if(this._owner){
+        this._owner.lastPrefixHTML = "";
+        this._owner.lastTailHTML = "";
+      }
     }
     _esc(s){ return String(s).replace(/[&<>"]/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
     _fmtText(s){ return this._esc(s).replace(/\n/g,'<br/>'); }
@@ -4636,7 +4647,8 @@ if(document.readyState==='loading'){
   window.__getStreamState = function(el){
     let st = window.__streamState.get(el);
     if(!st){
-      st = { fmt:new StreamFormatterB(), lastLen:0, lastFlush:0 };
+      st = { fmt:null, lastLen:0, lastFlush:0, lastPrefixHTML:"", lastTailHTML:"" };
+      st.fmt = new StreamFormatterB(st);
       window.__streamState.set(el, st);
     }
     return st;
