@@ -1,14 +1,17 @@
 package com.example.htmlapp
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.ForegroundServiceStartNotAllowedException
 import android.content.ActivityNotFoundException
-import android.content.ContentValues
 import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -18,15 +21,16 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
+import android.util.Log
+import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
-import android.view.View
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.WebChromeClient
-import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.addCallback
 import androidx.activity.result.ActivityResultLauncher
@@ -67,8 +71,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var downloadBridge: DownloadBridge
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
+    private var notificationPermissionLauncher: ActivityResultLauncher<String>? = null
     private var isAppInForeground = true
     private var isStreaming = false
+    private var isConnectionServiceEnabled = false
     private var areTimersPaused = false
     private var areImagesBlocked = false
     private var lastVisibilityState: String? = null
@@ -82,6 +88,8 @@ class MainActivity : AppCompatActivity() {
     private var connectionCallbackName: String? = null
     private val pendingConnectionEvents = ArrayDeque<String>()
     private var isConnectionBinding = false
+    private var isNotificationPermissionRequestInFlight = false
+    private var hasShownNotificationPermissionWarning = false
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
             handleAppVisibility(true)
@@ -137,6 +145,20 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher = registerForActivityResult(
+                ActivityResultContracts.RequestPermission()
+            ) { granted ->
+                isNotificationPermissionRequestInFlight = false
+                if (granted) {
+                    enableConnectionService()
+                } else {
+                    isConnectionServiceEnabled = false
+                    showConnectionPermissionWarning(false)
+                }
+            }
+        }
+
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         val root = findViewById<View>(R.id.root_container)
@@ -172,7 +194,7 @@ class MainActivity : AppCompatActivity() {
         setupBackNavigation()
         LocalBroadcastManager.getInstance(this)
             .registerReceiver(connectionEventReceiver, IntentFilter(ConnectionService.ACTION_EVENT))
-        ConnectionService.startAndConnect(applicationContext)
+        maybeStartConnectionService()
         handleAppVisibility(true)
         notifyWebVisibility("foreground")
         ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver)
@@ -462,6 +484,10 @@ class MainActivity : AppCompatActivity() {
 
     fun sendMessageThroughConnection(payload: String) {
         val message = payload.ifBlank { return }
+        if (!isConnectionServiceEnabled) {
+            showConnectionPermissionWarning(true)
+            return
+        }
         val service = connectionService
         if (service != null && connectionServiceBound) {
             service.sendMessage(message)
@@ -499,17 +525,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleAppVisibility(isForeground: Boolean) {
+        if (isForeground && !isConnectionServiceEnabled) {
+            maybeStartConnectionService()
+        }
         val changed = isAppInForeground != isForeground
         isAppInForeground = isForeground
-        if (isForeground) {
-            ConnectionService.updateClientVisibility(applicationContext, true)
-            bindConnectionService()
-            connectionService?.setClientVisibility(true)
-            flushPendingConnectionEvents()
-        } else {
-            ConnectionService.updateClientVisibility(applicationContext, false)
-            connectionService?.setClientVisibility(false)
-            unbindConnectionService()
+        if (isConnectionServiceEnabled) {
+            if (isForeground) {
+                ConnectionService.updateClientVisibility(applicationContext, true)
+                bindConnectionService()
+                connectionService?.setClientVisibility(true)
+                flushPendingConnectionEvents()
+            } else {
+                ConnectionService.updateClientVisibility(applicationContext, false)
+                connectionService?.setClientVisibility(false)
+                unbindConnectionService()
+            }
         }
         updateWebViewActivityState()
         if (changed) {
@@ -561,6 +592,59 @@ class MainActivity : AppCompatActivity() {
                 lastRendererPriority = desiredPriority
                 lastRendererWaived = desiredWaived
             }
+        }
+    }
+
+    private fun maybeStartConnectionService() {
+        if (isConnectionServiceEnabled) {
+            ConnectionService.startAndConnect(applicationContext)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            when (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)) {
+                PackageManager.PERMISSION_GRANTED -> enableConnectionService()
+                else -> {
+                    if (!isNotificationPermissionRequestInFlight) {
+                        notificationPermissionLauncher?.let {
+                            isNotificationPermissionRequestInFlight = true
+                            it.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    }
+                }
+            }
+        } else {
+            enableConnectionService()
+        }
+    }
+
+    private fun enableConnectionService() {
+        if (isConnectionServiceEnabled) {
+            ConnectionService.startAndConnect(applicationContext)
+            return
+        }
+        try {
+            ConnectionService.startAndConnect(applicationContext)
+            isConnectionServiceEnabled = true
+            handleAppVisibility(isAppInForeground)
+        } catch (e: SecurityException) {
+            Log.w("MainActivity", "Unable to start ConnectionService: missing permission", e)
+            isConnectionServiceEnabled = false
+            showConnectionPermissionWarning(false)
+        } catch (e: ForegroundServiceStartNotAllowedException) {
+            Log.w("MainActivity", "Unable to start ConnectionService", e)
+            isConnectionServiceEnabled = false
+            showConnectionPermissionWarning(false)
+        }
+    }
+
+    private fun showConnectionPermissionWarning(short: Boolean) {
+        if (!short && hasShownNotificationPermissionWarning) {
+            return
+        }
+        val duration = if (short) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+        Toast.makeText(this, getString(R.string.service_permission_required), duration).show()
+        if (!short) {
+            hasShownNotificationPermissionWarning = true
         }
     }
 }

@@ -1,5 +1,6 @@
 package com.example.htmlapp
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -64,7 +65,10 @@ class ConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannels()
-        startForeground(NOTIFICATION_ID, buildStatusNotification(getString(R.string.service_initializing)))
+        if (!startForegroundSafely(getString(R.string.service_initializing))) {
+            stopSelf()
+            return
+        }
         ensureConnection()
     }
 
@@ -291,11 +295,13 @@ class ConnectionService : Service() {
     }
 
     private fun updateForegroundNotification(contentText: String) {
+        if (!canPostNotifications()) return
         val notification = buildStatusNotification(contentText)
         NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification)
     }
 
     private fun showMessageNotification(payload: String) {
+        if (!canPostNotifications()) return
         val preview = if (payload.length > 120) payload.take(117) + "…" else payload
         val intent = Intent(this, MainActivity::class.java)
         val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -313,6 +319,25 @@ class ConnectionService : Service() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         NotificationManagerCompat.from(this).notify(MESSAGE_NOTIFICATION_ID, notification)
+    }
+
+    private fun startForegroundSafely(contentText: String): Boolean {
+        return try {
+            startForeground(NOTIFICATION_ID, buildStatusNotification(contentText))
+            true
+        } catch (e: SecurityException) {
+            false
+        } catch (e: IllegalStateException) {
+            false
+        }
+    }
+
+    private fun canPostNotifications(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            NotificationManagerCompat.from(this).areNotificationsEnabled()
+        }
     }
 
     inner class ConnectionBinder : android.os.Binder() {
