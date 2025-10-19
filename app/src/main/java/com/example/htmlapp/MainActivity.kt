@@ -42,10 +42,8 @@ import java.io.FileOutputStream
 import java.util.UUID
 import android.util.Base64
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.SynchronousQueue
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -112,6 +110,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureWebView() {
         webView.setBackgroundColor(Color.TRANSPARENT)
+        webView.overScrollMode = View.OVER_SCROLL_NEVER
         with(webView.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -243,6 +242,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (this::webView.isInitialized) {
+            webView.onResume()
+            webView.resumeTimers()
+        }
+    }
+
+    override fun onPause() {
+        if (this::webView.isInitialized) {
+            webView.onPause()
+            webView.pauseTimers()
+        }
+        super.onPause()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
@@ -293,19 +308,11 @@ class MainActivity : AppCompatActivity() {
 private class DownloadBridge(activity: MainActivity) {
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = ThreadPoolExecutor(
-        0,
-        Runtime.getRuntime().availableProcessors(),
-        30L,
-        TimeUnit.SECONDS,
-        SynchronousQueue()
-    ) { runnable ->
+    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "bg-io").apply {
             priority = Thread.MIN_PRIORITY
             isDaemon = true
         }
-    }.apply {
-        allowCoreThreadTimeOut(true)
     }
 
     fun dispose() {
