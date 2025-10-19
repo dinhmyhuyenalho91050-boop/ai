@@ -108,7 +108,6 @@
   .composer textarea::placeholder{color:var(--muted)}
   dialog{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);margin:0;border:none;border-radius:1rem;background:var(--panel);color:var(--fg);
     width:min(960px,94vw);max-height:88vh;padding:0;box-shadow:var(--shadow-lg);z-index:1200;transition:top var(--transition-slow),transform var(--transition-slow);}
-  dialog::backdrop{background:rgba(0,0,0,.7)}
   body.ime-open dialog{
     top:max(24px,calc(50% - var(--native-ime-bottom,0px)/2));
     transform:translate(-50%,-50%);
@@ -117,6 +116,7 @@
   }
   body.ime-open dialog .settings{max-height:max(280px,calc(var(--native-viewport-height,100vh) - 80px));}
   body.ime-open dialog .pane{max-height:max(160px,calc(var(--native-viewport-height,100vh) - 212px));}
+  dialog::backdrop{background:rgba(0,0,0,.7)}
   .settings{display:grid;grid-template-columns:200px 1fr;min-height:500px}
   .settings .tabs{border-right:1px solid var(--border);background:rgba(0,0,0,.2);overflow:auto}
   .settings .tabs::-webkit-scrollbar{width:0;height:0}
@@ -510,7 +510,6 @@ const NativeImeBridge=(()=>{
 if(!window.__NATIVE_IME__){
   window.__NATIVE_IME__=NativeImeBridge;
 }
-
 
 // ===== 配置 - 降低虚拟化阈值 =====
 const CONFIG={
@@ -4021,98 +4020,99 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
 
   /* ===== IME-aware auto scroll & bottom padding ===== */
   _setupIMEHandlers(){
-    const box=Utils.$('#messages');
-    const input=Utils.$('#input');
-    if(!box)return;
-    this._ime={
-      active:false,
-      baseVVH:(this._vvAvailable?visualViewport.height:null),
-      nativeBottom:0,
-      wasNearBottom:false,
+    const box = Utils.$('#messages');
+    const input = Utils.$('#input');
+    if(!box) return;
+    this._ime = {
+      active: false,
+      baseVVH: (this._vvAvailable ? visualViewport.height : null),
+      nativeBottom: 0,
+      wasNearBottom: false,
     };
-    this._updateBottomPadding=()=>{
-      const composer=document.querySelector('.composer');
-      const composerH=composer?(composer.offsetHeight||0):0;
-      let vvInset=0;
+    // updater
+    this._updateBottomPadding = ()=>{
+      const composer = document.querySelector('.composer');
+      const composerH = composer ? (composer.offsetHeight || 0) : 0;
+      let vvInset = 0;
       if(this._vvAvailable){
         try{
-          const ov=Math.max(0,(window.innerHeight-visualViewport.height-visualViewport.offsetTop));
-          vvInset=ov;
+          const ov = Math.max(0, (window.innerHeight - visualViewport.height - visualViewport.offsetTop));
+          vvInset = ov;
         }catch(e){}
       }
-      const nativeInset=this._ime?.nativeBottom||0;
-      const keyboardInset=Math.max(vvInset,nativeInset);
-      const pad=Math.round(composerH+keyboardInset+8);
-      box.style.setProperty('--composer-pad',pad+'px');
+      const nativeInset = this._ime?.nativeBottom || 0;
+      const keyboardInset = Math.max(vvInset, nativeInset);
+      const pad = Math.round(composerH + keyboardInset + 8);
+      box.style.setProperty('--composer-pad', pad + 'px');
     };
-    const updatePad=Utils.rafThrottle(()=>this._updateBottomPadding());
+    const updatePad = Utils.rafThrottle(()=> this._updateBottomPadding());
 
-    this._smoothStickBottom=(duration=220)=>{
-      const start=box.scrollTop;
-      const target=box.scrollHeight-box.clientHeight;
-      if(target-start<2){
-        box.scrollTop=target;
+    this._smoothStickBottom = (duration=220)=>{
+      const start = box.scrollTop;
+      const target = box.scrollHeight - box.clientHeight;
+      if(target - start < 2){
+        box.scrollTop = target;
         return;
       }
-      const t0=performance.now();
-      const ease=t=>(t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2);
-      const step=(now)=>{
-        const p=Math.min(1,(now-t0)/duration);
-        box.scrollTop=start+(target-start)*ease(p);
-        if(p<1)requestAnimationFrame(step);
+      const t0 = performance.now();
+      const ease = t => (t<.5 ? 2*t*t : 1 - Math.pow(-2*t+2,2)/2);
+      const step = (now)=>{
+        const p = Math.min(1,(now - t0)/duration);
+        box.scrollTop = start + (target - start) * ease(p);
+        if(p<1) requestAnimationFrame(step);
       };
       requestAnimationFrame(step);
     };
 
     if(input){
-      this.events.on(input,'focus',()=>{
-        this._ime.active=true;
-        this._ime.wasNearBottom=this.isNearBottom(box);
+      this.events.on(input, 'focus', ()=>{
+        this._ime.active = true;
+        this._ime.wasNearBottom = this.isNearBottom(box);
         updatePad();
       });
-      this.events.on(input,'blur',()=>{
-        this._ime.active=false;
+      this.events.on(input, 'blur', ()=>{
+        this._ime.active = false;
         setTimeout(()=>{
           updatePad();
-          if(this.isNearBottom(box))this._smoothStickBottom(180);
-        },60);
+          if(this.isNearBottom(box)) this._smoothStickBottom(180);
+        }, 60);
       });
     }
 
     if(this._vvAvailable){
-      const onVVResize=Utils.rafThrottle(()=>{
+      const onVVResize = Utils.rafThrottle(()=>{
         updatePad();
-        const h=visualViewport.height;
-        if(this._ime.baseVVH==null)this._ime.baseVVH=h;
-        const delta=this._ime.baseVVH-h;
-        const keyboardLikelyOpen=delta>80;
-        if(keyboardLikelyOpen&&this._ime.active&&this._ime.wasNearBottom){
-          requestAnimationFrame(()=>this._smoothStickBottom(220));
+        const h = visualViewport.height;
+        if(this._ime.baseVVH == null) this._ime.baseVVH = h;
+        const delta = (this._ime.baseVVH - h);
+        const keyboardLikelyOpen = delta > 80;
+        if(keyboardLikelyOpen && this._ime.active && this._ime.wasNearBottom){
+          requestAnimationFrame(()=> this._smoothStickBottom(220));
         }
       });
-      this.events.on(visualViewport,'resize',onVVResize,{passive:true});
-      this.events.on(visualViewport,'scroll',updatePad,{passive:true});
+      this.events.on(visualViewport, 'resize', onVVResize, {passive:true});
+      this.events.on(visualViewport, 'scroll', updatePad, {passive:true});
     }
 
-    this.events.on(window,'resize',updatePad,{passive:true});
-    const onNativeIME=(evt)=>{
-      if(!this._ime)return;
-      const detail=evt?.detail||{};
-      const bottomValue=detail.bottom;
-      const nativeBottom=(bottomValue!=null?bottomValue:detail.total)??0;
-      this._ime.nativeBottom=Math.max(0,Number(nativeBottom)||0);
-      if((detail.bottom??0)>0){
-        this._ime.wasNearBottom=this.isNearBottom(box);
-        if(this._ime.active&&this._ime.wasNearBottom){
-          requestAnimationFrame(()=>this._smoothStickBottom(220));
+    this.events.on(window, 'resize', updatePad, {passive:true});
+    const onNativeIME = (evt)=>{
+      if(!this._ime) return;
+      const detail = evt?.detail || {};
+      const bottomValue = detail.bottom;
+      const nativeBottom = (bottomValue != null ? bottomValue : detail.total) ?? 0;
+      this._ime.nativeBottom = Math.max(0, Number(nativeBottom) || 0);
+      if((detail.bottom ?? 0) > 0){
+        this._ime.wasNearBottom = this.isNearBottom(box);
+        if(this._ime.active && this._ime.wasNearBottom){
+          requestAnimationFrame(()=> this._smoothStickBottom(220));
         }
       }else{
-        this._ime.wasNearBottom=false;
+        this._ime.wasNearBottom = false;
       }
       updatePad();
     };
-    this.events.on(window,'nativeimechange',onNativeIME,{passive:true});
-    requestAnimationFrame(()=>this._updateBottomPadding());
+    this.events.on(window, 'nativeimechange', onNativeIME, {passive:true});
+    requestAnimationFrame(()=> this._updateBottomPadding());
   }
 }
 
