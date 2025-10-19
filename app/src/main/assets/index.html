@@ -538,36 +538,61 @@ class AdaptiveStreamBatcher{
     this.currentInterval=30;
     this.avgRenderTime=0;
     this.renderSamples=[];
+    this.isBackground=typeof document!=='undefined'&&(document.hidden||window.__APP_VISIBILITY__==='background');
+    this._skipStopFlush=false;
   }
-  
+
   push(text,thinking){
     this.buffer=text;
     this.thinkingBuffer=thinking||'';
     this.updateCount++;
+    this._skipStopFlush=false;
+    if(this.isBackground)return;
     this.scheduleUpdate();
   }
-  
-  scheduleUpdate(){
-    const isBackground=typeof document!=='undefined'&&(document.hidden||window.__APP_VISIBILITY__==='background');
-    if(isBackground&&this.rafId){
+
+  setBackground(flag){
+    const next=!!flag;
+    if(this.isBackground===next)return;
+    this.isBackground=next;
+    if(next){
+      if(this.rafId){
+        cancelAnimationFrame(this.rafId);
+        this.rafId=null;
+      }
+      if(this.timeoutId){
+        clearTimeout(this.timeoutId);
+        this.timeoutId=null;
+      }
+    }else if(this.buffer){
+      this.scheduleUpdate();
+    }
+  }
+
+  flushPending(force=false){
+    if(this.timeoutId){
+      clearTimeout(this.timeoutId);
+      this.timeoutId=null;
+    }
+    if(this.rafId){
       cancelAnimationFrame(this.rafId);
       this.rafId=null;
-    }else if(this.rafId){
+    }
+    if(force){
+      this._skipStopFlush=true;
+    }
+    if(this.isBackground&&!force)return;
+    this.flush();
+  }
+
+  scheduleUpdate(){
+    if(this.isBackground)return;
+    if(this.rafId){
       return;
     }
     const now=performance.now();
     const elapsed=now-this.lastUpdate;
     this.adjustInterval();
-
-    if(isBackground){
-      const delay=Math.max(this.currentInterval,240);
-      if(this.timeoutId)clearTimeout(this.timeoutId);
-      this.timeoutId=setTimeout(()=>{
-        this.timeoutId=null;
-        this.flush();
-      },delay);
-      return;
-    }
 
     if(elapsed>=this.currentInterval){
       this.rafId=requestAnimationFrame(()=>this.flush());
@@ -623,6 +648,10 @@ class AdaptiveStreamBatcher{
     if(this.timeoutId){
       clearTimeout(this.timeoutId);
       this.timeoutId=null;
+    }
+    if(this._skipStopFlush){
+      this._skipStopFlush=false;
+      return;
     }
     this.flush();
   }
@@ -2021,6 +2050,7 @@ class UIManager{
     this._regexInputDebounced=null;
     this._pendingTypingUpdate=null;
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
+    this._activeBatcher=null;
 
     window._sanitizer=this.sanitizer;
 
@@ -2058,6 +2088,12 @@ class UIManager{
     const hidden=!!isHidden;
     if(this._appHidden===hidden)return;
     this._appHidden=hidden;
+    if(this._activeBatcher){
+      try{ this._activeBatcher.setBackground(hidden); }catch{}
+      if(!hidden){
+        try{ this._activeBatcher.flushPending(true); }catch{}
+      }
+    }
     if(hidden){
       this.dom.stopAutoCleanup();
     }else{
@@ -2747,7 +2783,11 @@ class UIManager{
     const batcher=isStream?new AdaptiveStreamBatcher((text,thinking)=>{
       if(typing) this.updateTyping(typing,text,thinking);
     }):null;
-    
+    if(batcher){
+      this._activeBatcher=batcher;
+      try{ batcher.setBackground(this._appHidden); }catch{}
+    }
+
     try{
       const result=await this.api.send(session,(text,thinking)=>{
         partial=text;
@@ -2755,8 +2795,8 @@ class UIManager{
         if(batcher)batcher.push(text,thinking);
         else this.updateTyping(typing,text,thinking);
       });
-      
-      if(batcher)batcher.stop();
+
+      if(batcher){ batcher.flushPending(true); batcher.stop(); }
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
       if(typing){ const __delay=Math.max(0,240-(performance.now()-__typingStart)); setTimeout(()=>this.removeTyping(typing), __delay);}
       
@@ -2782,7 +2822,7 @@ this.appendMessage({
       });
       sessionDirty=true;
     }catch(error){
-      if(batcher)batcher.stop();
+      if(batcher){ batcher.flushPending(true); batcher.stop(); }
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
       if(typing){ const __delay=Math.max(0,240-(performance.now()-__typingStart)); setTimeout(()=>this.removeTyping(typing), __delay);}
       
@@ -2820,6 +2860,9 @@ this.appendMessage({
       if(this._vvAvailable) setTimeout(()=>this.unfreezeViewport(), 200);
       this.isSending=false;
       this.setSending(false);
+      if(batcher&&this._activeBatcher===batcher){
+        this._activeBatcher=null;
+      }
     }
   }
   
