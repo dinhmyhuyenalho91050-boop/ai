@@ -358,16 +358,6 @@
       <div class="pane" id="pane-backup" hidden>
         <h2 style="font-size:16px;margin-bottom:1rem">数据备份与恢复</h2>
         
-        <div style="background:rgba(96,165,250,.08);border:1px solid var(--accent2);border-radius:.75rem;padding:1rem;margin-bottom:1.5rem">
-          <div style="font-weight:600;margin-bottom:.5rem;color:var(--accent2)">✅ 存储说明</div>
-          <div style="font-size:13px;line-height:1.6;color:var(--fg)">
-            使用 IndexedDB 存储，容量更大（几百MB），性能更好！<br/>
-            • 浏览器存储限制：通常为可用磁盘的 50%<br/>
-            • 清除浏览器数据会导致数据丢失<br/>
-            <strong style="color:var(--accent)">建议定期导出备份重要对话！</strong>
-          </div>
-        </div>
-
         <div class="model-preset-card">
           <h3>导出数据</h3>
           <p style="font-size:13px;color:var(--muted);margin-bottom:1rem">
@@ -2786,9 +2776,9 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(!container)return;
     
     if(type==='openai'){
-      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://api.openai.com/v1'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="password" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gpt-4o-mini'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_tokens??''}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维链级别</label><select id="m${index}_thinkingEffort"><option value="" ${!config.thinkingEffort?'selected':''}>默认(medium)</option><option value="minimal" ${config.thinkingEffort==='minimal'?'selected':''}>极简</option><option value="low" ${config.thinkingEffort==='low'?'selected':''}>低</option><option value="medium" ${config.thinkingEffort==='medium'?'selected':''}>中</option><option value="high" ${config.thinkingEffort==='high'?'selected':''}>高</option></select></div>`;
+      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://api.openai.com/v1'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gpt-4o-mini'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_tokens??''}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维链级别</label><select id="m${index}_thinkingEffort"><option value="" ${!config.thinkingEffort?'selected':''}>默认(medium)</option><option value="minimal" ${config.thinkingEffort==='minimal'?'selected':''}>极简</option><option value="low" ${config.thinkingEffort==='low'?'selected':''}>低</option><option value="medium" ${config.thinkingEffort==='medium'?'selected':''}>中</option><option value="high" ${config.thinkingEffort==='high'?'selected':''}>高</option></select></div>`;
     }else if(type==='gemini'){
-      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://generativelanguage.googleapis.com'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="password" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gemini-2.5-pro'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>Top K</label><input type="number" id="m${index}_topK" min="0" step="1" value="${config.top_k??''}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_output_tokens??''}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="-1" step="1" value="${config.thinkingBudget??''}" placeholder="-1=自动,0=禁用"/></div>`;
+      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://generativelanguage.googleapis.com'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gemini-2.5-pro'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>Top K</label><input type="number" id="m${index}_topK" min="0" step="1" value="${config.top_k??''}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_output_tokens??''}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="-1" step="1" value="${config.thinkingBudget??''}" placeholder="-1=自动,0=禁用"/></div>`;
     }else{
       container.innerHTML=`<div class="field"><label>代理URL</label><input id="m${index}_proxyUrl" value="${config.proxyUrl||'http://127.0.0.1:8889'}"/></div><div class="field"><label>代理密码</label><input id="m${index}_proxyPass" type="password" value="${config.proxyPass||''}" placeholder="可选"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gemini-2.5-pro'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>Top K</label><input type="number" id="m${index}_topK" min="0" step="1" value="${config.top_k??''}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_output_tokens??''}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="-1" step="1" value="${config.thinkingBudget??''}" placeholder="-1=自动,0=禁用"/></div>`;
     }
@@ -3156,15 +3146,65 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       }catch(e){ reject(e); }
     });
 
-    if(window.cordova){
-      saveWithCordova()
-        .then((uri)=>{
-          try { ErrorHandler.show('已保存到: ' + (uri||'应用目录'), 3500); } catch(_) {}
-        })
-        .catch(()=>{ saveWithAnchor(); });
-    }else{
-      saveWithAnchor();
-    }
+    const saveWithAndroid = () => new Promise((resolve,reject)=>{
+      try{
+        if(!window.AndroidBridge || typeof window.AndroidBridge.saveFile!=='function'){
+          return reject(new Error('android bridge unavailable'));
+        }
+        const reader = new FileReader();
+        reader.onloadend = ()=>{
+          try{
+            const result = reader.result;
+            if(typeof result !== 'string') throw new Error('无法读取数据');
+            const base64 = result.split(',')[1];
+            if(!base64) throw new Error('无法读取数据');
+            const response = window.AndroidBridge.saveFile(filename, base64);
+            if(typeof response === 'string' && response.startsWith('error:')){
+              throw new Error(response.slice(6)||'保存失败');
+            }
+            resolve(response);
+          }catch(err){ reject(err); }
+        };
+        reader.onerror = ()=> reject(reader.error||new Error('读取失败'));
+        reader.readAsDataURL(blob);
+      }catch(e){ reject(e); }
+    });
+
+    const showSaved = (uri) => {
+      try { ErrorHandler.show('已保存到: ' + (uri||'下载目录'), 3500); } catch(_) {}
+    };
+
+    const runSave = async () => {
+      let success=false;
+
+      if(window.AndroidBridge && typeof window.AndroidBridge.saveFile==='function'){
+        try{
+          const uri = await saveWithAndroid();
+          showSaved(uri);
+          success=true;
+        }catch(err){ console.warn('Android save failed', err); }
+      }
+
+      if(!success && window.cordova){
+        try{
+          const uri = await saveWithCordova();
+          showSaved(uri);
+          success=true;
+        }catch(err){ console.warn('Cordova save failed', err); }
+      }
+
+      if(!success){
+        success = saveWithAnchor();
+      }
+
+      if(!success){
+        throw new Error('无法保存文件');
+      }
+    };
+
+    runSave().catch((err)=>{
+      try { ErrorHandler.show('导出失败: ' + (err?.message||err), 4000); } catch(_) {}
+    });
   }catch(e){
     try { ErrorHandler.show('导出失败: ' + e.message, 4000); } catch(_) {}
   }
