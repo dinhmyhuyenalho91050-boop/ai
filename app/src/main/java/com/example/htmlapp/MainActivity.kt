@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.content.res.Configuration
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.view.View
@@ -22,6 +23,8 @@ import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
 import android.provider.MediaStore
 import android.widget.Toast
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 import androidx.activity.addCallback
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
@@ -39,9 +42,10 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
 import android.util.Base64
-import java.util.concurrent.Executors
-import java.util.concurrent.ExecutorService
+import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -108,7 +112,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureWebView() {
         webView.setBackgroundColor(Color.TRANSPARENT)
-        with(webView.settings) {
+        val settings = webView.settings
+        with(settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
             databaseEnabled = true
@@ -119,11 +124,29 @@ class MainActivity : AppCompatActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             useWideViewPort = true
             loadWithOverviewMode = true
+            setSupportZoom(false)
+            setBuiltInZoomControls(false)
+            setDisplayZoomControls(false)
+            offscreenPreRaster = false
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WebView.setSafeBrowsingEnabled(false)
+        }
+
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            WebSettingsCompat.setForceDark(settings, WebSettingsCompat.FORCE_DARK_ON)
+        }
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, true)
+            }
+        } catch (_: Throwable) {
         }
 
         webView.isVerticalScrollBarEnabled = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
         }
         downloadBridge = DownloadBridge(this)
         webView.addJavascriptInterface(downloadBridge, "HtmlAppNative")
@@ -209,6 +232,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val root = findViewById<View>(R.id.root_container)
+        setupWindowInsets(root)
+        if (this::webView.isInitialized) {
+            webView.post { webView.invalidate() }
+        }
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
@@ -259,8 +291,19 @@ class MainActivity : AppCompatActivity() {
 private class DownloadBridge(activity: MainActivity) {
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "DownloadBridgeIo").apply { isDaemon = true }
+    private val ioExecutor = ThreadPoolExecutor(
+        0,
+        Runtime.getRuntime().availableProcessors(),
+        30L,
+        TimeUnit.SECONDS,
+        SynchronousQueue()
+    ) { runnable ->
+        Thread(runnable, "bg-io").apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+        }
+    }.apply {
+        allowCoreThreadTimeOut(true)
     }
 
     fun dispose() {
