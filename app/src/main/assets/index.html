@@ -438,7 +438,7 @@ const CONFIG={
   MSG_LOAD_CHUNK:40,
   THROTTLE_DELAY:80,
   DEBOUNCE_DELAY:300,
-  PERSIST_DELAY:240,
+  PERSIST_DELAY:800,
   IDLE_TIMEOUT:2000,
   STORAGE_KEYS:{
     modelPresets:'chat.modelPresets',
@@ -938,6 +938,7 @@ class StorageManager{
   static _messagesObserver=null;
   static _messagesObserverTarget=null;
   static _messagesObserverHandler=null;
+  static _sessionCache=null;
 
   static registerMessagesObserverHandler(handler){
     this._messagesObserverHandler=typeof handler==='function'?handler:null;
@@ -1108,8 +1109,102 @@ class StorageManager{
     return (CONFIG.STORAGE_KEYS.sessionPrefix||'chat.session.')+id;
   }
 
+  static _computeSessionMetaHash(session){
+    if(!session)return'';
+    const meta={};
+    for(const key in session){
+      if(key==='history')continue;
+      meta[key]=session[key];
+    }
+    try{
+      return JSON.stringify(meta);
+    }catch(_){
+      return String(Date.now())+Math.random().toString(16).slice(2);
+    }
+  }
+
+  static _messageSignature(msg){
+    if(!msg||typeof msg!=='object')return String(msg??'');
+    const keys=Object.keys(msg).filter(k=>k!=='id').sort();
+    let sig=msg.id||'';
+    for(const key of keys){
+      const value=msg[key];
+      if(value&&typeof value==='object'){
+        try{ sig+=`|${key}:${JSON.stringify(value)}`; }
+        catch(_){ sig+=`|${key}:[object]`; }
+      }else{
+        sig+=`|${key}:${String(value)}`;
+      }
+    }
+    return sig;
+  }
+
+  static _cloneMessage(msg){
+    if(!msg||typeof msg!=='object')return msg;
+    return this._clone(msg);
+  }
+
+  static _applySessionMeta(target,source){
+    if(!target||typeof target!=='object')return;
+    if(!source||typeof source!=='object'){
+      for(const key in target){
+        if(key==='history')continue;
+        delete target[key];
+      }
+      return;
+    }
+
+    for(const key in target){
+      if(key==='history')continue;
+      if(!(key in source))delete target[key];
+    }
+
+    for(const key in source){
+      if(key==='history')continue;
+      const value=source[key];
+      if(value&&typeof value==='object')target[key]=this._clone(value);
+      else target[key]=value;
+    }
+  }
+
+  static _createCacheEntry(session){
+    const base={};
+    if(session&&typeof session==='object'){
+      this._applySessionMeta(base,session);
+    }
+    const srcHistory=Array.isArray(session?.history)?session.history:[];
+    const history=base.history=[];
+    const signatures=new Map();
+    for(let i=0;i<srcHistory.length;i++){
+      const msg=srcHistory[i];
+      const cloned=this._cloneMessage(msg);
+      history.push(cloned);
+      const key=(cloned&&cloned.id)?cloned.id:`__idx_${i}`;
+      signatures.set(key,this._messageSignature(msg));
+    }
+    return{
+      data:base,
+      metaHash:this._computeSessionMetaHash(session),
+      historyLength:history.length,
+      signatures
+    };
+  }
+
+  static _materializeLegacySessions(){
+    const out={};
+    if(!this._sessionCache)return out;
+    for(const[id,entry]of this._sessionCache.entries()){
+      out[id]=entry.data;
+    }
+    return out;
+  }
+
   static seedSessionsCache(sessions){
-    this._sessionCache=this._clone(sessions||{});
+    this._sessionCache=new Map();
+    const source=sessions||{};
+    Object.keys(source).forEach(id=>{
+      this._sessionCache.set(id,this._createCacheEntry(source[id]));
+    });
   }
 
   static async _executeDelete(key){
@@ -1157,16 +1252,16 @@ class StorageManager{
   }
 
   static async saveSessionsSnapshot(allSessions){
-    const previousIds=new Set(this._sessionCache?Object.keys(this._sessionCache):[]);
-    const snapshot=this._clone(allSessions||{});
-    this._sessionCache=snapshot;
-
-    const ids=Object.keys(snapshot);
+    const previousIds=new Set(this._sessionCache?this._sessionCache.keys():[]);
+    const ids=Object.keys(allSessions||{});
     const indexKey=this._sessionIndexKey();
+    const nextCache=new Map();
 
     const writePromises=ids.map(id=>{
+      const entry=this._createCacheEntry(allSessions[id]);
+      nextCache.set(id,entry);
       previousIds.delete(id);
-      return this.save(this._sessionKey(id),snapshot[id]);
+      return this.save(this._sessionKey(id),entry.data);
     });
 
     const deletePromises=[];
@@ -1174,15 +1269,18 @@ class StorageManager{
       deletePromises.push(this._executeDelete(this._sessionKey(id)));
     });
 
+    this._sessionCache=nextCache;
+
     writePromises.push(this.save(indexKey,ids));
-    writePromises.push(this.save(CONFIG.STORAGE_KEYS.sessions,snapshot));
+    writePromises.push(this.save(CONFIG.STORAGE_KEYS.sessions,this._materializeLegacySessions()));
 
     return Promise.all([...writePromises,...deletePromises]);
   }
 
   static async saveSessionsPartial(allSessions,dirtyIds=new Set(),removedIds=new Set()){
     if(!this._sessionCache){
-      this._sessionCache=this._clone(await this.loadSessions({}));
+      const loaded=await this.loadSessions({});
+      this.seedSessionsCache(loaded);
     }
 
     const writes=[];
@@ -1190,25 +1288,116 @@ class StorageManager{
 
     dirtyIds.forEach(id=>{
       if(id==null)return;
-      if(allSessions&&id in allSessions){
-        this._sessionCache[id]=this._clone(allSessions[id]);
-        writes.push(this.save(this._sessionKey(id),this._sessionCache[id]));
+      if(!allSessions||!(id in allSessions))return;
+      const session=allSessions[id];
+      let entry=this._sessionCache.get(id);
+      if(!entry){
+        entry=this._createCacheEntry(session);
+        this._sessionCache.set(id,entry);
+        writes.push(this.save(this._sessionKey(id),entry.data));
+        changed=true;
+        return;
+      }
+
+      const metaHash=this._computeSessionMetaHash(session);
+      let entryChanged=false;
+      if(metaHash!==entry.metaHash){
+        entry.metaHash=metaHash;
+        this._applySessionMeta(entry.data,session);
+        entryChanged=true;
+      }
+
+      const historyChanged=this._syncSessionHistory(entry,session);
+      if(entryChanged||historyChanged){
+        writes.push(this.save(this._sessionKey(id),entry.data));
         changed=true;
       }
     });
 
     removedIds.forEach(id=>{
       if(id==null)return;
-      if(this._sessionCache&&id in this._sessionCache){
-        delete this._sessionCache[id];
+      if(this._sessionCache&&this._sessionCache.has(id)){
+        this._sessionCache.delete(id);
         writes.push(this._executeDelete(this._sessionKey(id)));
         changed=true;
       }
     });
 
     if(!changed)return Promise.resolve();
-    writes.push(this.save(this._sessionIndexKey(),Object.keys(this._sessionCache)));
+    writes.push(this.save(this._sessionIndexKey(),Array.from(this._sessionCache.keys())));
+    writes.push(this.save(CONFIG.STORAGE_KEYS.sessions,this._materializeLegacySessions()));
     return Promise.all(writes);
+  }
+
+  static _syncSessionHistory(entry,session){
+    const sourceHistory=Array.isArray(session?.history)?session.history:[];
+    const cachedHistory=Array.isArray(entry.data.history)?entry.data.history:(entry.data.history=[]);
+    const prevSignatures=entry.signatures||new Map();
+    const nextSignatures=new Map();
+    let changed=false;
+    let divergeIndex=-1;
+
+    for(let i=0;i<sourceHistory.length;i++){
+      const srcMsg=sourceHistory[i];
+      const cachedMsg=cachedHistory[i];
+      const msgId=srcMsg?.id?srcMsg.id:`__idx_${i}`;
+      if(!cachedMsg||cachedMsg.id!==srcMsg?.id){
+        divergeIndex=i;
+        break;
+      }
+      const sig=this._messageSignature(srcMsg);
+      nextSignatures.set(msgId,sig);
+      if(prevSignatures.get(msgId)!==sig){
+        cachedHistory[i]=this._cloneMessage(srcMsg);
+        changed=true;
+      }
+    }
+
+    if(divergeIndex!==-1){
+      cachedHistory.splice(divergeIndex);
+      for(let j=divergeIndex;j<sourceHistory.length;j++){
+        const msg=sourceHistory[j];
+        const cloned=this._cloneMessage(msg);
+        cachedHistory.push(cloned);
+        const key=msg?.id?msg.id:`__idx_${j}`;
+        nextSignatures.set(key,this._messageSignature(msg));
+      }
+      changed=true;
+    }
+
+    if(cachedHistory.length>sourceHistory.length){
+      cachedHistory.splice(sourceHistory.length);
+      changed=true;
+    }
+
+    if(cachedHistory.length<sourceHistory.length){
+      for(let k=cachedHistory.length;k<sourceHistory.length;k++){
+        const msg=sourceHistory[k];
+        const cloned=this._cloneMessage(msg);
+        cachedHistory.push(cloned);
+        const key=msg?.id?msg.id:`__idx_${k}`;
+        nextSignatures.set(key,this._messageSignature(msg));
+      }
+      changed=true;
+    }
+
+    if(divergeIndex===-1){
+      for(let i=0;i<sourceHistory.length;i++){
+        const msg=sourceHistory[i];
+        const key=msg?.id?msg.id:`__idx_${i}`;
+        if(!nextSignatures.has(key)){
+          nextSignatures.set(key,this._messageSignature(msg));
+        }
+      }
+    }
+
+    if(sourceHistory.length===0){
+      nextSignatures.clear();
+    }
+
+    entry.signatures=nextSignatures;
+    entry.historyLength=sourceHistory.length;
+    return changed;
   }
 }
 
@@ -2346,18 +2535,21 @@ class UIManager{
   
   flushUpdates(){
     if(this.pendingUpdates.size===0)return;
-    
+
     const session=this.state.getActiveSession();
     if(!session)return;
-    
+
     const history=session.history;
     const total=history.length;
     const box=Utils.$('#messages');
     if(!box)return;
-    
+
     const isNearBottom=this.isNearBottom(box);
+    const prevScrollHeight=box.scrollHeight;
+    const prevScrollTop=box.scrollTop;
+
     this.windowManager.appendNew(total,isNearBottom);
-    
+
     const win=this.windowManager.window;
     const fragment=document.createDocumentFragment();
     const __addedEls=[];
@@ -2373,6 +2565,27 @@ class UIManager{
       }
     }
 
+    const toRemove=[];
+    for(const[msgId,el]of this.messageElements){
+      const idx=visibleIndexMap.get(msgId);
+      if(idx===undefined){
+        toRemove.push({msgId,el});
+      }
+    }
+
+    if(this.editingState){
+      const isEditingBeingRemoved=toRemove.some(({msgId})=>msgId===this.editingState.msgId);
+      if(isEditingBeingRemoved){
+        this.autoSaveEditingMessage();
+      }
+    }
+
+    toRemove.forEach(({msgId,el})=>{
+      this.domPool.release('article',el);
+      el.remove();
+      this.messageElements.delete(msgId);
+    });
+
     for(const msgId of this.pendingUpdates){
       const idx=visibleIndexMap.get(msgId);
       if(idx===undefined)continue;
@@ -2385,18 +2598,23 @@ class UIManager{
       fragment.appendChild(el);
       __addedEls.push(el);
     }
-    
+
     if(fragment.childNodes.length){
       box.appendChild(fragment);
       __addedEls.forEach(el=>this.animateIn(el));
-      
-      if(isNearBottom && !this._suppressAutoStick){
+    }
+
+    const scrollAdjust=prevScrollHeight-box.scrollHeight;
+    if(scrollAdjust>0 && !isNearBottom){
+      box.scrollTop=Math.max(0,prevScrollTop-scrollAdjust);
+    }else if(isNearBottom){
+      if(!this._suppressAutoStick){
         requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
-      }else if(isNearBottom){
+      }else{
         this._pendingStick=true;
       }
     }
-    
+
     this.updateLoadTip(box,win);
     this.pendingUpdates.clear();
   }
@@ -2710,8 +2928,15 @@ const res = __st.fmt.feed(deltaText);
 // 限制我们自己的 DOM 写频率：即便 120Hz，也不会每帧重绘
 if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs || 16)) {
   __st.lastFlush = now;
-  if (prefixEl.innerHTML !== res.prefixHTML) prefixEl.innerHTML = res.prefixHTML;
-  tailEl.innerHTML = res.tailHTML + '<span class="typing-cursor"></span>';
+  if (res.prefixHTML !== __st.lastPrefixHTML) {
+    prefixEl.innerHTML = res.prefixHTML;
+    __st.lastPrefixHTML = res.prefixHTML;
+  }
+  const nextTail = res.tailHTML + '<span class="typing-cursor"></span>';
+  if (nextTail !== __st.lastTailHTML) {
+    tailEl.innerHTML = nextTail;
+    __st.lastTailHTML = nextTail;
+  }
 }
       
       if(shouldStick&&box && (typeof _lastDeltaChars!=='number' || _lastDeltaChars >= (window.__STREAM_CFG&&window.__STREAM_CFG.scrollDeltaMin||8))){ if(!this._scrollRAF){
@@ -4364,11 +4589,15 @@ if(document.readyState==='loading'){
     scrollDeltaMin: 12
   };
   class StreamFormatterB {
-    constructor(){ this.reset(); }
+    constructor(owner=null){ this._owner = owner; this.reset(); }
     reset(){
       this.prefixHTML = "";
       this.open = { dq:false, cq:false, bold:false };
       this.buf  = { dq:"", cq:"", bold:"", plain:"" };
+      if(this._owner){
+        this._owner.lastPrefixHTML = "";
+        this._owner.lastTailHTML = "";
+      }
     }
     _esc(s){ return String(s).replace(/[&<>"]/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
     _fmtText(s){ return this._esc(s).replace(/\n/g,'<br/>'); }
@@ -4418,7 +4647,8 @@ if(document.readyState==='loading'){
   window.__getStreamState = function(el){
     let st = window.__streamState.get(el);
     if(!st){
-      st = { fmt:new StreamFormatterB(), lastLen:0, lastFlush:0 };
+      st = { fmt:null, lastLen:0, lastFlush:0, lastPrefixHTML:"", lastTailHTML:"" };
+      st.fmt = new StreamFormatterB(st);
       window.__streamState.set(el, st);
     }
     return st;
