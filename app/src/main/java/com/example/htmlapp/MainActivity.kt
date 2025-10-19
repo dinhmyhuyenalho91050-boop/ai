@@ -526,7 +526,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateWebViewActivityState() {
         if (!this::webView.isInitialized) return
-        if (isAppInForeground) {
+        val shouldKeepActive = isAppInForeground || isStreaming
+        if (shouldKeepActive) {
             if (areImagesBlocked) {
                 webView.settings.blockNetworkImage = false
                 areImagesBlocked = false
@@ -549,12 +550,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val desiredPriority = if (isAppInForeground) {
+            val desiredPriority = if (isAppInForeground || isStreaming) {
                 WebView.RENDERER_PRIORITY_IMPORTANT
             } else {
                 WebView.RENDERER_PRIORITY_BOUND
             }
-            val desiredWaived = !isAppInForeground
+            val desiredWaived = !shouldKeepActive
             if (desiredPriority != lastRendererPriority || desiredWaived != lastRendererWaived) {
                 webView.setRendererPriorityPolicy(desiredPriority, desiredWaived)
                 lastRendererPriority = desiredPriority
