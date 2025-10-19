@@ -216,7 +216,7 @@ class MainActivity : AppCompatActivity() {
     }
 }
 
-private class DownloadBridge(activity: MainActivity) {
+class DownloadBridge(activity: MainActivity) {
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
