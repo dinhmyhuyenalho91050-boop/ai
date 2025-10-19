@@ -31,13 +31,17 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
 import android.util.Base64
-import java.util.concurrent.Executors
-import java.util.concurrent.ExecutorService
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -104,9 +108,29 @@ class MainActivity : AppCompatActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             useWideViewPort = true
             loadWithOverviewMode = true
+            setSupportZoom(false)
+            builtInZoomControls = false
+            displayZoomControls = false
+            setNeedInitialFocus(false)
+            saveFormData = false
+            setGeolocationEnabled(false)
+            setOffscreenPreRaster(false)
+            mediaPlaybackRequiresUserGesture = false
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+                WebSettingsCompat.setSafeBrowsingEnabled(this, false)
+            }
         }
 
         webView.isVerticalScrollBarEnabled = false
+        webView.isHorizontalScrollBarEnabled = false
+        webView.overScrollMode = WebView.OVER_SCROLL_NEVER
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.RENDERER_PRIORITY_POLICY)) {
+            WebViewCompat.setRendererPriorityPolicy(
+                webView,
+                WebViewCompat.RENDERER_PRIORITY_IMPORTANT,
+                false
+            )
+        }
         downloadBridge = DownloadBridge(this)
         webView.addJavascriptInterface(downloadBridge, "HtmlAppNative")
         webView.webChromeClient = object : WebChromeClient() {
@@ -219,8 +243,20 @@ class MainActivity : AppCompatActivity() {
 private class DownloadBridge(activity: MainActivity) {
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "DownloadBridgeIo").apply { isDaemon = true }
+    private val ioExecutor: ThreadPoolExecutor = ThreadPoolExecutor(
+        0,
+        1,
+        30L,
+        TimeUnit.SECONDS,
+        LinkedBlockingQueue(),
+        { runnable ->
+            Thread(runnable, "DownloadBridgeIo").apply {
+                isDaemon = true
+                priority = Thread.MIN_PRIORITY
+            }
+        }
+    ).apply {
+        allowCoreThreadTimeOut(true)
     }
 
     fun dispose() {
