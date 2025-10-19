@@ -3,7 +3,6 @@ package com.example.htmlapp
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.ForegroundServiceStartNotAllowedException
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -90,6 +89,7 @@ class MainActivity : AppCompatActivity() {
     private var isConnectionBinding = false
     private var isNotificationPermissionRequestInFlight = false
     private var hasShownNotificationPermissionWarning = false
+    private var hasShownConnectionStartError = false
     private var lastKnownConnectionVisibility: Boolean? = null
     private var connectionServiceRequested = false
     private var isConnectionServiceRunning = false
@@ -510,7 +510,9 @@ class MainActivity : AppCompatActivity() {
         if (service != null && connectionServiceBound) {
             service.sendMessage(message)
         } else {
-            ConnectionService.enqueueSend(applicationContext, message)
+            if (!ConnectionService.enqueueSend(applicationContext, message)) {
+                handleConnectionServiceStartFailure()
+            }
         }
     }
 
@@ -626,8 +628,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (isConnectionServiceEnabled) {
-            ConnectionService.startAndConnect(applicationContext)
-            isConnectionServiceRunning = true
+            if (ConnectionService.startAndConnect(applicationContext)) {
+                isConnectionServiceRunning = true
+                hasShownConnectionStartError = false
+            } else {
+                handleConnectionServiceStartFailure()
+            }
             return
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -649,28 +655,26 @@ class MainActivity : AppCompatActivity() {
 
     private fun enableConnectionService() {
         if (isConnectionServiceEnabled) {
-            ConnectionService.startAndConnect(applicationContext)
-            isConnectionServiceRunning = true
+            if (ConnectionService.startAndConnect(applicationContext)) {
+                isConnectionServiceRunning = true
+                hasShownConnectionStartError = false
+            } else {
+                handleConnectionServiceStartFailure()
+            }
             return
         }
-        try {
-            ConnectionService.startAndConnect(applicationContext)
+        if (ConnectionService.startAndConnect(applicationContext)) {
             isConnectionServiceEnabled = true
             isConnectionServiceRunning = true
+            hasShownConnectionStartError = false
             lastKnownConnectionVisibility = null
             refreshConnectionServiceState()
-        } catch (e: SecurityException) {
-            Log.w("MainActivity", "Unable to start ConnectionService: missing permission", e)
+        } else {
+            Log.w("MainActivity", "Unable to start ConnectionService")
             isConnectionServiceEnabled = false
             connectionServiceRequested = false
             isConnectionServiceRunning = false
-            showConnectionPermissionWarning(false)
-        } catch (e: ForegroundServiceStartNotAllowedException) {
-            Log.w("MainActivity", "Unable to start ConnectionService", e)
-            isConnectionServiceEnabled = false
-            connectionServiceRequested = false
-            isConnectionServiceRunning = false
-            showConnectionPermissionWarning(false)
+            handleConnectionServiceStartFailure()
         }
     }
 
@@ -692,15 +696,23 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (!isConnectionServiceRunning) {
-            ConnectionService.startAndConnect(applicationContext)
-            isConnectionServiceRunning = true
+            if (ConnectionService.startAndConnect(applicationContext)) {
+                isConnectionServiceRunning = true
+                hasShownConnectionStartError = false
+            } else {
+                handleConnectionServiceStartFailure()
+                return
+            }
         }
 
         val shouldBind = shouldKeepWebViewActive()
         val shouldBeVisible = isAppInForeground
         val lastVisible = lastKnownConnectionVisibility
         if (lastVisible == null || lastVisible != shouldBeVisible) {
-            ConnectionService.updateClientVisibility(applicationContext, shouldBeVisible)
+            if (!ConnectionService.updateClientVisibility(applicationContext, shouldBeVisible)) {
+                handleConnectionServiceStartFailure()
+                return
+            }
             connectionService?.setClientVisibility(shouldBeVisible)
             lastKnownConnectionVisibility = shouldBeVisible
         } else if (connectionServiceBound) {
@@ -720,6 +732,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun shouldKeepWebViewActive(): Boolean {
         return isAppInForeground || isStreaming
+    }
+
+    private fun handleConnectionServiceStartFailure() {
+        connectionService?.setClientVisibility(false)
+        lastKnownConnectionVisibility = null
+        if (connectionServiceBound || isConnectionBinding) {
+            unbindConnectionService()
+        }
+        isConnectionServiceRunning = false
+        connectionServiceRequested = false
+        if (!hasShownConnectionStartError && isAppInForeground && !(isFinishing || isDestroyed)) {
+            Toast.makeText(this, getString(R.string.service_start_failed), Toast.LENGTH_LONG).show()
+            hasShownConnectionStartError = true
+        }
     }
 
     private fun showConnectionPermissionWarning(short: Boolean) {

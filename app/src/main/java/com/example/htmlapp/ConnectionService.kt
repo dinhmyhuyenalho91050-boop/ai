@@ -1,6 +1,7 @@
 package com.example.htmlapp
 
 import android.Manifest
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -31,6 +32,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
+import android.util.Log
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -371,6 +373,7 @@ class ConnectionService : Service() {
     }
 
     companion object {
+        private const val TAG = "ConnectionService"
         private const val STATUS_CHANNEL_ID = "connection_service_status"
         private const val MESSAGE_CHANNEL_ID = "connection_service_messages"
         private const val NOTIFICATION_ID = 1001
@@ -387,28 +390,44 @@ class ConnectionService : Service() {
         private const val EXTRA_VISIBLE = "extra_visible"
         const val DEFAULT_ENDPOINT = "wss://example.com/stream"
 
-        fun startAndConnect(context: Context, endpoint: String? = null) {
+        fun startAndConnect(context: Context, endpoint: String? = null): Boolean {
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_CONNECT
                 endpoint?.let { putExtra(EXTRA_ENDPOINT, it) }
             }
-            ContextCompat.startForegroundService(context, intent)
+            return startForegroundServiceCompat(context, intent)
         }
 
-        fun enqueueSend(context: Context, payload: String) {
+        fun enqueueSend(context: Context, payload: String): Boolean {
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_SEND
                 putExtra(EXTRA_PAYLOAD, payload)
             }
-            ContextCompat.startForegroundService(context, intent)
+            return startForegroundServiceCompat(context, intent)
         }
 
-        fun updateClientVisibility(context: Context, visible: Boolean) {
+        fun updateClientVisibility(context: Context, visible: Boolean): Boolean {
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_VISIBILITY
                 putExtra(EXTRA_VISIBLE, visible)
             }
-            ContextCompat.startForegroundService(context, intent)
+            return startForegroundServiceCompat(context, intent)
+        }
+
+        private fun startForegroundServiceCompat(context: Context, intent: Intent): Boolean {
+            return try {
+                ContextCompat.startForegroundService(context, intent)
+                true
+            } catch (e: ForegroundServiceStartNotAllowedException) {
+                Log.w(TAG, "Unable to start foreground service", e)
+                false
+            } catch (e: SecurityException) {
+                Log.w(TAG, "Unable to start foreground service", e)
+                false
+            } catch (e: IllegalStateException) {
+                Log.w(TAG, "Unable to start foreground service", e)
+                false
+            }
         }
     }
 }
