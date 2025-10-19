@@ -31,6 +31,10 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -45,6 +49,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var downloadBridge: DownloadBridge
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
+    private val appVisibilityObserver = object : DefaultLifecycleObserver {
+        override fun onStart(owner: LifecycleOwner) {
+            notifyWebVisibility("foreground")
+        }
+
+        override fun onStop(owner: LifecycleOwner) {
+            notifyWebVisibility("background")
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -83,6 +96,8 @@ class MainActivity : AppCompatActivity() {
         configureWebView()
         setupWindowInsets(root)
         setupBackNavigation()
+        notifyWebVisibility("foreground")
+        ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver)
 
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
@@ -107,6 +122,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.isVerticalScrollBarEnabled = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        }
         downloadBridge = DownloadBridge(this)
         webView.addJavascriptInterface(downloadBridge, "HtmlAppNative")
         webView.webChromeClient = object : WebChromeClient() {
@@ -152,6 +170,17 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     false
                 }
+            }
+
+            override fun onPageFinished(view: WebView, url: String?) {
+                super.onPageFinished(view, url)
+                val lifecycle = ProcessLifecycleOwner.get().lifecycle
+                val state = if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                    "foreground"
+                } else {
+                    "background"
+                }
+                notifyWebVisibility(state)
             }
         }
     }
@@ -212,7 +241,18 @@ class MainActivity : AppCompatActivity() {
         if (this::downloadBridge.isInitialized) {
             downloadBridge.dispose()
         }
+        ProcessLifecycleOwner.get().lifecycle.removeObserver(appVisibilityObserver)
         super.onDestroy()
+    }
+
+    private fun notifyWebVisibility(state: String) {
+        if (!this::webView.isInitialized) return
+        webView.post {
+            webView.evaluateJavascript(
+                "window.__setNativeVisibility && window.__setNativeVisibility('$state');",
+                null
+            )
+        }
     }
 }
 
