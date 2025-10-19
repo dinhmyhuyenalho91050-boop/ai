@@ -10,7 +10,10 @@
     --accent3:#10b981;--danger:#ef4444;--border:#1f2937;--shadow:rgba(0,0,0,.3);--glow:rgba(96,165,250,.15);
     --transition-fast:.15s cubic-bezier(0.4,0,0.2,1);--transition-normal:.2s ease;--transition-slow:.3s cubic-bezier(.4,0,.2,1);
     --shadow-sm:0 2px 8px var(--shadow);--shadow-md:0 4px 16px var(--shadow);--shadow-lg:0 22px 60px rgba(0,0,0,.55);
-    --native-ime-bottom:0px;--native-ime-total-bottom:0px;--native-viewport-height:100vh;
+    --native-ime-bottom:0px;--native-ime-total-bottom:0px;--native-viewport-height:100svh;
+  }
+  @supports not (height:100svh){
+    :root{--native-viewport-height:100vh;}
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%}
@@ -214,12 +217,15 @@
 
   /* === Mobile viewport stability & IME flicker fixes === */
   html,body{height:100%}
-  #app{min-height:100svh;height:100dvh}
-  @supports not (height:100dvh){
-    #app{height:100vh}
+  #app{min-height:var(--native-viewport-height,100svh) !important;height:var(--native-viewport-height,100svh) !important}
+  @supports not (height:100svh){
+    #app{min-height:var(--native-viewport-height,100vh) !important;height:var(--native-viewport-height,100vh) !important}
   }
   /* During viewport freeze, lock height and disable scroll anchoring that can cause jumps */
-  body.vp-freeze #app{height:var(--vp-lock-h,100dvh)}
+  body.vp-freeze #app{height:var(--vp-lock-h,var(--native-viewport-height,100svh))}
+  @supports not (height:100svh){
+    body.vp-freeze #app{height:var(--vp-lock-h,var(--native-viewport-height,100vh))}
+  }
   #messages{overflow-anchor:auto}
   body.vp-freeze #messages{overflow-anchor:none}
   /* Avoid transitions fighting during viewport changes */
@@ -228,10 +234,13 @@
 
   /* === Mobile IME flicker hardening (override) === */
   /* Prefer the STABLE viewport units to avoid jumps when address bar/IME changes */
-  #app{min-height:100svh !important;height:100svh !important}
+  #app{min-height:var(--native-viewport-height,100svh) !important;height:var(--native-viewport-height,100svh) !important}
   @supports (height:100dvh){
     /* Use svh as authoritative; dvh can still jump when IME hides */
-    #app{min-height:100svh !important;height:100svh !important}
+    #app{min-height:var(--native-viewport-height,100svh) !important;height:var(--native-viewport-height,100svh) !important}
+  }
+  @supports not (height:100svh){
+    #app{min-height:var(--native-viewport-height,100vh) !important;height:var(--native-viewport-height,100vh) !important}
   }
   /* Prevent rubber-banding from interfering with scroll position during transitions */
   html,body{overscroll-behavior-y:contain}
