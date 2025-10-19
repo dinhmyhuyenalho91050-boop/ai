@@ -67,6 +67,12 @@ class ConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannels()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !canPostNotifications()) {
+            dispatchEvent(ConnectionEvent.Error("notifications_denied"))
+            stopSelf()
+            return
+        }
+
         if (!startForegroundSafely(getString(R.string.service_initializing))) {
             stopSelf()
             return
@@ -414,6 +420,10 @@ class ConnectionService : Service() {
         }
 
         private fun startForegroundServiceCompat(context: Context, intent: Intent): Boolean {
+            if (!hasRequiredForegroundPermissions(context)) {
+                Log.w(TAG, "Missing foreground service permission, cannot start ConnectionService")
+                return false
+            }
             return try {
                 ContextCompat.startForegroundService(context, intent)
                 true
@@ -433,6 +443,28 @@ class ConnectionService : Service() {
             return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 throwable::class.java.name ==
                 "android.app.ForegroundServiceStartNotAllowedException"
+        }
+
+        private fun hasRequiredForegroundPermissions(context: Context): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val fgPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.FOREGROUND_SERVICE
+                )
+                if (fgPermission != PackageManager.PERMISSION_GRANTED) {
+                    return false
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val notificationsPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                )
+                if (notificationsPermission != PackageManager.PERMISSION_GRANTED) {
+                    return false
+                }
+            }
+            return true
         }
     }
 }

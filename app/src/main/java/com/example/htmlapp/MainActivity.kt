@@ -741,6 +741,7 @@ class MainActivity : AppCompatActivity() {
             unbindConnectionService()
         }
         isConnectionServiceRunning = false
+        isConnectionServiceEnabled = false
         connectionServiceRequested = false
         if (!hasShownConnectionStartError && isAppInForeground && !(isFinishing || isDestroyed)) {
             Toast.makeText(this, getString(R.string.service_start_failed), Toast.LENGTH_LONG).show()
