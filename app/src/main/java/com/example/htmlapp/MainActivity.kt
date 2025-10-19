@@ -4,7 +4,10 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ContentValues
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -14,6 +17,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.IBinder
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.view.View
@@ -29,7 +33,6 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.annotation.RequiresApi
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -38,6 +41,12 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.webkit.WebSettingsCompat
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import kotlin.math.max
 import java.io.File
 import java.io.FileOutputStream
@@ -47,6 +56,7 @@ import android.util.Base64
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
@@ -63,6 +73,13 @@ class MainActivity : AppCompatActivity() {
     private var lastRendererWaived: Boolean? = null
     private var isPageReady = false
     private var pendingVisibilityState: String? = null
+    private var connectionService: ConnectionService? = null
+    private var connectionServiceIntent: Intent? = null
+    private var connectionServiceStarted = false
+    private var isServiceBound = false
+    private var isBindingService = false
+    private var serviceEventsJob: Job? = null
+    private val pendingServiceScripts = mutableListOf<String>()
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
             handleAppVisibility(true)
@@ -70,6 +87,26 @@ class MainActivity : AppCompatActivity() {
 
         override fun onStop(owner: LifecycleOwner) {
             handleAppVisibility(false)
+        }
+    }
+
+    private val connectionServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as? ConnectionService.LocalBinder ?: return
+            connectionService = binder.getService()
+            isServiceBound = true
+            isBindingService = false
+            connectionService?.setClientVisible(isAppInForeground)
+            connectionService?.setStreamingActive(isStreaming)
+            connectionService?.let { subscribeToServiceEvents(it) }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            serviceEventsJob?.cancel()
+            serviceEventsJob = null
+            connectionService = null
+            isServiceBound = false
+            isBindingService = false
         }
     }
 
@@ -218,6 +255,7 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 isPageReady = true
                 dispatchPendingVisibility()
+                flushPendingServiceScripts()
                 val lifecycle = ProcessLifecycleOwner.get().lifecycle
                 val state = if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                     "foreground"
@@ -300,6 +338,8 @@ class MainActivity : AppCompatActivity() {
         if (this::downloadBridge.isInitialized) {
             downloadBridge.dispose()
         }
+        pendingServiceScripts.clear()
+        unbindConnectionService()
         ProcessLifecycleOwner.get().lifecycle.removeObserver(appVisibilityObserver)
         super.onDestroy()
     }
@@ -332,9 +372,117 @@ class MainActivity : AppCompatActivity() {
         dispatchVisibilityState(state)
     }
 
+    private fun startConnectionServiceIfNeeded() {
+        if (connectionServiceStarted) return
+        val intent = Intent(this, ConnectionService::class.java)
+        connectionServiceIntent = intent
+        ContextCompat.startForegroundService(this, intent)
+        connectionServiceStarted = true
+    }
+
+    private fun bindConnectionServiceIfNeeded() {
+        startConnectionServiceIfNeeded()
+        if (isServiceBound || isBindingService) return
+        val intent = connectionServiceIntent ?: Intent(this, ConnectionService::class.java).also {
+            connectionServiceIntent = it
+        }
+        isBindingService = true
+        val bound = bindService(intent, connectionServiceConnection, Context.BIND_AUTO_CREATE)
+        if (!bound) {
+            isBindingService = false
+        }
+    }
+
+    private fun unbindConnectionService() {
+        serviceEventsJob?.cancel()
+        serviceEventsJob = null
+        if (isServiceBound || isBindingService) {
+            try {
+                unbindService(connectionServiceConnection)
+            } catch (_: IllegalArgumentException) {
+            }
+        }
+        connectionService?.setClientVisible(false)
+        connectionService = null
+        isServiceBound = false
+        isBindingService = false
+    }
+
+    private fun subscribeToServiceEvents(service: ConnectionService) {
+        serviceEventsJob?.cancel()
+        serviceEventsJob = lifecycleScope.launch {
+            service.events().collectLatest { event ->
+                handleServiceEvent(event)
+            }
+        }
+    }
+
+    private fun handleServiceEvent(event: ConnectionService.ServiceEvent) {
+        when (event) {
+            is ConnectionService.ServiceEvent.Message -> {
+                val raw = JSONObject.quote(event.payload)
+                val script = """
+                    (function(){
+                      const raw = $raw;
+                      let data = raw;
+                      try { data = JSON.parse(raw); } catch(e){}
+                      try { window.dispatchEvent(new CustomEvent('native-connection',{detail:data})); } catch(e){}
+                    })();
+                """.trimIndent()
+                postServiceScript(script)
+            }
+            is ConnectionService.ServiceEvent.ConnectionState -> {
+                val script = """
+                    (function(){
+                      try { window.dispatchEvent(new CustomEvent('native-connection-state',{detail:{connected:${if (event.connected) "true" else "false"}}})); } catch(e){}
+                    })();
+                """.trimIndent()
+                postServiceScript(script)
+            }
+            is ConnectionService.ServiceEvent.Error -> {
+                val message = JSONObject.quote(event.throwable.message ?: "")
+                val name = JSONObject.quote(event.throwable::class.java.simpleName)
+                val script = """
+                    (function(){
+                      try { window.dispatchEvent(new CustomEvent('native-connection-error',{detail:{name:$name,message:$message}})); } catch(e){}
+                    })();
+                """.trimIndent()
+                postServiceScript(script)
+            }
+        }
+    }
+
+    private fun postServiceScript(script: String) {
+        if (!this::webView.isInitialized || !isPageReady) {
+            pendingServiceScripts.add(script)
+            return
+        }
+        webView.post {
+            webView.evaluateJavascript(script, null)
+        }
+    }
+
+    private fun flushPendingServiceScripts() {
+        if (!this::webView.isInitialized || !isPageReady) return
+        if (pendingServiceScripts.isEmpty()) return
+        val scripts = pendingServiceScripts.toList()
+        pendingServiceScripts.clear()
+        scripts.forEach { script ->
+            webView.post {
+                webView.evaluateJavascript(script, null)
+            }
+        }
+    }
+
     private fun handleAppVisibility(isForeground: Boolean) {
         val changed = isAppInForeground != isForeground
         isAppInForeground = isForeground
+        connectionService?.setClientVisible(isForeground)
+        if (isForeground) {
+            bindConnectionServiceIfNeeded()
+        } else {
+            unbindConnectionService()
+        }
         updateWebViewActivityState()
         if (changed) {
             notifyWebVisibility(if (isForeground) "foreground" else "background")
@@ -345,13 +493,14 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) return
         if (isStreaming == active) return
         isStreaming = active
+        connectionService?.setStreamingActive(active)
         updateWebViewActivityState()
     }
 
     private fun updateWebViewActivityState() {
         if (!this::webView.isInitialized) return
-        val keepActive = isAppInForeground || isStreaming
-        if (keepActive) {
+        val isForeground = isAppInForeground
+        if (isForeground) {
             if (areImagesBlocked) {
                 webView.settings.blockNetworkImage = false
                 areImagesBlocked = false
@@ -374,12 +523,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val desiredPriority = if (!isAppInForeground && isStreaming) {
+            val desiredPriority = if (isForeground) {
                 WebView.RENDERER_PRIORITY_IMPORTANT
             } else {
                 WebView.RENDERER_PRIORITY_BOUND
             }
-            val desiredWaived = !isAppInForeground && !isStreaming
+            val desiredWaived = !isForeground
             if (desiredPriority != lastRendererPriority || desiredWaived != lastRendererWaived) {
                 webView.setRendererPriorityPolicy(desiredPriority, desiredWaived)
                 lastRendererPriority = desiredPriority

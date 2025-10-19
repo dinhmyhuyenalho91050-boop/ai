@@ -538,16 +538,30 @@ class AdaptiveStreamBatcher{
     this.currentInterval=30;
     this.avgRenderTime=0;
     this.renderSamples=[];
+    this.isBackground=false;
+    this.dirty=false;
   }
-  
+
   push(text,thinking){
     this.buffer=text;
     this.thinkingBuffer=thinking||'';
     this.updateCount++;
+    this.dirty=true;
     this.scheduleUpdate();
   }
-  
+
   scheduleUpdate(){
+    if(this.isBackground){
+      if(this.rafId){
+        cancelAnimationFrame(this.rafId);
+        this.rafId=null;
+      }
+      if(this.timeoutId){
+        clearTimeout(this.timeoutId);
+        this.timeoutId=null;
+      }
+      return;
+    }
     const isBackground=typeof document!=='undefined'&&(document.hidden||window.__APP_VISIBILITY__==='background');
     if(isBackground&&this.rafId){
       cancelAnimationFrame(this.rafId);
@@ -589,8 +603,9 @@ class AdaptiveStreamBatcher{
     this.lastUpdate=performance.now();
     this.rafId=null;
     this.timeoutId=null;
+    this.dirty=false;
   }
-  
+
   adjustInterval(){
     const now=Date.now();
     const windowDuration=now-this.windowStart;
@@ -614,7 +629,39 @@ class AdaptiveStreamBatcher{
     if(this.renderSamples.length>10)this.renderSamples.shift();
     this.avgRenderTime=this.renderSamples.reduce((a,b)=>a+b,0)/this.renderSamples.length;
   }
-  
+
+  setBackground(flag){
+    const next=!!flag;
+    if(this.isBackground===next)return;
+    this.isBackground=next;
+    if(next){
+      if(this.rafId){
+        cancelAnimationFrame(this.rafId);
+        this.rafId=null;
+      }
+      if(this.timeoutId){
+        clearTimeout(this.timeoutId);
+        this.timeoutId=null;
+      }
+    }else if(this.dirty){
+      this.scheduleUpdate();
+    }
+  }
+
+  flushPending(force=false){
+    if(!this.dirty&&!force)return;
+    if(this.isBackground&&!force)return;
+    if(this.rafId){
+      cancelAnimationFrame(this.rafId);
+      this.rafId=null;
+    }
+    if(this.timeoutId){
+      clearTimeout(this.timeoutId);
+      this.timeoutId=null;
+    }
+    this.flush();
+  }
+
   stop(){
     if(this.rafId){
       cancelAnimationFrame(this.rafId);
@@ -2005,7 +2052,7 @@ class UIManager{
     
     // ✅ 核心改进2：缓存typing的body元素
     this.typingBodyCache=null;
-    
+
     // ✅ 核心改进3：批量更新
     this.pendingUpdates=new Set();
     this.updateScheduled=false;
@@ -2020,6 +2067,7 @@ class UIManager{
     this.isLoadingEarlier=false;
     this._regexInputDebounced=null;
     this._pendingTypingUpdate=null;
+    this._activeBatcher=null;
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
 
     window._sanitizer=this.sanitizer;
@@ -2060,8 +2108,17 @@ class UIManager{
     this._appHidden=hidden;
     if(hidden){
       this.dom.stopAutoCleanup();
+      if(this._activeBatcher&&typeof this._activeBatcher.setBackground==='function'){
+        try{ this._activeBatcher.setBackground(true); }catch(e){}
+      }
     }else{
       this.dom.startAutoCleanup();
+      if(this._activeBatcher&&typeof this._activeBatcher.setBackground==='function'){
+        try{ this._activeBatcher.setBackground(false); }catch(e){}
+        if(this._activeBatcher&&typeof this._activeBatcher.flushPending==='function'){
+          try{ this._activeBatcher.flushPending(true); }catch(e){}
+        }
+      }
       this.flushPendingTyping(true);
     }
   }
@@ -2747,7 +2804,13 @@ class UIManager{
     const batcher=isStream?new AdaptiveStreamBatcher((text,thinking)=>{
       if(typing) this.updateTyping(typing,text,thinking);
     }):null;
-    
+    if(batcher){
+      this._activeBatcher=batcher;
+      if(typeof batcher.setBackground==='function'){
+        try{ batcher.setBackground(this._isBackgroundActive()); }catch(e){}
+      }
+    }
+
     try{
       const result=await this.api.send(session,(text,thinking)=>{
         partial=text;
@@ -2755,11 +2818,16 @@ class UIManager{
         if(batcher)batcher.push(text,thinking);
         else this.updateTyping(typing,text,thinking);
       });
-      
-      if(batcher)batcher.stop();
+
+      if(batcher){
+        if(typeof batcher.flushPending==='function'){
+          try{ batcher.flushPending(true); }catch(e){}
+        }
+        batcher.stop();
+      }
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
       if(typing){ const __delay=Math.max(0,240-(performance.now()-__typingStart)); setTimeout(()=>this.removeTyping(typing), __delay);}
-      
+
       // ✅ 处理返回的content和thinking
       const content=typeof result==='string'?result:result.content;
       const thinking=typeof result==='object'?result.thinking:'';
@@ -2782,7 +2850,12 @@ this.appendMessage({
       });
       sessionDirty=true;
     }catch(error){
-      if(batcher)batcher.stop();
+      if(batcher){
+        if(typeof batcher.flushPending==='function'){
+          try{ batcher.flushPending(true); }catch(e){}
+        }
+        batcher.stop();
+      }
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
       if(typing){ const __delay=Math.max(0,240-(performance.now()-__typingStart)); setTimeout(()=>this.removeTyping(typing), __delay);}
       
@@ -2814,6 +2887,9 @@ this.appendMessage({
         sessionDirty=true;
       }
     }finally{
+      if(this._activeBatcher===batcher){
+        this._activeBatcher=null;
+      }
       notifyNativeStreaming(false);
       if(sessionDirty&&sessionId) this.state.markSessionsDirty(sessionId);
       setTimeout(()=>{ try{ this._releaseAutoStick(); }catch{} }, 240);

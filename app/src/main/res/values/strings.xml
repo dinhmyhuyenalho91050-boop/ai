@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AI Chat</string>
+    <string name="connection_service_channel_name">后台连接</string>
+    <string name="connection_service_channel_desc">保持与服务端的长连接以便推送与通知</string>
+    <string name="connection_status_connecting">连接服务中…</string>
+    <string name="connection_status_connected">连接已建立</string>
+    <string name="connection_status_streaming">同步进行中</string>
+    <string name="connection_status_disconnected">连接已断开，正在重试…</string>
 </resources>
