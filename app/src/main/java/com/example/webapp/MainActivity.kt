@@ -146,7 +146,7 @@ class MainActivity : AppCompatActivity() {
 
             CookieManager.getInstance().apply {
                 setAcceptCookie(true)
-                setAcceptThirdPartyCookies(this@apply, true)
+                setAcceptThirdPartyCookies(view, true)
             }
         }
     }
