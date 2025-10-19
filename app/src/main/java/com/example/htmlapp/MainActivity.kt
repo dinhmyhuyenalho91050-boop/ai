@@ -213,66 +213,76 @@ private class DownloadBridge(activity: MainActivity) {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @JavascriptInterface
-    fun saveFile(filename: String, base64Data: String): Boolean {
+    fun saveFile(filename: String, base64Data: String): String {
         val safeName = filename.ifBlank { "backup-${UUID.randomUUID()}.json" }
         return try {
             val data = Base64.decode(base64Data, Base64.DEFAULT)
-            val success = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val location = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 saveToMediaStore(safeName, data)
             } else {
                 saveToLegacyStorage(safeName, data)
             }
-            notify(success)
-            success
+            val success = !location.isNullOrBlank()
+            notify(success, location)
+            location ?: ""
         } catch (e: Exception) {
-            notify(false)
-            false
+            notify(false, null)
+            ""
         }
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
-    private fun saveToMediaStore(filename: String, data: ByteArray): Boolean {
+    private fun saveToMediaStore(filename: String, data: ByteArray): String? {
         val resolver = appContext.contentResolver
+        val targetDir = Environment.DIRECTORY_DOWNLOADS + "/AIChat"
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, filename)
             put(MediaStore.Downloads.MIME_TYPE, "application/json")
             put(MediaStore.Downloads.IS_PENDING, 1)
-            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/AIChat")
+            put(MediaStore.Downloads.RELATIVE_PATH, targetDir)
         }
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
         return try {
             resolver.openOutputStream(uri)?.use { output ->
                 output.write(data)
-            } ?: return false
+            } ?: return null
             values.clear()
             values.put(MediaStore.Downloads.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
-            true
+            "内部存储/Download/AIChat/$filename"
         } catch (e: Exception) {
             resolver.delete(uri, null, null)
-            false
+            null
         }
     }
 
     @Suppress("DEPRECATION")
-    private fun saveToLegacyStorage(filename: String, data: ByteArray): Boolean {
+    private fun saveToLegacyStorage(filename: String, data: ByteArray): String? {
         return try {
-            val dir = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return false
-            if (!dir.exists()) {
-                dir.mkdirs()
+            val baseDir = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return null
+            if (!baseDir.exists()) {
+                baseDir.mkdirs()
             }
-            val file = File(dir, filename)
+            val targetDir = File(baseDir, "AIChat")
+            if (!targetDir.exists()) {
+                targetDir.mkdirs()
+            }
+            val file = File(targetDir, filename)
             FileOutputStream(file).use { it.write(data) }
-            true
+            file.absolutePath
         } catch (e: Exception) {
-            false
+            null
         }
     }
 
-    private fun notify(success: Boolean) {
+    private fun notify(success: Boolean, location: String?) {
         mainHandler.post {
             val message = if (success) {
-                "备份已保存"
+                if (!location.isNullOrBlank()) {
+                    "备份已保存: $location"
+                } else {
+                    "备份已保存"
+                }
             } else {
                 "保存备份失败"
             }

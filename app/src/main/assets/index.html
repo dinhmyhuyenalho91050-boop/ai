@@ -396,19 +396,6 @@
           </div>
         </div>
 
-        <div class="model-preset-card">
-          <h3>存储信息</h3>
-          <div style="font-size:13px;line-height:1.8;color:var(--fg)">
-            <div style="display:grid;grid-template-columns:120px 1fr;gap:.5rem" id="storageInfo">
-              <span style="color:var(--muted)">对话数量:</span><span id="sessionCount">-</span>
-              <span style="color:var(--muted)">消息总数:</span><span id="messageCount">-</span>
-              <span style="color:var(--muted)">模型预设:</span><span id="modelPresetCount">-</span>
-              <span style="color:var(--muted)">提示词预设:</span><span id="promptPresetCount">-</span>
-              <span style="color:var(--muted)">预估大小:</span><span id="dataSize">-</span>
-            </div>
-          </div>
-        </div>
-
         <div style="background:rgba(239,68,68,.08);border:1px solid var(--danger);border-radius:.75rem;padding:1rem">
           <div style="font-weight:600;margin-bottom:.5rem;color:var(--danger)">🗑️ 危险操作</div>
           <p style="font-size:13px;color:var(--muted);margin-bottom:.75rem">
@@ -3084,9 +3071,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       currentId:this.state.get('currentId')
     };
     this.downloadJSONCompat(data,`chat-backup-all-${this.formatDate()}.json`);
-    ErrorHandler.show('导出成功',2000);
   }
-  
+
   exportSessions(){
     const data={
       version:'9.3',
@@ -3095,9 +3081,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       currentId:this.state.get('currentId')
     };
     this.downloadJSONCompat(data,`chat-backup-sessions-${this.formatDate()}.json`);
-    ErrorHandler.show('对话导出成功',2000);
   }
-  
+
   exportPresets(){
     const data={
       version:'9.3',
@@ -3106,7 +3091,6 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       promptPresets:this.state.get('promptPresets')
     };
     this.downloadJSONCompat(data,`chat-backup-presets-${this.formatDate()}.json`);
-    ErrorHandler.show('预设导出成功',2000);
   }
   
   downloadJSONCompat(data, filename){
@@ -3115,17 +3099,26 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const blob = new Blob([text], { type: 'application/json' });
 
     let savedNative = false;
+    let nativeLocation = '';
     if(window.HtmlAppNative && typeof window.HtmlAppNative.saveFile === 'function'){
       try{
         const base64 = btoa(unescape(encodeURIComponent(text)));
-        savedNative = !!window.HtmlAppNative.saveFile(filename, base64);
+        const response = window.HtmlAppNative.saveFile(filename, base64);
+        if(typeof response === 'string' && response.trim()){
+          savedNative = true;
+          nativeLocation = response.trim();
+        }else{
+          savedNative = !!response;
+        }
       }catch(err){
         savedNative = false;
+        nativeLocation = '';
       }
     }
 
     if(savedNative){
-      return;
+      try { ErrorHandler.show('已保存到: ' + (nativeLocation || '内部存储/Download/AIChat'), 3600); } catch(_) {}
+      return {native:true,path:nativeLocation};
     }
 
     const saveWithAnchor = () => {
@@ -3165,12 +3158,25 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         .then((uri)=>{
           try { ErrorHandler.show('已保存到: ' + (uri||'应用目录'), 3500); } catch(_) {}
         })
-        .catch(()=>{ saveWithAnchor(); });
+        .catch(()=>{
+          const ok = saveWithAnchor();
+          if(!ok){
+            try { ErrorHandler.show('导出失败: 无法写入文件', 3800); } catch(_) {}
+          }
+        });
+      return {native:false,path:null};
     }else{
-      saveWithAnchor();
+      const ok = saveWithAnchor();
+      if(ok){
+        try { ErrorHandler.show('导出成功(浏览器下载)', 2500); } catch(_) {}
+      }else{
+        try { ErrorHandler.show('导出失败: 无法触发下载', 3800); } catch(_) {}
+      }
+      return {native:false,path:null};
     }
   }catch(e){
     try { ErrorHandler.show('导出失败: ' + e.message, 4000); } catch(_) {}
+    return {native:false,path:null,error:e};
   }
 }
 
@@ -3307,7 +3313,6 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     this.renderMessages(true);
     this.renderSidebar();
     this.updateModelSelectors();
-    this.updateStorageInfo();
     ErrorHandler.show('所有数据已清空',2000);
   }
   
@@ -3322,26 +3327,6 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       this.state.markSessionsDirty(sessionId);
       this.renderSidebar();
     }
-  }
-  
-  updateStorageInfo(){
-    const sessions=this.state.get('sessions');
-    const modelPresets=this.state.get('modelPresets');
-    const promptPresets=this.state.get('promptPresets');
-    
-    let totalMessages=0;
-    Object.values(sessions).forEach(s=>{
-      totalMessages+=(s.history||[]).length;
-    });
-    
-    const dataStr=JSON.stringify({modelPresets,promptPresets,sessions});
-    const sizeKB=(new Blob([dataStr]).size/1024).toFixed(2);
-    
-    if(Utils.$('#sessionCount'))Utils.$('#sessionCount').textContent=Object.keys(sessions).length;
-    if(Utils.$('#messageCount'))Utils.$('#messageCount').textContent=totalMessages;
-    if(Utils.$('#modelPresetCount'))Utils.$('#modelPresetCount').textContent=modelPresets.filter(p=>p.enabled).length;
-    if(Utils.$('#promptPresetCount'))Utils.$('#promptPresetCount').textContent=Object.keys(promptPresets).length;
-    if(Utils.$('#dataSize'))Utils.$('#dataSize').textContent=`${sizeKB} KB`;
   }
   
   bindEvents(){
@@ -3383,7 +3368,6 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(btnSettings){
       this.events.on(btnSettings,'click',()=>{
         this.loadSettingsUI();
-        this.updateStorageInfo();
         Utils.$('#dlgSettings')?.showModal();
       });
     }
@@ -3816,7 +3800,6 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         const targetPane=Utils.$(`#pane-${pane}`);
         if(targetPane)targetPane.hidden=false;
         
-        if(pane==='backup')this.updateStorageInfo();
       });
     }
     
