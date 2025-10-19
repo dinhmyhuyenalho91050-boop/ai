@@ -4163,6 +4163,16 @@ if(document.readyState==='loading'){
 
   // Safety: adjust padding-bottom on IME resize and center focused field
   (function () {
+    let scrollPending = false;
+    let pendingElement = null;
+    const flushScrollIntoView = () => {
+      const target = pendingElement;
+      pendingElement = null;
+      scrollPending = false;
+      if (target && typeof target.scrollIntoView === 'function') {
+        target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    };
     const apply = () => {
       const el = document.activeElement;
       let kb = 0;
@@ -4171,12 +4181,21 @@ if(document.readyState==='loading'){
       }
       document.body.style.paddingBottom = kb + 'px';
       if (el && /^(input|textarea|select)$/i.test(el.tagName)) {
-        setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 50);
+        pendingElement = el;
+        if (!scrollPending) {
+          scrollPending = true;
+          setTimeout(flushScrollIntoView, 50);
+        }
+      } else {
+        pendingElement = null;
       }
     };
-    window.addEventListener('focusin', apply);
+    const applyThrottled = (window.Utils && typeof window.Utils.rafThrottle === 'function')
+      ? window.Utils.rafThrottle(apply)
+      : apply;
+    window.addEventListener('focusin', applyThrottled);
     if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', apply);
+      window.visualViewport.addEventListener('resize', applyThrottled);
     }
   })();
 })();
