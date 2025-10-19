@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ContentValues
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -21,6 +22,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
 import android.provider.MediaStore
+import android.util.Base64
 import android.widget.Toast
 import androidx.activity.addCallback
 import androidx.activity.result.ActivityResultLauncher
@@ -38,10 +40,12 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
-import android.util.Base64
-import java.util.concurrent.Executors
-import java.util.concurrent.ExecutorService
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -119,6 +123,25 @@ class MainActivity : AppCompatActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             useWideViewPort = true
             loadWithOverviewMode = true
+            setSupportZoom(false)
+            setBuiltInZoomControls(false)
+            setDisplayZoomControls(false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                offscreenPreRaster = false
+            }
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+                WebSettingsCompat.setForceDark(this, WebSettingsCompat.FORCE_DARK_ON)
+            }
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                try {
+                    WebSettingsCompat.setAlgorithmicDarkeningAllowed(this, true)
+                } catch (_: Throwable) {
+                }
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WebView.setSafeBrowsingEnabled(false)
         }
 
         webView.isVerticalScrollBarEnabled = false
@@ -228,6 +251,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val root = findViewById<View>(R.id.root_container)
+        setupWindowInsets(root)
+    }
+
     override fun onDestroy() {
         if (this::webView.isInitialized) {
             webView.apply {
@@ -259,8 +288,19 @@ class MainActivity : AppCompatActivity() {
 private class DownloadBridge(activity: MainActivity) {
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "DownloadBridgeIo").apply { isDaemon = true }
+    private val ioExecutor: ThreadPoolExecutor = ThreadPoolExecutor(
+        0,
+        Runtime.getRuntime().availableProcessors(),
+        30L,
+        TimeUnit.SECONDS,
+        SynchronousQueue()
+    ) { runnable ->
+        Thread(runnable, "bg-io").apply {
+            priority = Thread.MIN_PRIORITY
+            isDaemon = true
+        }
+    }.apply {
+        allowCoreThreadTimeOut(true)
     }
 
     fun dispose() {
