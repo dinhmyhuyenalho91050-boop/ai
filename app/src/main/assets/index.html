@@ -4065,7 +4065,12 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     };
     const updatePad = Utils.rafThrottle(()=> this._updateBottomPadding());
 
+    this._imeScrollAnim = null;
     this._smoothStickBottom = (duration=220)=>{
+      if(this._imeScrollAnim){
+        cancelAnimationFrame(this._imeScrollAnim);
+        this._imeScrollAnim = null;
+      }
       const start = box.scrollTop;
       const target = box.scrollHeight - box.clientHeight;
       if(target - start < 2) return;
@@ -4074,9 +4079,13 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       const step = (now)=>{
         const p = Math.min(1,(now - t0)/duration);
         box.scrollTop = start + (target - start) * ease(p);
-        if(p<1) requestAnimationFrame(step);
+        if(p<1){
+          this._imeScrollAnim = requestAnimationFrame(step);
+        }else{
+          this._imeScrollAnim = null;
+        }
       };
-      requestAnimationFrame(step);
+      this._imeScrollAnim = requestAnimationFrame(step);
     };
 
     if(input){
