@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>AI Chat v9.3 (IndexedDB + Optimized)</title>
 <style>
   :root{
@@ -10,12 +10,13 @@
     --accent3:#10b981;--danger:#ef4444;--border:#1f2937;--shadow:rgba(0,0,0,.3);--glow:rgba(96,165,250,.15);
     --transition-fast:.15s cubic-bezier(0.4,0,0.2,1);--transition-normal:.2s ease;--transition-slow:.3s cubic-bezier(.4,0,.2,1);
     --shadow-sm:0 2px 8px var(--shadow);--shadow-md:0 4px 16px var(--shadow);--shadow-lg:0 22px 60px rgba(0,0,0,.55);
+    --kb:env(keyboard-inset-height,0px);
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-  html,body{height:100%}
+  html,body{min-height:100vh;min-height:100dvh}
   body{overflow:hidden;background:linear-gradient(135deg,#0a0e14 0%,#141824 100%);color:var(--fg);
        font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
-  .app{display:flex;flex-direction:column;height:100vh}
+  .app{display:flex;flex-direction:column;min-height:100%;min-height:100dvh}
   header{flex-shrink:0;height:60px;display:flex;align-items:center;justify-content:space-between;padding:0 1.25rem;
     background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1));border-bottom:1px solid var(--border);
     box-shadow:var(--shadow-sm);z-index:100}
@@ -67,7 +68,7 @@
     #backdrop.show{opacity:1;pointer-events:auto}
   }
   .chat{flex:1;display:flex;flex-direction:column;overflow:hidden}
-  .messages{flex:1;overflow:auto;padding:1rem;min-height:120px;position:relative;padding-bottom:calc(var(--composer-pad, 0px) + 1rem);}
+  .messages{flex:1;overflow:auto;padding:1rem;min-height:120px;position:relative;padding-bottom:calc(var(--composer-pad, 0px) + env(safe-area-inset-bottom) + 1rem);}
   .messages::-webkit-scrollbar{width:0;height:0}
   .messages{scrollbar-width:none;-ms-overflow-style:none}
   @media (max-width:640px){.messages{padding:.75rem .5rem}}
@@ -93,7 +94,8 @@
   details summary{transition:color .2s ease}
   details summary:hover{color:var(--accent)!important}
   details summary::marker{color:var(--accent2)}
-  .composer{flex-shrink:0;display:flex;flex-direction:column;gap:.75rem;padding:.75rem;border-top:1px solid var(--border);
+  .composer{flex-shrink:0;display:flex;flex-direction:column;gap:.75rem;padding:.75rem;
+    padding-bottom:calc(.75rem + env(safe-area-inset-bottom) + var(--kb));border-top:1px solid var(--border);
     background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1))}
   .composer-header{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
   .composer-header .model-selector{flex:1;max-width:400px}
@@ -3958,6 +3960,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const box = Utils.$('#messages');
     const input = Utils.$('#input');
     if(!box) return;
+    const rootEl = document.documentElement;
+    const setKeyboardInset = (value)=>{
+      const normalized = Math.max(0, Math.round(value || 0));
+      rootEl.style.setProperty('--kb', normalized + 'px');
+      return normalized;
+    };
+    const readKeyboardInset = ()=>{
+      const raw = parseFloat(getComputedStyle(rootEl).getPropertyValue('--kb'));
+      return Number.isFinite(raw) ? Math.max(0, raw) : 0;
+    };
     this._ime = {
       active: false,
       baseVVH: (this._vvAvailable ? visualViewport.height : null),
@@ -3967,14 +3979,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     this._updateBottomPadding = ()=>{
       const composer = document.querySelector('.composer');
       const composerH = composer ? (composer.offsetHeight || 0) : 0;
-      let vvInset = 0;
-      if(this._vvAvailable){
-        try{
-          const ov = Math.max(0, (window.innerHeight - visualViewport.height - visualViewport.offsetTop));
-          vvInset = ov;
-        }catch(e){}
-      }
-      const pad = Math.round(composerH + vvInset + 8);
+      const keyboardInset = readKeyboardInset();
+      const pad = Math.round(composerH + keyboardInset + 8);
       box.style.setProperty('--composer-pad', pad + 'px');
     };
     const updatePad = Utils.rafThrottle(()=> this._updateBottomPadding());
@@ -4010,20 +4016,55 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
 
     if(this._vvAvailable){
       const onVVResize = Utils.rafThrottle(()=>{
+        let vvInset = 0;
+        try{
+          vvInset = Math.max(0, (window.innerHeight - visualViewport.height - visualViewport.offsetTop));
+        }catch(e){}
+        const inset = setKeyboardInset(vvInset);
         updatePad();
         const h = visualViewport.height;
         if(this._ime.baseVVH == null) this._ime.baseVVH = h;
         const delta = (this._ime.baseVVH - h);
-        const keyboardLikelyOpen = delta > 80;
+        const keyboardLikelyOpen = Math.max(inset, delta) > 80;
         if(keyboardLikelyOpen && this._ime.active && this._ime.wasNearBottom){
           requestAnimationFrame(()=> this._smoothStickBottom(220));
         }
       });
       this.events.on(visualViewport, 'resize', onVVResize, {passive:true});
-      this.events.on(visualViewport, 'scroll', updatePad, {passive:true});
+      this.events.on(visualViewport, 'scroll', ()=>{
+        let vvInset = 0;
+        try{
+          vvInset = Math.max(0, (window.innerHeight - visualViewport.height - visualViewport.offsetTop));
+        }catch(e){}
+        setKeyboardInset(vvInset);
+        updatePad();
+      }, {passive:true});
     }
 
     this.events.on(window, 'resize', updatePad, {passive:true});
+    if('virtualKeyboard' in navigator){
+      try{ navigator.virtualKeyboard.overlaysContent = true; }catch(e){}
+      const syncVK = ()=>{
+        const rect = navigator.virtualKeyboard.boundingRect;
+        const height = rect ? rect.height : 0;
+        const inset = setKeyboardInset(height);
+        updatePad();
+        if(inset > 0 && this._ime.active && this._ime.wasNearBottom){
+          requestAnimationFrame(()=> this._smoothStickBottom(220));
+        }
+      };
+      navigator.virtualKeyboard.addEventListener('geometrychange', syncVK);
+      syncVK();
+    }else if(!this._vvAvailable){
+      // Fallback: estimate using window innerHeight changes
+      let lastInner = window.innerHeight;
+      this.events.on(window,'resize',()=>{
+        const delta = Math.max(0, lastInner - window.innerHeight);
+        lastInner = window.innerHeight;
+        setKeyboardInset(delta);
+        updatePad();
+      }, {passive:true});
+    }
     requestAnimationFrame(()=> this._updateBottomPadding());
   }
 }
