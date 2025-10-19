@@ -4261,12 +4261,13 @@ if(document.readyState==='loading'){
       this.buf  = { dq:"", cq:"", bold:"", plain:"" };
     }
     _esc(s){ return String(s).replace(/[&<>"]/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
-    _commitPlain(){ if(this.buf.plain){ this.prefixHTML += this._esc(this.buf.plain); this.buf.plain=""; } }
+    _fmtText(s){ return this._esc(s).replace(/\n/g,'<br/>'); }
+    _commitPlain(){ if(this.buf.plain){ this.prefixHTML += this._fmtText(this.buf.plain); this.buf.plain=""; } }
     _close(type){
       const t=this.buf[type]; if(!t){ this.open[type]=false; return; }
-      if(type==='dq')   this.prefixHTML += `<em class="em-green">"${this._esc(t)}"</em>`;
-      if(type==='cq')   this.prefixHTML += `<em class="em-green">“${this._esc(t)}”</em>`;
-      if(type==='bold') this.prefixHTML += `<em class="em-yellow">${this._esc(t)}</em>`;
+      if(type==='dq')   this.prefixHTML += `<em class="em-green">"${this._fmtText(t)}"</em>`;
+      if(type==='cq')   this.prefixHTML += `<em class="em-green">“${this._fmtText(t)}”</em>`;
+      if(type==='bold') this.prefixHTML += `<em class="em-yellow">${this._fmtText(t)}</em>`;
       this.buf[type]=""; this.open[type]=false;
     }
     _open(type){ this._commitPlain(); this.open[type]=true; }
@@ -4289,10 +4290,10 @@ if(document.readyState==='loading'){
         else this.buf.plain += ch;
       }
       const parts=[];
-      if(this.open.dq)   parts.push(`<span data-incomplete="dq">"${this._esc(this.buf.dq)}`);
-      if(this.open.cq)   parts.push(`<span data-incomplete="cq">“${this._esc(this.buf.cq)}`);
-      if(this.open.bold) parts.push(`<span data-incomplete="bold">*</span>${this._esc(this.buf.bold)}`);
-      if(this.buf.plain) parts.push(this._esc(this.buf.plain));
+      if(this.open.dq)   parts.push(`<span data-incomplete="dq">"${this._fmtText(this.buf.dq)}`);
+      if(this.open.cq)   parts.push(`<span data-incomplete="cq">“${this._fmtText(this.buf.cq)}`);
+      if(this.open.bold) parts.push(`<span data-incomplete="bold">*</span>${this._fmtText(this.buf.bold)}`);
+      if(this.buf.plain) parts.push(this._fmtText(this.buf.plain));
       return { prefixHTML:this.prefixHTML, tailHTML:parts.join('') };
     }
     fullRaw(){
