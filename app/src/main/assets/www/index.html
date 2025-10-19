@@ -10,13 +10,13 @@
     --accent3:#10b981;--danger:#ef4444;--border:#1f2937;--shadow:rgba(0,0,0,.3);--glow:rgba(96,165,250,.15);
     --transition-fast:.15s cubic-bezier(0.4,0,0.2,1);--transition-normal:.2s ease;--transition-slow:.3s cubic-bezier(.4,0,.2,1);
     --shadow-sm:0 2px 8px var(--shadow);--shadow-md:0 4px 16px var(--shadow);--shadow-lg:0 22px 60px rgba(0,0,0,.55);
-    --native-ime-bottom:0px;--native-ime-total-bottom:0px;--native-viewport-height:100vh;
+    --native-ime-bottom:0px;--native-ime-total-bottom:0px;
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%}
   body{overflow:hidden;background:linear-gradient(135deg,#0a0e14 0%,#141824 100%);color:var(--fg);
        font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
-  .app{display:flex;flex-direction:column;height:var(--native-viewport-height,100vh);min-height:var(--native-viewport-height,100vh);}
+  .app{display:flex;flex-direction:column;height:var(--native-viewport-height,100svh);min-height:var(--native-viewport-height,100svh);}
   header{flex-shrink:0;height:60px;display:flex;align-items:center;justify-content:space-between;padding:0 1.25rem;
     background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1));border-bottom:1px solid var(--border);
     box-shadow:var(--shadow-sm);z-index:100}
@@ -109,11 +109,11 @@
   body.ime-open dialog{
     top:max(24px,calc(50% - var(--native-ime-bottom,0px)/2));
     transform:translate(-50%,-50%);
-    max-height:max(320px,calc(var(--native-viewport-height,100vh) - 32px));
+    max-height:max(320px,calc(var(--native-viewport-height,100svh) - 32px));
     margin-bottom:var(--native-ime-total-bottom,0px);
   }
-  body.ime-open dialog .settings{max-height:max(280px,calc(var(--native-viewport-height,100vh) - 80px));}
-  body.ime-open dialog .pane{max-height:max(160px,calc(var(--native-viewport-height,100vh) - 212px));}
+  body.ime-open dialog .settings{max-height:max(280px,calc(var(--native-viewport-height,100svh) - 80px));}
+  body.ime-open dialog .pane{max-height:max(160px,calc(var(--native-viewport-height,100svh) - 212px));}
   .settings{display:grid;grid-template-columns:200px 1fr;min-height:500px}
   .settings .tabs{border-right:1px solid var(--border);background:rgba(0,0,0,.2);overflow:auto}
   .settings .tabs::-webkit-scrollbar{width:0;height:0}
