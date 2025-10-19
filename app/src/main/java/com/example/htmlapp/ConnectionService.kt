@@ -1,7 +1,6 @@
 package com.example.htmlapp
 
 import android.Manifest
-import android.app.ForegroundServiceStartNotAllowedException
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -418,16 +417,22 @@ class ConnectionService : Service() {
             return try {
                 ContextCompat.startForegroundService(context, intent)
                 true
-            } catch (e: ForegroundServiceStartNotAllowedException) {
-                Log.w(TAG, "Unable to start foreground service", e)
-                false
-            } catch (e: SecurityException) {
-                Log.w(TAG, "Unable to start foreground service", e)
-                false
-            } catch (e: IllegalStateException) {
-                Log.w(TAG, "Unable to start foreground service", e)
-                false
+            } catch (throwable: Throwable) {
+                if (throwable is SecurityException || throwable is IllegalStateException ||
+                    isForegroundServiceStartNotAllowed(throwable)
+                ) {
+                    Log.w(TAG, "Unable to start foreground service", throwable)
+                    false
+                } else {
+                    throw throwable
+                }
             }
+        }
+
+        private fun isForegroundServiceStartNotAllowed(throwable: Throwable): Boolean {
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                throwable::class.java.name ==
+                "android.app.ForegroundServiceStartNotAllowedException"
         }
     }
 }
