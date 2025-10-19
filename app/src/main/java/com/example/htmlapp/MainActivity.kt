@@ -236,7 +236,17 @@ class MainActivity : AppCompatActivity() {
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+
+            val bottomInset = if (imeVisible) {
+                val diff = systemBars.bottom - imeInsets.bottom
+                if (diff > 0) diff else 0
+            } else {
+                systemBars.bottom
+            }
+
+            v.setPadding(systemBars.left, systemBars.top, systemBars.right, bottomInset)
             insets
         }
     }
