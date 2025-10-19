@@ -1,14 +1,22 @@
 package com.example.htmlapp
 
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
+import android.app.Activity.RESULT_OK
 import androidx.activity.addCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -18,8 +26,56 @@ import androidx.core.view.WindowInsetsControllerCompat
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
-    @SuppressLint("SetJavaScriptEnabled")
+    private val fileChooserLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val callback = filePathCallback
+            if (callback == null) {
+                return@registerForActivityResult
+            }
+
+            if (result.resultCode == RESULT_OK) {
+                val data = result.data
+                val uris = mutableListOf<Uri>()
+                val clipData = data?.clipData
+                val persistable = data?.flags?.and(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION) != 0
+                if (clipData != null) {
+                    for (i in 0 until clipData.itemCount) {
+                        val uri = clipData.getItemAt(i).uri
+                        if (persistable) {
+                            try {
+                                contentResolver.takePersistableUriPermission(
+                                    uri,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                )
+                            } catch (_: SecurityException) {
+                            }
+                        }
+                        uris += uri
+                    }
+                } else {
+                    data?.data?.let { uri ->
+                        if (persistable) {
+                            try {
+                                contentResolver.takePersistableUriPermission(
+                                    uri,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                )
+                            } catch (_: SecurityException) {
+                            }
+                        }
+                        uris += uri
+                    }
+                }
+                callback.onReceiveValue(if (uris.isNotEmpty()) uris.toTypedArray() else null)
+            } else {
+                callback.onReceiveValue(null)
+            }
+            filePathCallback = null
+        }
+
+    @SuppressLint("SetJavaScriptEnabled", "AddJavascriptInterface")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -42,6 +98,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureWebView() {
         webView.setBackgroundColor(Color.TRANSPARENT)
+        webView.addJavascriptInterface(WebAppBridge(this), "Android")
         with(webView.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -56,6 +113,35 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.isVerticalScrollBarEnabled = false
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                this@MainActivity.filePathCallback = filePathCallback
+
+                val intent = try {
+                    fileChooserParams?.createIntent()
+                } catch (_: Exception) {
+                    null
+                } ?: Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "application/json"
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                }
+
+                return try {
+                    fileChooserLauncher.launch(intent)
+                    true
+                } catch (_: ActivityNotFoundException) {
+                    this@MainActivity.filePathCallback = null
+                    Toast.makeText(this@MainActivity, "无法打开文件选择器", Toast.LENGTH_SHORT).show()
+                    false
+                }
+            }
+        }
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(
                 view: WebView,
@@ -116,6 +202,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         if (this::webView.isInitialized) {
+            filePathCallback?.onReceiveValue(null)
+            filePathCallback = null
             webView.apply {
                 loadUrl("about:blank")
                 stopLoading()
