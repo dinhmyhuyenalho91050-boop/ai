@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException
 import android.content.ContentValues
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -39,13 +40,12 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.webkit.WebSettingsCompat
 import java.io.File
 import java.io.FileOutputStream
+import java.lang.ref.WeakReference
 import java.util.UUID
 import android.util.Base64
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.SynchronousQueue
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -53,13 +53,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var downloadBridge: DownloadBridge
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
+    private var isAppInForeground = true
+    private var isStreaming = false
+    private var areTimersPaused = false
+    private var areImagesBlocked = false
+    private var lastVisibilityState: String? = null
+    private var lastRendererPriority: Int? = null
+    private var lastRendererWaived: Boolean? = null
+    private var isPageReady = false
+    private var pendingVisibilityState: String? = null
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
-            notifyWebVisibility("foreground")
+            handleAppVisibility(true)
         }
 
         override fun onStop(owner: LifecycleOwner) {
-            notifyWebVisibility("background")
+            handleAppVisibility(false)
         }
     }
 
@@ -72,6 +81,7 @@ class MainActivity : AppCompatActivity() {
 
         val root = findViewById<View>(R.id.root_container)
         webView = findViewById(R.id.webview)
+        isPageReady = false
 
         fileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val callback = filePathCallback
@@ -100,6 +110,7 @@ class MainActivity : AppCompatActivity() {
         configureWebView()
         setupWindowInsets(root)
         setupBackNavigation()
+        handleAppVisibility(true)
         notifyWebVisibility("foreground")
         ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver)
 
@@ -185,6 +196,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                isPageReady = false
+            }
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: WebResourceRequest
@@ -199,6 +215,8 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView, url: String?) {
                 super.onPageFinished(view, url)
+                isPageReady = true
+                dispatchPendingVisibility()
                 val lifecycle = ProcessLifecycleOwner.get().lifecycle
                 val state = if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                     "foreground"
@@ -281,6 +299,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun notifyWebVisibility(state: String) {
         if (!this::webView.isInitialized) return
+        pendingVisibilityState = state
+        if (!isPageReady) {
+            return
+        }
+        dispatchVisibilityState(state)
+    }
+
+    private fun dispatchVisibilityState(state: String) {
+        if (!this::webView.isInitialized) return
+        if (state == lastVisibilityState) {
+            return
+        }
+        lastVisibilityState = state
         webView.post {
             webView.evaluateJavascript(
                 "window.__setNativeVisibility && window.__setNativeVisibility('$state');",
@@ -288,28 +319,83 @@ class MainActivity : AppCompatActivity() {
             )
         }
     }
+
+    private fun dispatchPendingVisibility() {
+        val state = pendingVisibilityState ?: return
+        dispatchVisibilityState(state)
+    }
+
+    private fun handleAppVisibility(isForeground: Boolean) {
+        val changed = isAppInForeground != isForeground
+        isAppInForeground = isForeground
+        updateWebViewActivityState()
+        if (changed) {
+            notifyWebVisibility(if (isForeground) "foreground" else "background")
+        }
+    }
+
+    fun onStreamingStateChanged(active: Boolean) {
+        if (!this::webView.isInitialized) return
+        if (isStreaming == active) return
+        isStreaming = active
+        updateWebViewActivityState()
+    }
+
+    private fun updateWebViewActivityState() {
+        if (!this::webView.isInitialized) return
+        val keepActive = isAppInForeground || isStreaming
+        if (keepActive) {
+            if (areImagesBlocked) {
+                webView.settings.blockNetworkImage = false
+                areImagesBlocked = false
+            }
+            if (areTimersPaused) {
+                webView.onResume()
+                webView.resumeTimers()
+                areTimersPaused = false
+            }
+        } else {
+            if (!areImagesBlocked) {
+                webView.settings.blockNetworkImage = true
+                areImagesBlocked = true
+            }
+            if (!areTimersPaused) {
+                webView.onPause()
+                webView.pauseTimers()
+                areTimersPaused = true
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val desiredPriority = if (!isAppInForeground && isStreaming) {
+                WebView.RENDERER_PRIORITY_IMPORTANT
+            } else {
+                WebView.RENDERER_PRIORITY_BOUND
+            }
+            val desiredWaived = !isAppInForeground && !isStreaming
+            if (desiredPriority != lastRendererPriority || desiredWaived != lastRendererWaived) {
+                webView.setRendererPriorityPolicy(desiredPriority, desiredWaived)
+                lastRendererPriority = desiredPriority
+                lastRendererWaived = desiredWaived
+            }
+        }
+    }
 }
 
 private class DownloadBridge(activity: MainActivity) {
+    private val activityRef = WeakReference(activity)
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = ThreadPoolExecutor(
-        0,
-        Runtime.getRuntime().availableProcessors(),
-        30L,
-        TimeUnit.SECONDS,
-        SynchronousQueue()
-    ) { runnable ->
+    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "bg-io").apply {
             priority = Thread.MIN_PRIORITY
             isDaemon = true
         }
-    }.apply {
-        allowCoreThreadTimeOut(true)
     }
 
     fun dispose() {
         ioExecutor.shutdownNow()
+        activityRef.clear()
     }
 
     @JavascriptInterface
@@ -325,6 +411,15 @@ private class DownloadBridge(activity: MainActivity) {
             val (success, location) = performSave(safeName, base64Data)
             notify(success, location)
             location ?: ""
+        }
+    }
+
+    @JavascriptInterface
+    fun notifyStreamingState(active: Boolean) {
+        activityRef.get()?.let { activity ->
+            activity.runOnUiThread {
+                activity.onStreamingStateChanged(active)
+            }
         }
     }
 

@@ -438,7 +438,7 @@ const CONFIG={
   MSG_LOAD_CHUNK:40,
   THROTTLE_DELAY:80,
   DEBOUNCE_DELAY:300,
-  PERSIST_DELAY:100,
+  PERSIST_DELAY:240,
   IDLE_TIMEOUT:2000,
   STORAGE_KEYS:{
     modelPresets:'chat.modelPresets',
@@ -560,7 +560,7 @@ class AdaptiveStreamBatcher{
     this.adjustInterval();
 
     if(isBackground){
-      const delay=Math.max(this.currentInterval,120);
+      const delay=Math.max(this.currentInterval,240);
       if(this.timeoutId)clearTimeout(this.timeoutId);
       this.timeoutId=setTimeout(()=>{
         this.timeoutId=null;
@@ -921,6 +921,7 @@ const Utils={
   },
   
   cancelIdleTask(id){
+    if(id==null)return;
     if('cancelIdleCallback'in window)cancelIdleCallback(id);
     else clearTimeout(id);
   }
@@ -1034,20 +1035,22 @@ class StorageManager{
   
   static async save(key,value){
     const existing=this._queue.get(key);
-    if(existing)clearTimeout(existing.timer);
-    
+    if(existing&&existing.handle!=null){
+      Utils.cancelIdleTask(existing.handle);
+    }
+
     return new Promise((resolve)=>{
-      const timer=setTimeout(async()=>{
+      const handle=Utils.scheduleIdleTask(async()=>{
         try{
           await this._executeWrite(key,value);
+        }catch(e){
+          console.error('IndexedDB scheduled write error:',e);
+        }finally{
           this._queue.delete(key);
           resolve();
-        }catch(e){
-          this._queue.delete(key);
-          resolve(); // Still resolve to not block
         }
-      },100);
-      this._queue.set(key,{value,timer});
+      },{timeout:CONFIG.IDLE_TIMEOUT});
+      this._queue.set(key,{value,handle});
     });
   }
   
@@ -1077,7 +1080,7 @@ class StorageManager{
   static async flush(){
     const promises=[];
     for(const[key,item]of this._queue){
-      if(item.timer)clearTimeout(item.timer);
+      if(item.handle!=null)Utils.cancelIdleTask(item.handle);
       promises.push(this._executeWrite(key,item.value));
     }
     this._queue.clear();
@@ -1318,7 +1321,7 @@ class DOMManager{
   
   startAutoCleanup(){
     this.stopAutoCleanup();
-    this.cleanupTimer=setInterval(()=>this.cleanupDisconnected(),60000);
+    this.cleanupTimer=setInterval(()=>this.cleanupDisconnected(),180000);
   }
   
   stopAutoCleanup(){
@@ -2506,10 +2509,19 @@ class UIManager{
       this.setSending(false);
       return;
     }
-    
+
+    const notifyNativeStreaming=(flag)=>{
+      try{
+        if(window.HtmlAppNative&&typeof window.HtmlAppNative.notifyStreamingState==='function'){
+          window.HtmlAppNative.notifyStreamingState(!!flag);
+        }
+      }catch(_){ }
+    };
+
     const promptPreset=this.state.getSessionPromptConfig(session);
     const isStream=preset?.config?.stream;
-    
+    notifyNativeStreaming(true);
+
     let typing=null; let __typingStart=0; let __typingTimer=null;
     let partial='',partialThinking='';
     const TYPING_DELAY=90;
@@ -2584,6 +2596,7 @@ this.appendMessage({
         sessionDirty=true;
       }
     }finally{
+      notifyNativeStreaming(false);
       if(sessionDirty&&sessionId) this.state.markSessionsDirty(sessionId);
       setTimeout(()=>{ try{ this._releaseAutoStick(); }catch{} }, 240);
       if(this._vvAvailable) setTimeout(()=>this.unfreezeViewport(), 200);
@@ -4346,9 +4359,9 @@ if(document.readyState==='loading'){
 // === StreamB: Stateful inline formatter & scheduler ===
 (function(){
   window.__STREAM_CFG = window.__STREAM_CFG || {
-    minGapMs: 16,
+    minGapMs: 48,
     nearBottomPx: 120,
-    scrollDeltaMin: 8
+    scrollDeltaMin: 12
   };
   class StreamFormatterB {
     constructor(){ this.reset(); }
