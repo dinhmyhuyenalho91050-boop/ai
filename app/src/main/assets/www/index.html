@@ -72,6 +72,9 @@
   }
   .chat{flex:1;display:flex;flex-direction:column;overflow:hidden}
   .messages{flex:1;overflow:auto;padding:1rem;min-height:120px;position:relative;padding-bottom:calc(var(--composer-pad, 0px) + 1rem);}
+  .messages .vlist-viewport{position:relative;width:100%;min-height:100%;}
+  .messages .vlist-inner{position:absolute;top:0;left:0;right:0;width:100%;will-change:transform;}
+  .messages .vlist-inner > .sentinel{height:1px;margin:0;padding:0;}
   .messages::-webkit-scrollbar{width:0;height:0}
   .messages{scrollbar-width:none;-ms-overflow-style:none}
   @media (max-width:640px){.messages{padding:.75rem .5rem}}
@@ -517,6 +520,8 @@ const CONFIG={
   MSG_VLIST_THRESHOLD:50,
   MSG_WINDOW_TAIL:30,
   MSG_WINDOW_BUFFER:10,
+  MSG_WINDOW_OVERSCAN:240,
+  MSG_ESTIMATED_HEIGHT:160,
   AUTO_FOLLOW_PX:60,
   MSG_LOAD_CHUNK:40,
   THROTTLE_DELAY:80,
@@ -1548,42 +1553,150 @@ class StateManager{
 // ===== MessageWindowManager =====
 class MessageWindowManager{
   constructor(){
-    this.window={enabled:false,start:0,end:-1,total:0};
+    this.defaultHeight=CONFIG.MSG_ESTIMATED_HEIGHT||160;
+    this.overscanPx=CONFIG.MSG_WINDOW_OVERSCAN||240;
+    this.heightCache=null;
+    this.prefix=[0];
+    this.totalHeight=0;
+    this.pendingStart=null;
+    this.window={enabled:false,start:0,end:-1,total:0,padTop:0,padBottom:0,visibleHeight:0};
   }
-  
-  evaluate(total){
-    if(total>CONFIG.MSG_VLIST_THRESHOLD){
-      this.window.enabled=true;
-      this.window.total=total;
-      this.window.end=total-1;
-      this.window.start=Math.max(0,total-CONFIG.MSG_WINDOW_TAIL-CONFIG.MSG_WINDOW_BUFFER);
-    }else{
+
+  attachHeightCache(cache){
+    this.heightCache=cache;
+  }
+
+  reset(){
+    this.prefix=[0];
+    this.totalHeight=0;
+    this.pendingStart=null;
+    this.window={enabled:false,start:0,end:-1,total:0,padTop:0,padBottom:0,visibleHeight:0};
+  }
+
+  ensurePrefix(history){
+    const cache=this.heightCache||new Map();
+    const prefix=new Array(history.length+1);
+    let acc=0;
+    prefix[0]=0;
+    for(let i=0;i<history.length;i++){
+      const msg=history[i];
+      const id=msg?.id;
+      let height=id!=null?cache.get(id):null;
+      if(!Number.isFinite(height)||height<=0)height=this.defaultHeight;
+      acc+=height;
+      prefix[i+1]=acc;
+    }
+    this.prefix=prefix;
+    this.totalHeight=acc;
+  }
+
+  findIndexAtOffset(offset){
+    const total=this.window.total;
+    if(total<=0)return 0;
+    let low=0,high=total;
+    while(low<high){
+      const mid=(low+high)>>>1;
+      if(this.prefix[mid+1]<=offset){
+        low=mid+1;
+      }else{
+        high=mid;
+      }
+    }
+    return Math.min(total-1,low);
+  }
+
+  evaluate(history,{scrollTop=0,viewportHeight=0,forceToEnd=false}={}){
+    const total=history.length;
+    this.window.total=total;
+
+    if(total===0){
+      this.reset();
+      return this.window;
+    }
+
+    this.ensurePrefix(history);
+
+    if(total<=CONFIG.MSG_VLIST_THRESHOLD){
       this.window.enabled=false;
-      this.window.total=total;
       this.window.start=0;
       this.window.end=total-1;
+      this.window.padTop=0;
+      this.window.visibleHeight=this.totalHeight;
+      this.window.padBottom=0;
+      return this.window;
     }
-  }
-  
-  loadEarlier(){
-    if(!this.window.enabled||this.window.start===0)return null;
-    const newStart=Math.max(0,this.window.start-CONFIG.MSG_LOAD_CHUNK);
-    const oldStart=this.window.start;
-    this.window.start=newStart;
-    return{newStart,oldStart};
-  }
-  
-  appendNew(total,isNearBottom=true){
-    if(this.window.enabled){
-      this.window.total=total;
-      this.window.end=total-1;
-      if(isNearBottom){
-        this.window.start=Math.max(0,total-CONFIG.MSG_WINDOW_TAIL-CONFIG.MSG_WINDOW_BUFFER);
-      }
+
+    this.window.enabled=true;
+
+    const overscan=this.overscanPx;
+    const totalHeight=this.totalHeight;
+    const safeViewport=Math.max(0,viewportHeight||0);
+
+    let startOffset;
+    if(forceToEnd){
+      startOffset=Math.max(0,totalHeight-safeViewport-overscan);
     }else{
-      this.window.total=total;
-      this.window.end=total-1;
+      startOffset=Math.max(0,scrollTop-overscan);
     }
+    if(!Number.isFinite(startOffset))startOffset=0;
+    startOffset=Math.min(startOffset,totalHeight);
+
+    let start=this.findIndexAtOffset(startOffset);
+    if(this.pendingStart!=null){
+      start=Math.min(start,this.pendingStart);
+      this.pendingStart=null;
+    }
+    start=Math.max(0,Math.min(start,total-1));
+
+    let endOffset;
+    if(forceToEnd){
+      endOffset=totalHeight;
+    }else{
+      endOffset=Math.min(totalHeight,scrollTop+safeViewport+overscan);
+    }
+    if(!Number.isFinite(endOffset))endOffset=totalHeight;
+    let end=this.findIndexAtOffset(endOffset);
+    if(end<start)end=start;
+
+    this.window.start=start;
+    this.window.end=end;
+    this.window.padTop=this.prefix[start];
+    this.window.visibleHeight=this.prefix[end+1]-this.prefix[start];
+    this.window.padBottom=totalHeight-this.window.padTop-this.window.visibleHeight;
+
+    return this.window;
+  }
+
+  refreshWindowMetrics(history){
+    const prevPadTop=this.window.padTop||0;
+    const total=history.length;
+    if(total===0){
+      const padDelta=-prevPadTop;
+      this.reset();
+      return{padDelta,totalHeight:0};
+    }
+
+    this.ensurePrefix(history);
+    const start=this.window.start||0;
+    const end=Math.max(start,this.window.end||start);
+    const padTop=this.prefix[start];
+    const visible=this.prefix[end+1]-this.prefix[start];
+    const padBottom=this.totalHeight-padTop-visible;
+    this.window.padTop=padTop;
+    this.window.visibleHeight=visible;
+    this.window.padBottom=padBottom;
+    this.window.total=total;
+    return{padDelta:padTop-prevPadTop,totalHeight:this.totalHeight};
+  }
+
+  loadEarlier(){
+    if(!this.window.enabled)return false;
+    const currentStart=this.window.start||0;
+    if(currentStart<=0)return false;
+    const chunk=Math.max(1,CONFIG.MSG_LOAD_CHUNK||20);
+    const target=Math.max(0,currentStart-chunk);
+    this.pendingStart=this.pendingStart==null?target:Math.min(this.pendingStart,target);
+    return true;
   }
 }
 
@@ -1877,7 +1990,10 @@ class UIManager{
 
     // ✅ 核心改进1：维护idx到element的映射
     this.messageElements=new Map();
-    
+    this.messageHeightCache=new Map();
+    this.windowManager.attachHeightCache(this.messageHeightCache);
+    this.vlist={viewport:null,inner:null,topSentinel:null,loadTip:null};
+
     // ✅ 核心改进2：缓存typing的body元素
     this.typingBodyCache=null;
     
@@ -1941,6 +2057,77 @@ class UIManager{
       if(!el)continue;
       const pill=el.querySelector('header .pill');
       if(pill)pill.textContent = '#'+(i+1);
+    }
+  }
+
+  ensureVirtualContainer(){
+    const box=Utils.$('#messages');
+    if(!box)return null;
+    let viewport=this.vlist.viewport;
+    let inner=this.vlist.inner;
+    if(!viewport||viewport.parentNode!==box){
+      box.innerHTML='';
+      viewport=document.createElement('div');
+      viewport.className='vlist-viewport';
+      inner=document.createElement('div');
+      inner.className='vlist-inner';
+      viewport.appendChild(inner);
+      box.appendChild(viewport);
+      this.vlist.viewport=viewport;
+      this.vlist.inner=inner;
+      this.vlist.topSentinel=null;
+      this.vlist.loadTip=null;
+    }else if(!inner||inner.parentNode!==viewport){
+      viewport.innerHTML='';
+      inner=document.createElement('div');
+      inner.className='vlist-inner';
+      viewport.appendChild(inner);
+      this.vlist.inner=inner;
+    }
+    return{box,viewport:this.vlist.viewport,inner:this.vlist.inner};
+  }
+
+  ensureTopSentinel(){
+    const refs=this.ensureVirtualContainer();
+    if(!refs)return null;
+    const{inner}=refs;
+    let sentinel=this.vlist.topSentinel;
+    if(!sentinel||!sentinel.isConnected){
+      sentinel=document.createElement('div');
+      sentinel.className='top-sentinel sentinel';
+      this.vlist.topSentinel=sentinel;
+    }
+    if(sentinel.parentNode!==inner){
+      inner.insertBefore(sentinel,inner.firstChild);
+    }
+    return sentinel;
+  }
+
+  getMessageAnchor(){
+    const refs=this.ensureVirtualContainer();
+    if(!refs)return{inner:null,anchor:null};
+    const{inner}=refs;
+    const sentinel=this.ensureTopSentinel();
+    let anchor=sentinel;
+    if(this.vlist.loadTip&&this.vlist.loadTip.parentNode===inner){
+      anchor=this.vlist.loadTip;
+    }
+    return{inner,anchor};
+  }
+
+  applyVirtualMetrics(box){
+    const refs=this.ensureVirtualContainer();
+    if(!refs)return;
+    const{viewport,inner}=refs;
+    const win=this.windowManager.window||{};
+    const padTop=Math.max(0,win.padTop||0);
+    const totalHeight=Math.max(1,this.windowManager.totalHeight||0,box?box.clientHeight||0:0);
+    viewport.style.height=totalHeight+'px';
+    inner.style.transform=`translateY(${padTop}px)`;
+    if(win.visibleHeight){
+      inner.style.minHeight=Math.max(1,win.visibleHeight)+'px';
+    }else{
+      inner.style.removeProperty('min-height');
     }
   }
 
@@ -2042,12 +2229,27 @@ class UIManager{
   clearMessages(){
     // ✅ 清理前自动保存正在编辑的消息
     this.autoSaveEditingMessage();
-    
+
     for(let[msgId,el]of this.messageElements){
       el.remove();
       this.domPool.release('article',el);
     }
     this.messageElements.clear();
+    this.messageHeightCache.clear();
+    this.windowManager.reset();
+
+    const refs=this.ensureVirtualContainer();
+    if(refs){
+      const{box,inner}=refs;
+      if(inner){
+        inner.querySelectorAll('.msg').forEach(node=>node.remove());
+      }
+      if(this.vlist.loadTip&&this.vlist.loadTip.parentNode){
+        this.vlist.loadTip.remove();
+      }
+      this.vlist.loadTip=null;
+      if(box)this.applyVirtualMetrics(box);
+    }
   }
   
   renderPresetSelector(){
@@ -2096,16 +2298,23 @@ class UIManager{
   // ✅ 核心改进：使用Map而不是querySelectorAll
   renderMessages(scrollToBottom=false){
     const session=this.state.getActiveSession();
-    const box=Utils.$('#messages');
+    const refs=this.ensureVirtualContainer();
+    const box=refs?.box;
     if(!session||!box)return;
-    
-    const history=session.history||[];
-    const total=history.length;
-    this.windowManager.evaluate(total);
-    
-    const win=this.windowManager.window;
 
-    // 预先建立当前窗口内消息id到索引的映射，避免在遍历节点时重复扫描history
+    const history=session.history||[];
+    const prevPadTop=this.windowManager.window?this.windowManager.window.padTop||0:0;
+    const prevScrollTop=box.scrollTop;
+
+    const viewportHeight=box.clientHeight;
+    const scrollTop=box.scrollTop;
+
+    const win=this.windowManager.evaluate(history,{
+      scrollTop,
+      viewportHeight,
+      forceToEnd:scrollToBottom
+    });
+
     const idToIndex=new Map();
     if(win&&Number.isInteger(win.start)&&Number.isInteger(win.end)){
       for(let i=win.start;i<=win.end;i++){
@@ -2114,59 +2323,94 @@ class UIManager{
       }
     }
 
-    // ✅ 移除窗口外的元素 - 使用msgId遍历
     const toRemove=[];
-    for(let[msgId,el]of this.messageElements){
-      // Find the index of this message in current history
+    for(const[msgId,el]of this.messageElements){
       const msgIdx=idToIndex.has(msgId)?idToIndex.get(msgId):-1;
       if(msgIdx===-1||msgIdx<win.start||msgIdx>win.end){
-        toRemove.push({msgId,el});
+        toRemove.push([msgId,el]);
       }
     }
-    
-    const prevScrollHeight=box.scrollHeight;
-    const prevScrollTop=box.scrollTop;
-    
-    // ✅ 检查要移除的消息中是否有正在编辑的
+
     if(this.editingState){
-      const isEditingBeingRemoved=toRemove.some(({msgId})=>msgId===this.editingState.msgId);
-      if(isEditingBeingRemoved){
+      const editingRemoved=toRemove.some(([msgId])=>msgId===this.editingState.msgId);
+      if(editingRemoved){
         this.autoSaveEditingMessage();
       }
     }
-    
-    toRemove.forEach(({msgId,el})=>{
+
+    toRemove.forEach(([msgId,el])=>{
+      if(el&&el.parentNode)el.remove();
       this.domPool.release('article',el);
-      el.remove();
       this.messageElements.delete(msgId);
     });
-    
-    const scrollAdjust=prevScrollHeight-box.scrollHeight;
-    if(scrollAdjust>0&&!scrollToBottom){
-      box.scrollTop=Math.max(0,prevScrollTop-scrollAdjust);
-    }
-    
-    // 添加新元素 - 使用msgId检查是否已存在
+
+    const{inner,anchor}=this.getMessageAnchor();
+    if(!inner)return;
+
     const fragment=document.createDocumentFragment();
-    const __addedEls=[];
+    const addedEls=[];
     for(let i=win.start;i<=win.end;i++){
       const msg=history[i];
-      if(msg&&!this.messageElements.has(msg.id)){
-        const el=this.buildMessageElement(msg,i);
+      if(!msg)continue;
+      let el=this.messageElements.get(msg.id);
+      let isNew=false;
+      if(!el){
+        el=this.buildMessageElement(msg,i);
         this.messageElements.set(msg.id,el);
-        fragment.appendChild(el);
-        __addedEls.push(el);
+        isNew=true;
+      }else{
+        const pill=el.querySelector('header .pill');
+        if(pill)pill.textContent='#'+(i+1);
+      }
+      fragment.appendChild(el);
+      if(isNew)addedEls.push(el);
+    }
+
+    const insertBefore=anchor?anchor.nextSibling:inner.firstChild;
+    inner.insertBefore(fragment,insertBefore);
+
+    this.updateLoadTip(win);
+
+    for(let i=win.start;i<=win.end;i++){
+      const msg=history[i];
+      if(!msg)continue;
+      const el=this.messageElements.get(msg.id);
+      if(!el)continue;
+      const height=el.offsetHeight;
+      if(Number.isFinite(height)&&height>0){
+        this.messageHeightCache.set(msg.id,height);
       }
     }
-    
-    if(fragment.childNodes.length){
-      box.appendChild(fragment);
-      __addedEls.forEach(el=>this.animateIn(el));
+
+    this.windowManager.refreshWindowMetrics(history);
+    this.applyVirtualMetrics(box);
+
+    const finalPadTop=this.windowManager.window.padTop||0;
+    if(!scrollToBottom){
+      const padDelta=finalPadTop-prevPadTop;
+      if(Math.abs(padDelta)>0.5){
+        box.scrollTop=prevScrollTop+padDelta;
+      }
     }
-    
-    this.updateLoadTip(box,win);
-    
-    if(scrollToBottom){ if(!this._suppressAutoStick){ requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; }); this.ensureBottom(1, 140); } else { this._pendingStick=true; } }
+
+    addedEls.forEach(el=>this.animateIn(el));
+
+    if(scrollToBottom){
+      if(!this._suppressAutoStick){
+        requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
+        this.ensureBottom(1,140);
+      }else{
+        this._pendingStick=true;
+      }
+    }else if(addedEls.length){
+      if(this.isNearBottom(box)){
+        if(!this._suppressAutoStick){
+          requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
+        }else{
+          this._pendingStick=true;
+        }
+      }
+    }
   }
   
   // ✅ 核心改进：复用子元素而不是重建
@@ -2240,107 +2484,72 @@ class UIManager{
     return el;
   }
   
-  updateLoadTip(box,win){
+  updateLoadTip(win){
+    const refs=this.ensureVirtualContainer();
+    if(!refs)return;
+    const{inner}=refs;
     const needTip=win.enabled&&win.start>0;
-    let tipEl=box.querySelector('.load-older');
-    
+    let tipEl=this.vlist.loadTip;
+
     if(needTip){
-      if(!tipEl){
+      if(!tipEl||!tipEl.isConnected){
         tipEl=document.createElement('div');
         tipEl.className='load-older';
-        box.insertBefore(tipEl,box.firstChild);
+        this.vlist.loadTip=tipEl;
       }
-      
+
       tipEl.innerHTML=`<div class="info">共 ${win.total} 条,已折叠 ${win.start} 条更早消息</div><button class="btn small" id="btnLoadEarlier">加载更早消息</button>`;
-      
+
+      const sentinel=this.ensureTopSentinel();
+      const insertBefore=sentinel?sentinel.nextSibling:inner.firstChild;
+      inner.insertBefore(tipEl,insertBefore);
+
       const btn=tipEl.querySelector('#btnLoadEarlier');
       if(btn)btn.onclick=()=>this.loadEarlierMessages();
     }else if(tipEl){
-      tipEl.remove();
+      if(tipEl.parentNode)tipEl.remove();
+      this.vlist.loadTip=null;
     }
   }
   
   loadEarlierMessages(){
     if(this.isLoadingEarlier)return;
     this.isLoadingEarlier=true;
-    
+
     const session=this.state.getActiveSession();
-    const box=Utils.$('#messages');
+    const refs=this.ensureVirtualContainer();
+    const box=refs?.box;
     if(!session||!box){
       this.isLoadingEarlier=false;
       return;
     }
-    
-    const info=this.windowManager.loadEarlier();
-    if(!info){
+
+    if(!this.windowManager.loadEarlier()){
       this.isLoadingEarlier=false;
       return;
     }
-    
-    const{newStart,oldStart}=info;
-    const history=session.history;
-    
-    const prevHeight=box.scrollHeight;
-    const prevTop=box.scrollTop;
-    
-    const fragment=document.createDocumentFragment();
-    for(let i=newStart;i<oldStart;i++){
-      const msg=history[i];
-      if(msg&&!this.messageElements.has(msg.id)){
-        const el=this.buildMessageElement(msg,i);
-        this.messageElements.set(msg.id,el);
-        fragment.appendChild(el);
-      }
-    }
-    
-    const tip=box.querySelector('.load-older');
-    const anchor=tip?tip.nextElementSibling:box.firstChild;
-    box.insertBefore(fragment,anchor);
-    
-    if(tip){
-      tip.querySelector('.info').textContent=`共 ${history.length} 条,已折叠 ${newStart} 条更早消息`;
-    }
-    
-    const delta=box.scrollHeight-prevHeight;
-    box.scrollTop=prevTop+delta;
-    
+
+    this.renderMessages(false);
     this.isLoadingEarlier=false;
   }
   
   setupTopObserver(){
-    const box=Utils.$('#messages');
-    if(!box||!('IntersectionObserver'in window))return;
-    
-    let sentinel=box.querySelector('.top-sentinel');
-    if(!sentinel){
-      sentinel=document.createElement('div');
-      sentinel.className='top-sentinel sentinel';
-    }
-    
+    if(!('IntersectionObserver'in window))return;
+    const refs=this.ensureVirtualContainer();
+    const box=refs?.box;
+    const sentinel=this.ensureTopSentinel();
+    if(!box||!sentinel)return;
+
     this.observerMgr.cleanup('message-top');
-    const observer=this.observerMgr.create('message-top',box,(entry)=>{
+    this.observerMgr.create('message-top',box,(entry)=>{
       if(!entry.isIntersecting)return;
-      
+
       const win=this.windowManager.window;
       if(!win.enabled||win.start<=0||this.isLoadingEarlier)return;
-      
+
       this.loadEarlierMessages();
-      
-      const tip=box.querySelector('.load-older');
-      const anchor=tip?tip.nextElementSibling:box.firstChild;
-      if(sentinel.nextSibling!==anchor&&anchor){
-        box.insertBefore(sentinel,anchor);
-      }
     },{threshold:0,rootMargin:'50px'});
-    
-    const tip=box.querySelector('.load-older');
-    const anchor=tip?tip.nextElementSibling:box.firstChild;
-    if(anchor){
-      box.insertBefore(sentinel,anchor);
-    }else{
-      box.insertBefore(sentinel,box.firstChild);
-    }
-    
+
     this.observerMgr.observe('message-top',sentinel);
   }
   
@@ -2368,48 +2577,17 @@ class UIManager{
   
   flushUpdates(){
     if(this.pendingUpdates.size===0)return;
-    
+
     const session=this.state.getActiveSession();
-    if(!session)return;
-    
-    const history=session.history;
-    const total=history.length;
+    if(!session){
+      this.pendingUpdates.clear();
+      return;
+    }
+
     const box=Utils.$('#messages');
-    if(!box)return;
-    
-    const isNearBottom=this.isNearBottom(box);
-    this.windowManager.appendNew(total,isNearBottom);
-    
-    const win=this.windowManager.window;
-    const fragment=document.createDocumentFragment();
-    const __addedEls=[];
-    
-    for(let msgId of this.pendingUpdates){
-      const msg=history.find(m=>m.id===msgId);
-      if(!msg)continue;
-      
-      const idx=history.indexOf(msg);
-      if(idx>=win.start&&idx<=win.end&&!this.messageElements.has(msgId)){
-        const el=this.buildMessageElement(msg,idx);
-        this.messageElements.set(msgId,el);
-        fragment.appendChild(el);
-        __addedEls.push(el);
-      }
-    }
-    
-    if(fragment.childNodes.length){
-      box.appendChild(fragment);
-      __addedEls.forEach(el=>this.animateIn(el));
-      
-      if(isNearBottom && !this._suppressAutoStick){
-        requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
-      }else if(isNearBottom){
-        this._pendingStick=true;
-      }
-    }
-    
-    this.updateLoadTip(box,win);
+    const isNearBottom=box?this.isNearBottom(box):false;
     this.pendingUpdates.clear();
+    this.renderMessages(isNearBottom);
   }
   
   renderSidebar(){
@@ -3620,10 +3798,10 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
               this.messageElements.delete(msgId);
               this.renumberMessagesFrom(Math.max(0,msgIdx));
               const box=Utils.$('#messages');
-              if(box){ this.updateLoadTip(box,this.windowManager.window); }
+              if(box){ this.updateLoadTip(this.windowManager.window); }
             });
           }
-          this.windowManager.evaluate(session.history.length);
+          this.renderMessages(false);
           this.state.markSessionsDirty(this.state.get('currentId'));
         });
 
@@ -3674,7 +3852,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           }
         });
         
-        this.windowManager.evaluate(session.history.length);
+        this.renderMessages(false);
         this.state.markSessionsDirty(this.state.get('currentId'));
         this.sendMessage();
         
