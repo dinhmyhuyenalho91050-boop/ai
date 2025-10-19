@@ -548,6 +548,11 @@ class AdaptiveStreamBatcher{
   }
   
   scheduleUpdate(){
+    const cfg=(typeof window!=='undefined'&&window.__STREAM_CFG)||{};
+    const minGap=Math.max(10,cfg.minGapMs||20);
+    if(this.currentInterval<minGap){
+      this.currentInterval=minGap;
+    }
     const isBackground=typeof document!=='undefined'&&(document.hidden||window.__APP_VISIBILITY__==='background');
     if(isBackground&&this.rafId){
       cancelAnimationFrame(this.rafId);
@@ -560,7 +565,7 @@ class AdaptiveStreamBatcher{
     this.adjustInterval();
 
     if(isBackground){
-      const delay=Math.max(this.currentInterval,120);
+      const delay=Math.max(this.currentInterval,cfg.backgroundFlushMs||200);
       if(this.timeoutId)clearTimeout(this.timeoutId);
       this.timeoutId=setTimeout(()=>{
         this.timeoutId=null;
@@ -4320,9 +4325,41 @@ if(document.readyState==='loading'){
 <script>
 (function(){
   'use strict';
+  const ensureCfg=()=>{
+    if(typeof window==='undefined')return {};
+    if(!window.__STREAM_CFG){
+      window.__STREAM_CFG={minGapMs:16,nearBottomPx:120,scrollDeltaMin:8};
+    }
+    return window.__STREAM_CFG;
+  };
+  const applyMode=(state)=>{
+    const normalized=state==='background'?'background':'foreground';
+    const cfg=ensureCfg();
+    if(normalized==='background'){
+      cfg.minGapMs=Math.max(24,cfg.minGapMs||24);
+      cfg.backgroundFlushMs=Math.max(220,cfg.backgroundFlushMs||260);
+    }else{
+      cfg.minGapMs=16;
+      cfg.backgroundFlushMs=120;
+    }
+    window.__POWER_MODE__=normalized;
+  };
+  window.__applyNativePowerProfile=(state)=>{
+    applyMode(state);
+  };
+  applyMode(window.__APP_VISIBILITY__||(document.hidden?'background':'foreground'));
+})();
+</script>
+
+<script>
+(function(){
+  'use strict';
   const applyState=(state)=>{
     const normalized=state==='background'?'background':'foreground';
     window.__APP_VISIBILITY__=normalized;
+    if(typeof window.__applyNativePowerProfile==='function'){
+      try{ window.__applyNativePowerProfile(normalized); }catch(e){}
+    }
     const ui=window.chatApp?.ui;
     if(ui&&typeof ui.onNativeVisibilityChange==='function'){
       try{ ui.onNativeVisibilityChange(normalized); }catch(e){}
