@@ -2,22 +2,62 @@ package com.example.htmlapp
 
 import android.annotation.SuppressLint
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.ValueCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingExportBytes: ByteArray? = null
+
+    private val openDocumentLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            val callback = filePathCallback
+            if (callback != null) {
+                if (uri != null) {
+                    callback.onReceiveValue(arrayOf(uri))
+                } else {
+                    callback.onReceiveValue(null)
+                }
+            }
+            filePathCallback = null
+        }
+
+    private val createDocumentLauncher =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+            val bytes = pendingExportBytes
+            if (uri != null && bytes != null) {
+                try {
+                    contentResolver.openOutputStream(uri)?.use { output ->
+                        output.write(bytes)
+                    }
+                    dispatchExportResult(true, "导出成功")
+                } catch (e: Exception) {
+                    dispatchExportResult(false, e.localizedMessage ?: "未知错误")
+                }
+            } else if (bytes != null) {
+                dispatchExportResult(false, "已取消保存")
+            }
+
+            pendingExportBytes = null
+        }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -69,6 +109,32 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                view: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                this@MainActivity.filePathCallback = filePathCallback
+
+                val accepted = fileChooserParams?.acceptTypes
+                    ?.filter { it.isNotBlank() }
+                    ?.toTypedArray()
+
+                val types = if (accepted.isNullOrEmpty()) {
+                    arrayOf("application/json", "text/*", "application/octet-stream", "*/*")
+                } else {
+                    accepted
+                }
+
+                openDocumentLauncher.launch(types)
+                return true
+            }
+        }
+
+        webView.addJavascriptInterface(AndroidBridge(), "AndroidBridge")
     }
 
     private fun setupWindowInsets(root: View) {
@@ -125,5 +191,40 @@ class MainActivity : AppCompatActivity() {
             }
         }
         super.onDestroy()
+    }
+
+    private fun dispatchExportResult(success: Boolean, message: String) {
+        if (!this::webView.isInitialized) return
+        val script = """
+            (function(){
+              if(window.__androidExportResult){
+                window.__androidExportResult($success, ${JSONObject.quote(message)});
+              }else if(window.AndroidBridge && typeof window.AndroidBridge.onExportResult === 'function'){
+                window.AndroidBridge.onExportResult($success, ${JSONObject.quote(message)});
+              }
+            })();
+        """.trimIndent()
+        webView.post { webView.evaluateJavascript(script, null) }
+    }
+
+    private inner class AndroidBridge {
+        @JavascriptInterface
+        fun exportFile(filename: String?, content: String?) {
+            if (content.isNullOrEmpty()) {
+                dispatchExportResult(false, "数据为空")
+                return
+            }
+
+            val safeName = if (filename.isNullOrBlank()) {
+                "chat-backup.json"
+            } else {
+                filename
+            }
+
+            pendingExportBytes = content.toByteArray(Charsets.UTF_8)
+            runOnUiThread {
+                createDocumentLauncher.launch(safeName)
+            }
+        }
     }
 }
