@@ -1,14 +1,16 @@
 package com.example.htmlapp
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
-import android.content.ContentValues
 import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -18,15 +20,16 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
+import android.util.Log
+import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
-import android.view.View
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.WebChromeClient
-import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.addCallback
 import androidx.activity.result.ActivityResultLauncher
@@ -67,8 +70,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var downloadBridge: DownloadBridge
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
+    private var notificationPermissionLauncher: ActivityResultLauncher<String>? = null
     private var isAppInForeground = true
     private var isStreaming = false
+    private var isConnectionServiceEnabled = false
     private var areTimersPaused = false
     private var areImagesBlocked = false
     private var lastVisibilityState: String? = null
@@ -82,6 +87,12 @@ class MainActivity : AppCompatActivity() {
     private var connectionCallbackName: String? = null
     private val pendingConnectionEvents = ArrayDeque<String>()
     private var isConnectionBinding = false
+    private var isNotificationPermissionRequestInFlight = false
+    private var hasShownNotificationPermissionWarning = false
+    private var hasShownConnectionStartError = false
+    private var lastKnownConnectionVisibility: Boolean? = null
+    private var connectionServiceRequested = false
+    private var isConnectionServiceRunning = false
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
             handleAppVisibility(true)
@@ -98,6 +109,7 @@ class MainActivity : AppCompatActivity() {
             connectionService = connection
             connectionServiceBound = true
             isConnectionBinding = false
+            isConnectionServiceRunning = true
             connection.setClientVisibility(isAppInForeground)
             connectionJob?.cancel()
             connectionJob = lifecycleScope.launch {
@@ -116,6 +128,7 @@ class MainActivity : AppCompatActivity() {
             connectionServiceBound = false
             isConnectionBinding = false
             connectionService = null
+            isConnectionServiceRunning = false
         }
     }
     private val connectionEventReceiver = object : BroadcastReceiver() {
@@ -136,6 +149,24 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher = registerForActivityResult(
+                ActivityResultContracts.RequestPermission()
+            ) { granted ->
+                isNotificationPermissionRequestInFlight = false
+                if (granted) {
+                    enableConnectionService()
+                } else {
+                    isConnectionServiceEnabled = false
+                    lastKnownConnectionVisibility = null
+                    connectionServiceRequested = false
+                    isConnectionServiceRunning = false
+                    refreshConnectionServiceState()
+                    showConnectionPermissionWarning(false)
+                }
+            }
+        }
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
@@ -172,7 +203,7 @@ class MainActivity : AppCompatActivity() {
         setupBackNavigation()
         LocalBroadcastManager.getInstance(this)
             .registerReceiver(connectionEventReceiver, IntentFilter(ConnectionService.ACTION_EVENT))
-        ConnectionService.startAndConnect(applicationContext)
+        maybeStartConnectionService()
         handleAppVisibility(true)
         notifyWebVisibility("foreground")
         ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver)
@@ -366,7 +397,13 @@ class MainActivity : AppCompatActivity() {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(connectionEventReceiver)
         } catch (_: IllegalArgumentException) {
         }
+        connectionServiceRequested = false
         connectionService?.setClientVisibility(false)
+        lastKnownConnectionVisibility = null
+        if (isConnectionServiceRunning) {
+            stopService(Intent(this, ConnectionService::class.java))
+        }
+        isConnectionServiceRunning = false
         unbindConnectionService()
         ProcessLifecycleOwner.get().lifecycle.removeObserver(appVisibilityObserver)
         super.onDestroy()
@@ -402,7 +439,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleConnectionEvent(event: ConnectionService.ConnectionEvent) {
         deliverConnectionEvent(event.type, event.payload)
-        if (event is ConnectionService.ConnectionEvent.Error && isAppInForeground) {
+        if (
+            event is ConnectionService.ConnectionEvent.Error &&
+            isAppInForeground &&
+            connectionServiceRequested
+        ) {
             Toast.makeText(
                 this,
                 getString(R.string.service_retrying) + " (" + (event.payload ?: "") + ")",
@@ -430,11 +471,11 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) {
             return false
         }
-        if (!isAppInForeground) {
-            return false
-        }
         val handler = connectionCallbackName
         if (handler.isNullOrBlank()) {
+            return false
+        }
+        if (!shouldKeepWebViewActive()) {
             return false
         }
         webView.post {
@@ -462,11 +503,20 @@ class MainActivity : AppCompatActivity() {
 
     fun sendMessageThroughConnection(payload: String) {
         val message = payload.ifBlank { return }
+        requestConnectionService(force = true)
+        if (!isConnectionServiceEnabled) {
+            if (!isNotificationPermissionRequestInFlight) {
+                showConnectionPermissionWarning(true)
+            }
+            return
+        }
         val service = connectionService
         if (service != null && connectionServiceBound) {
             service.sendMessage(message)
         } else {
-            ConnectionService.enqueueSend(applicationContext, message)
+            if (!ConnectionService.enqueueSend(applicationContext, message)) {
+                handleConnectionServiceStartFailure()
+            }
         }
     }
 
@@ -501,16 +551,10 @@ class MainActivity : AppCompatActivity() {
     private fun handleAppVisibility(isForeground: Boolean) {
         val changed = isAppInForeground != isForeground
         isAppInForeground = isForeground
-        if (isForeground) {
-            ConnectionService.updateClientVisibility(applicationContext, true)
-            bindConnectionService()
-            connectionService?.setClientVisibility(true)
-            flushPendingConnectionEvents()
-        } else {
-            ConnectionService.updateClientVisibility(applicationContext, false)
-            connectionService?.setClientVisibility(false)
-            unbindConnectionService()
+        if (isForeground && connectionServiceRequested && !isConnectionServiceEnabled) {
+            maybeStartConnectionService()
         }
+        refreshConnectionServiceState()
         updateWebViewActivityState()
         if (changed) {
             notifyWebVisibility(if (isForeground) "foreground" else "background")
@@ -521,12 +565,17 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) return
         if (isStreaming == active) return
         isStreaming = active
+        refreshConnectionServiceState()
+        if (shouldKeepWebViewActive()) {
+            flushPendingConnectionEvents()
+        }
         updateWebViewActivityState()
     }
 
     private fun updateWebViewActivityState() {
         if (!this::webView.isInitialized) return
-        if (isAppInForeground) {
+        val shouldKeepActive = shouldKeepWebViewActive()
+        if (shouldKeepActive) {
             if (areImagesBlocked) {
                 webView.settings.blockNetworkImage = false
                 areImagesBlocked = false
@@ -549,17 +598,167 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val desiredPriority = if (isAppInForeground) {
+            val desiredPriority = if (shouldKeepActive) {
                 WebView.RENDERER_PRIORITY_IMPORTANT
             } else {
                 WebView.RENDERER_PRIORITY_BOUND
             }
-            val desiredWaived = !isAppInForeground
+            val desiredWaived = !shouldKeepActive
             if (desiredPriority != lastRendererPriority || desiredWaived != lastRendererWaived) {
                 webView.setRendererPriorityPolicy(desiredPriority, desiredWaived)
                 lastRendererPriority = desiredPriority
                 lastRendererWaived = desiredWaived
             }
+        }
+    }
+
+    private fun requestConnectionService(force: Boolean = false) {
+        if (!force && connectionCallbackName.isNullOrBlank()) {
+            return
+        }
+        if (!connectionServiceRequested) {
+            connectionServiceRequested = true
+        }
+        maybeStartConnectionService()
+    }
+
+    private fun maybeStartConnectionService() {
+        if (!connectionServiceRequested) {
+            return
+        }
+        if (isConnectionServiceRunning) {
+            return
+        }
+        if (isConnectionServiceEnabled) {
+            if (ConnectionService.startAndConnect(applicationContext)) {
+                isConnectionServiceRunning = true
+                hasShownConnectionStartError = false
+            } else {
+                handleConnectionServiceStartFailure()
+            }
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            when (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)) {
+                PackageManager.PERMISSION_GRANTED -> enableConnectionService()
+                else -> {
+                    if (!isNotificationPermissionRequestInFlight) {
+                        notificationPermissionLauncher?.let {
+                            isNotificationPermissionRequestInFlight = true
+                            it.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    }
+                }
+            }
+        } else {
+            enableConnectionService()
+        }
+    }
+
+    private fun enableConnectionService() {
+        if (isConnectionServiceEnabled) {
+            if (ConnectionService.startAndConnect(applicationContext)) {
+                isConnectionServiceRunning = true
+                hasShownConnectionStartError = false
+            } else {
+                handleConnectionServiceStartFailure()
+            }
+            return
+        }
+        if (ConnectionService.startAndConnect(applicationContext)) {
+            isConnectionServiceEnabled = true
+            isConnectionServiceRunning = true
+            hasShownConnectionStartError = false
+            lastKnownConnectionVisibility = null
+            refreshConnectionServiceState()
+        } else {
+            Log.w("MainActivity", "Unable to start ConnectionService")
+            isConnectionServiceEnabled = false
+            connectionServiceRequested = false
+            isConnectionServiceRunning = false
+            handleConnectionServiceStartFailure()
+        }
+    }
+
+    private fun refreshConnectionServiceState() {
+        if (!connectionServiceRequested || !isConnectionServiceEnabled) {
+            connectionService?.setClientVisibility(false)
+            lastKnownConnectionVisibility = null
+            if (connectionServiceBound || isConnectionBinding) {
+                unbindConnectionService()
+            }
+            if (isConnectionServiceRunning) {
+                stopService(Intent(this, ConnectionService::class.java))
+                isConnectionServiceRunning = false
+            }
+            if (!isConnectionServiceEnabled) {
+                connectionServiceRequested = false
+            }
+            return
+        }
+
+        if (!isConnectionServiceRunning) {
+            if (ConnectionService.startAndConnect(applicationContext)) {
+                isConnectionServiceRunning = true
+                hasShownConnectionStartError = false
+            } else {
+                handleConnectionServiceStartFailure()
+                return
+            }
+        }
+
+        val shouldBind = shouldKeepWebViewActive()
+        val shouldBeVisible = isAppInForeground
+        val lastVisible = lastKnownConnectionVisibility
+        if (lastVisible == null || lastVisible != shouldBeVisible) {
+            if (!ConnectionService.updateClientVisibility(applicationContext, shouldBeVisible)) {
+                handleConnectionServiceStartFailure()
+                return
+            }
+            connectionService?.setClientVisibility(shouldBeVisible)
+            lastKnownConnectionVisibility = shouldBeVisible
+        } else if (connectionServiceBound) {
+            connectionService?.setClientVisibility(shouldBeVisible)
+        }
+
+        if (shouldBind) {
+            bindConnectionService()
+            flushPendingConnectionEvents()
+        } else {
+            connectionService?.setClientVisibility(false)
+            if (connectionServiceBound || isConnectionBinding) {
+                unbindConnectionService()
+            }
+        }
+    }
+
+    private fun shouldKeepWebViewActive(): Boolean {
+        return isAppInForeground || isStreaming
+    }
+
+    private fun handleConnectionServiceStartFailure() {
+        connectionService?.setClientVisibility(false)
+        lastKnownConnectionVisibility = null
+        if (connectionServiceBound || isConnectionBinding) {
+            unbindConnectionService()
+        }
+        isConnectionServiceRunning = false
+        isConnectionServiceEnabled = false
+        connectionServiceRequested = false
+        if (!hasShownConnectionStartError && isAppInForeground && !(isFinishing || isDestroyed)) {
+            Toast.makeText(this, getString(R.string.service_start_failed), Toast.LENGTH_LONG).show()
+            hasShownConnectionStartError = true
+        }
+    }
+
+    private fun showConnectionPermissionWarning(short: Boolean) {
+        if (!short && hasShownNotificationPermissionWarning) {
+            return
+        }
+        val duration = if (short) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+        Toast.makeText(this, getString(R.string.service_permission_required), duration).show()
+        if (!short) {
+            hasShownNotificationPermissionWarning = true
         }
     }
 }

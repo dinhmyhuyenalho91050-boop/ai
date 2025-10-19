@@ -1,5 +1,6 @@
 package com.example.htmlapp
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -29,6 +31,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
+import android.util.Log
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -64,7 +67,16 @@ class ConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannels()
-        startForeground(NOTIFICATION_ID, buildStatusNotification(getString(R.string.service_initializing)))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !canPostNotifications()) {
+            dispatchEvent(ConnectionEvent.Error("notifications_denied"))
+            stopSelf()
+            return
+        }
+
+        if (!startForegroundSafely(getString(R.string.service_initializing))) {
+            stopSelf()
+            return
+        }
         ensureConnection()
     }
 
@@ -291,11 +303,13 @@ class ConnectionService : Service() {
     }
 
     private fun updateForegroundNotification(contentText: String) {
+        if (!canPostNotifications()) return
         val notification = buildStatusNotification(contentText)
         NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification)
     }
 
     private fun showMessageNotification(payload: String) {
+        if (!canPostNotifications()) return
         val preview = if (payload.length > 120) payload.take(117) + "…" else payload
         val intent = Intent(this, MainActivity::class.java)
         val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -313,6 +327,25 @@ class ConnectionService : Service() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         NotificationManagerCompat.from(this).notify(MESSAGE_NOTIFICATION_ID, notification)
+    }
+
+    private fun startForegroundSafely(contentText: String): Boolean {
+        return try {
+            startForeground(NOTIFICATION_ID, buildStatusNotification(contentText))
+            true
+        } catch (e: SecurityException) {
+            false
+        } catch (e: IllegalStateException) {
+            false
+        }
+    }
+
+    private fun canPostNotifications(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            NotificationManagerCompat.from(this).areNotificationsEnabled()
+        }
     }
 
     inner class ConnectionBinder : android.os.Binder() {
@@ -345,6 +378,7 @@ class ConnectionService : Service() {
     }
 
     companion object {
+        private const val TAG = "ConnectionService"
         private const val STATUS_CHANNEL_ID = "connection_service_status"
         private const val MESSAGE_CHANNEL_ID = "connection_service_messages"
         private const val NOTIFICATION_ID = 1001
@@ -361,28 +395,76 @@ class ConnectionService : Service() {
         private const val EXTRA_VISIBLE = "extra_visible"
         const val DEFAULT_ENDPOINT = "wss://example.com/stream"
 
-        fun startAndConnect(context: Context, endpoint: String? = null) {
+        fun startAndConnect(context: Context, endpoint: String? = null): Boolean {
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_CONNECT
                 endpoint?.let { putExtra(EXTRA_ENDPOINT, it) }
             }
-            ContextCompat.startForegroundService(context, intent)
+            return startForegroundServiceCompat(context, intent)
         }
 
-        fun enqueueSend(context: Context, payload: String) {
+        fun enqueueSend(context: Context, payload: String): Boolean {
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_SEND
                 putExtra(EXTRA_PAYLOAD, payload)
             }
-            ContextCompat.startForegroundService(context, intent)
+            return startForegroundServiceCompat(context, intent)
         }
 
-        fun updateClientVisibility(context: Context, visible: Boolean) {
+        fun updateClientVisibility(context: Context, visible: Boolean): Boolean {
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_VISIBILITY
                 putExtra(EXTRA_VISIBLE, visible)
             }
-            ContextCompat.startForegroundService(context, intent)
+            return startForegroundServiceCompat(context, intent)
+        }
+
+        private fun startForegroundServiceCompat(context: Context, intent: Intent): Boolean {
+            if (!hasRequiredForegroundPermissions(context)) {
+                Log.w(TAG, "Missing foreground service permission, cannot start ConnectionService")
+                return false
+            }
+            return try {
+                ContextCompat.startForegroundService(context, intent)
+                true
+            } catch (throwable: Throwable) {
+                if (throwable is SecurityException || throwable is IllegalStateException ||
+                    isForegroundServiceStartNotAllowed(throwable)
+                ) {
+                    Log.w(TAG, "Unable to start foreground service", throwable)
+                    false
+                } else {
+                    throw throwable
+                }
+            }
+        }
+
+        private fun isForegroundServiceStartNotAllowed(throwable: Throwable): Boolean {
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                throwable::class.java.name ==
+                "android.app.ForegroundServiceStartNotAllowedException"
+        }
+
+        private fun hasRequiredForegroundPermissions(context: Context): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val fgPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.FOREGROUND_SERVICE
+                )
+                if (fgPermission != PackageManager.PERMISSION_GRANTED) {
+                    return false
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val notificationsPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                )
+                if (notificationsPermission != PackageManager.PERMISSION_GRANTED) {
+                    return false
+                }
+            }
+            return true
         }
     }
 }
