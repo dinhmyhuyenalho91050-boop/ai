@@ -12,14 +12,15 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
+import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
-import android.view.View
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.WebChromeClient
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.addCallback
@@ -31,6 +32,8 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Lifecycle
@@ -38,10 +41,11 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
-import android.util.Base64
-import java.util.concurrent.Executors
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -108,7 +112,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureWebView() {
         webView.setBackgroundColor(Color.TRANSPARENT)
-        with(webView.settings) {
+        val settings = webView.settings
+        with(settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
             databaseEnabled = true
@@ -119,11 +124,27 @@ class MainActivity : AppCompatActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             useWideViewPort = true
             loadWithOverviewMode = true
+            setSupportZoom(false)
+            setBuiltInZoomControls(false)
+            setDisplayZoomControls(false)
+            offscreenPreRaster = false
         }
 
         webView.isVerticalScrollBarEnabled = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+            WebView.setSafeBrowsingEnabled(false)
+        }
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            WebSettingsCompat.setForceDark(settings, WebSettingsCompat.FORCE_DARK_ON)
+        }
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+            try {
+                WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, true)
+            } catch (_: Throwable) {
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
         }
         downloadBridge = DownloadBridge(this)
         webView.addJavascriptInterface(downloadBridge, "HtmlAppNative")
@@ -259,8 +280,17 @@ class MainActivity : AppCompatActivity() {
 private class DownloadBridge(activity: MainActivity) {
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "DownloadBridgeIo").apply { isDaemon = true }
+    private val ioExecutor: ExecutorService = ThreadPoolExecutor(
+        0,
+        Runtime.getRuntime().availableProcessors(),
+        30L,
+        TimeUnit.SECONDS,
+        SynchronousQueue()
+    ) { runnable ->
+        Thread(runnable, "bg-io").apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+        }
     }
 
     fun dispose() {
