@@ -526,7 +526,7 @@ class DOMDiffer{
 
 // ===== AdaptiveStreamBatcher =====
 class AdaptiveStreamBatcher{
-  constructor(updateFn){
+  constructor(updateFn,opts={}){
     this.updateFn=updateFn;
     this.buffer='';
     this.thinkingBuffer='';
@@ -538,6 +538,36 @@ class AdaptiveStreamBatcher{
     this.currentInterval=30;
     this.avgRenderTime=0;
     this.renderSamples=[];
+    this.visibilitySource=opts.visibilitySource||(typeof window!=='undefined'?window.PerfVisibility:null);
+    this.backgroundInterval=Math.max(180,opts.backgroundInterval||360);
+    this.unsubscribeVisibility=null;
+
+    if(this.visibilitySource&&typeof this.visibilitySource.subscribe==='function'){
+      this.unsubscribeVisibility=this.visibilitySource.subscribe(state=>{
+        if(state==='background'){
+          if(this.rafId){
+            cancelAnimationFrame(this.rafId);
+            this.rafId=null;
+            this.lastUpdate=performance.now();
+          }
+          if(this.timeoutId){
+            clearTimeout(this.timeoutId);
+            this.timeoutId=setTimeout(()=>{
+              this.timeoutId=null;
+              this.flush();
+            },this.backgroundInterval);
+          }
+        }else{
+          if(this.timeoutId){
+            clearTimeout(this.timeoutId);
+            this.timeoutId=null;
+          }
+          if((this.buffer&&this.buffer.length)||(this.thinkingBuffer&&this.thinkingBuffer.length)){
+            this.flush();
+          }
+        }
+      });
+    }
   }
   
   push(text,thinking){
@@ -548,7 +578,9 @@ class AdaptiveStreamBatcher{
   }
   
   scheduleUpdate(){
-    const isBackground=typeof document!=='undefined'&&(document.hidden||window.__APP_VISIBILITY__==='background');
+    const isBackground=this.visibilitySource&&typeof this.visibilitySource.isBackground==='function'
+      ? this.visibilitySource.isBackground()
+      : (typeof document!=='undefined'&&(document.hidden||window.__APP_VISIBILITY__==='background'));
     if(isBackground&&this.rafId){
       cancelAnimationFrame(this.rafId);
       this.rafId=null;
@@ -560,7 +592,7 @@ class AdaptiveStreamBatcher{
     this.adjustInterval();
 
     if(isBackground){
-      const delay=Math.max(this.currentInterval,120);
+      const delay=Math.max(this.currentInterval,this.backgroundInterval);
       if(this.timeoutId)clearTimeout(this.timeoutId);
       this.timeoutId=setTimeout(()=>{
         this.timeoutId=null;
@@ -623,6 +655,10 @@ class AdaptiveStreamBatcher{
     if(this.timeoutId){
       clearTimeout(this.timeoutId);
       this.timeoutId=null;
+    }
+    if(this.unsubscribeVisibility){
+      try{this.unsubscribeVisibility();}catch{}
+      this.unsubscribeVisibility=null;
     }
     this.flush();
   }
@@ -1237,6 +1273,8 @@ class DOMManager{
     this.updateQueue=[];
     this.isFlushScheduled=false;
     this.cleanupTimer=null;
+    this.cleanupIntervalMs=60000;
+    this.cleanupVisibilityUnsub=null;
     this.cachedElements={
       messages:null,
       input:null,
@@ -1318,14 +1356,40 @@ class DOMManager{
   
   startAutoCleanup(){
     this.stopAutoCleanup();
-    this.cleanupTimer=setInterval(()=>this.cleanupDisconnected(),60000);
+    this.cleanupIntervalMs=this._computeCleanupInterval();
+    this.cleanupTimer=setInterval(()=>this.cleanupDisconnected(),this.cleanupIntervalMs);
+    this._bindCleanupVisibility();
   }
-  
+
   stopAutoCleanup(){
     if(this.cleanupTimer){
       clearInterval(this.cleanupTimer);
       this.cleanupTimer=null;
     }
+    if(this.cleanupVisibilityUnsub){
+      try{this.cleanupVisibilityUnsub();}catch{}
+      this.cleanupVisibilityUnsub=null;
+    }
+  }
+
+  _computeCleanupInterval(){
+    const perf=typeof window!=='undefined'?window.PerfVisibility:null;
+    const isBg=perf&&typeof perf.isBackground==='function'?perf.isBackground():false;
+    return isBg?180000:60000;
+  }
+
+  _bindCleanupVisibility(){
+    const perf=typeof window!=='undefined'?window.PerfVisibility:null;
+    if(!perf||typeof perf.subscribe!=='function'||this.cleanupVisibilityUnsub)return;
+    this.cleanupVisibilityUnsub=perf.subscribe(state=>{
+      const target=state==='background'?180000:60000;
+      if(this.cleanupIntervalMs===target)return;
+      this.cleanupIntervalMs=target;
+      if(this.cleanupTimer){
+        clearInterval(this.cleanupTimer);
+        this.cleanupTimer=setInterval(()=>this.cleanupDisconnected(),this.cleanupIntervalMs);
+      }
+    });
   }
   
   clear(){
@@ -2516,7 +2580,7 @@ class UIManager{
     __typingTimer=setTimeout(()=>{ typing=this.addTyping(isStream); __typingStart=performance.now(); }, TYPING_DELAY);
     const batcher=isStream?new AdaptiveStreamBatcher((text,thinking)=>{
       if(typing) this.updateTyping(typing,text,thinking);
-    }):null;
+    },{visibilitySource:typeof window!=='undefined'?window.PerfVisibility:null,backgroundInterval:420}):null;
     
     try{
       const result=await this.api.send(session,(text,thinking)=>{
@@ -4193,6 +4257,8 @@ if(document.readyState==='loading'){
       this.reads=[];
       this.writes=[];
       this.scheduled=false;
+      this.rafId=null;
+      this.timerId=null;
     }
     read(job){
       if(typeof job==='function'){
@@ -4209,17 +4275,53 @@ if(document.readyState==='loading'){
     schedule(){
       if(this.scheduled)return;
       this.scheduled=true;
-      requestAnimationFrame(()=>{
+      const run=()=>{
+        this.rafId=null;
+        this.timerId=null;
         const r=this.reads.splice(0);
         for(let i=0;i<r.length;i++){try{r[i]();}catch{}}
         const w=this.writes.splice(0);
         for(let i=0;i<w.length;i++){try{w[i]();}catch{}}
         this.scheduled=false;
         if(this.reads.length||this.writes.length)this.schedule();
-      });
+      };
+      const perf=typeof window!=='undefined'?window.PerfVisibility:null;
+      if(perf&&typeof perf.isBackground==='function'&&perf.isBackground()){
+        const delay=perf.backgroundFrameMs||240;
+        this.timerId=window.setTimeout(run,delay);
+      }else{
+        this.rafId=requestAnimationFrame(run);
+      }
     }
   }
   if(!window.ScrollScheduler)window.ScrollScheduler=new __Scheduler();
+  if(window.ScrollScheduler&&!window.ScrollScheduler.onVisibilityChange){
+    window.ScrollScheduler.onVisibilityChange=function(state){
+      if(state==='background'&&this.rafId){
+        cancelAnimationFrame(this.rafId);
+        this.rafId=null;
+        this.scheduled=false;
+        if(!this.timerId&&(this.reads.length||this.writes.length)){
+          const perf=typeof window!=='undefined'?window.PerfVisibility:null;
+          const delay=perf&&perf.backgroundFrameMs?perf.backgroundFrameMs:240;
+          this.scheduled=true;
+          this.timerId=window.setTimeout(()=>{
+            this.scheduled=false;
+            this.timerId=null;
+            if(this.reads.length||this.writes.length)this.schedule();
+          },delay);
+        }
+      }
+      if(state==='foreground'&&this.timerId){
+        clearTimeout(this.timerId);
+        this.timerId=null;
+        this.scheduled=false;
+        if(this.reads.length||this.writes.length){
+          this.schedule();
+        }
+      }
+    };
+  }
   
   // ✅ 2. maybeStickToBottom helper
   function __maybeStickToBottom(box,thresholdPx){
@@ -4318,8 +4420,40 @@ if(document.readyState==='loading'){
 </script>
 
 <script>
+
 (function(){
   'use strict';
+  const listeners=new Set();
+  const ensurePerfVisibility=()=>{
+    if(!window.PerfVisibility)window.PerfVisibility={};
+    const perf=window.PerfVisibility;
+    if(typeof perf.backgroundFrameMs!=='number'||perf.backgroundFrameMs<200){
+      perf.backgroundFrameMs=260;
+    }
+    if(typeof perf.isBackground!=='function'){
+      perf.isBackground=()=>window.__APP_VISIBILITY__==='background';
+    }
+    if(typeof perf.getState!=='function'){
+      perf.getState=()=>window.__APP_VISIBILITY__;
+    }
+    if(typeof perf.subscribe!=='function'){
+      perf.subscribe=(fn)=>{
+        if(typeof fn!=='function')return ()=>{};
+        listeners.add(fn);
+        try{fn(window.__APP_VISIBILITY__);}catch(e){}
+        return ()=>{listeners.delete(fn);};
+      };
+    }
+    return perf;
+  };
+  ensurePerfVisibility();
+  const dispatch=(state)=>{
+    listeners.forEach(fn=>{try{fn(state);}catch(e){}});
+    if(window.ScrollScheduler&&typeof window.ScrollScheduler.onVisibilityChange==='function'){
+      window.ScrollScheduler.onVisibilityChange(state);
+    }
+  };
+
   const applyState=(state)=>{
     const normalized=state==='background'?'background':'foreground';
     window.__APP_VISIBILITY__=normalized;
@@ -4327,6 +4461,7 @@ if(document.readyState==='loading'){
     if(ui&&typeof ui.onNativeVisibilityChange==='function'){
       try{ ui.onNativeVisibilityChange(normalized); }catch(e){}
     }
+    dispatch(normalized);
   };
 
   window.__APP_VISIBILITY__=window.__APP_VISIBILITY__||(document.hidden?'background':'foreground');
