@@ -35,10 +35,14 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
 import android.util.Base64
+import java.util.concurrent.Executors
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.RejectedExecutionException
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var downloadBridge: DownloadBridge
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
 
@@ -103,7 +107,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.isVerticalScrollBarEnabled = false
-        webView.addJavascriptInterface(DownloadBridge(this), "HtmlAppNative")
+        downloadBridge = DownloadBridge(this)
+        webView.addJavascriptInterface(downloadBridge, "HtmlAppNative")
         webView.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(
                 webView: WebView?,
@@ -204,6 +209,9 @@ class MainActivity : AppCompatActivity() {
                 destroy()
             }
         }
+        if (this::downloadBridge.isInitialized) {
+            downloadBridge.dispose()
+        }
         super.onDestroy()
     }
 }
@@ -211,23 +219,41 @@ class MainActivity : AppCompatActivity() {
 private class DownloadBridge(activity: MainActivity) {
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "DownloadBridgeIo").apply { isDaemon = true }
+    }
+
+    fun dispose() {
+        ioExecutor.shutdownNow()
+    }
 
     @JavascriptInterface
     fun saveFile(filename: String, base64Data: String): String {
         val safeName = filename.ifBlank { "backup-${UUID.randomUUID()}.json" }
         return try {
-            val data = Base64.decode(base64Data, Base64.DEFAULT)
-            val location = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                saveToMediaStore(safeName, data)
-            } else {
-                saveToLegacyStorage(safeName, data)
+            ioExecutor.execute {
+                val (success, location) = performSave(safeName, base64Data)
+                notify(success, location)
             }
-            val success = !location.isNullOrBlank()
+            SAVE_PENDING
+        } catch (e: RejectedExecutionException) {
+            val (success, location) = performSave(safeName, base64Data)
             notify(success, location)
             location ?: ""
+        }
+    }
+
+    private fun performSave(filename: String, base64Data: String): Pair<Boolean, String?> {
+        return try {
+            val data = Base64.decode(base64Data, Base64.DEFAULT)
+            val location = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                saveToMediaStore(filename, data)
+            } else {
+                saveToLegacyStorage(filename, data)
+            }
+            Pair(!location.isNullOrBlank(), location)
         } catch (e: Exception) {
-            notify(false, null)
-            ""
+            Pair(false, null)
         }
     }
 
@@ -288,5 +314,9 @@ private class DownloadBridge(activity: MainActivity) {
             }
             Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
         }
+    }
+
+    companion object {
+        private const val SAVE_PENDING = "__NATIVE_PENDING__"
     }
 }

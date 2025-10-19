@@ -3100,15 +3100,24 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
 
     let savedNative = false;
     let nativeLocation = '';
+    const pendingToken='__NATIVE_PENDING__';
     if(window.HtmlAppNative && typeof window.HtmlAppNative.saveFile === 'function'){
       try{
         const base64 = btoa(unescape(encodeURIComponent(text)));
         const response = window.HtmlAppNative.saveFile(filename, base64);
-        if(typeof response === 'string' && response.trim()){
-          savedNative = true;
-          nativeLocation = response.trim();
+        if(typeof response === 'string'){
+          const trimmed=response.trim();
+          if(trimmed===pendingToken){
+            savedNative=true;
+            nativeLocation='';
+          }else if(trimmed){
+            savedNative=true;
+            nativeLocation=trimmed;
+          }else{
+            savedNative=false;
+          }
         }else{
-          savedNative = !!response;
+          savedNative=!!response;
         }
       }catch(err){
         savedNative = false;
@@ -3117,8 +3126,12 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
 
     if(savedNative){
-      try { ErrorHandler.show('已保存到: ' + (nativeLocation || '内部存储/Download/AIChat'), 3600); } catch(_) {}
-      return {native:true,path:nativeLocation};
+      if(nativeLocation){
+        try { ErrorHandler.show('已保存到: ' + nativeLocation, 3600); } catch(_) {}
+      }else{
+        try { ErrorHandler.show('备份正在后台保存，完成后会提示保存位置。', 3600); } catch(_) {}
+      }
+      return {native:true,path:nativeLocation||''};
     }
 
     const saveWithAnchor = () => {
