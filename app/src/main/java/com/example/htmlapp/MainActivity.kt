@@ -74,6 +74,7 @@ class MainActivity : AppCompatActivity() {
     private var lastVisibilityState: String? = null
     private var lastRendererPriority: Int? = null
     private var lastRendererWaived: Boolean? = null
+    private var lastConnectionVisibility: Boolean? = null
     private var isPageReady = false
     private var pendingVisibilityState: String? = null
     private var connectionService: ConnectionService? = null
@@ -98,7 +99,7 @@ class MainActivity : AppCompatActivity() {
             connectionService = connection
             connectionServiceBound = true
             isConnectionBinding = false
-            connection.setClientVisibility(isAppInForeground)
+            connection.setClientVisibility(isAppInForeground || isStreaming)
             connectionJob?.cancel()
             connectionJob = lifecycleScope.launch {
                 connection.events.collect { event ->
@@ -366,6 +367,8 @@ class MainActivity : AppCompatActivity() {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(connectionEventReceiver)
         } catch (_: IllegalArgumentException) {
         }
+        lastConnectionVisibility = null
+        ConnectionService.updateClientVisibility(applicationContext, false)
         connectionService?.setClientVisibility(false)
         unbindConnectionService()
         ProcessLifecycleOwner.get().lifecycle.removeObserver(appVisibilityObserver)
@@ -501,16 +504,7 @@ class MainActivity : AppCompatActivity() {
     private fun handleAppVisibility(isForeground: Boolean) {
         val changed = isAppInForeground != isForeground
         isAppInForeground = isForeground
-        if (isForeground) {
-            ConnectionService.updateClientVisibility(applicationContext, true)
-            bindConnectionService()
-            connectionService?.setClientVisibility(true)
-            flushPendingConnectionEvents()
-        } else {
-            ConnectionService.updateClientVisibility(applicationContext, false)
-            connectionService?.setClientVisibility(false)
-            unbindConnectionService()
-        }
+        updateConnectionVisibilityState()
         updateWebViewActivityState()
         if (changed) {
             notifyWebVisibility(if (isForeground) "foreground" else "background")
@@ -521,7 +515,25 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) return
         if (isStreaming == active) return
         isStreaming = active
+        updateConnectionVisibilityState()
         updateWebViewActivityState()
+    }
+
+    private fun updateConnectionVisibilityState() {
+        val shouldStayVisible = isAppInForeground || isStreaming
+        if (lastConnectionVisibility == shouldStayVisible) {
+            return
+        }
+        lastConnectionVisibility = shouldStayVisible
+        ConnectionService.updateClientVisibility(applicationContext, shouldStayVisible)
+        if (shouldStayVisible) {
+            bindConnectionService()
+            connectionService?.setClientVisibility(true)
+            flushPendingConnectionEvents()
+        } else {
+            connectionService?.setClientVisibility(false)
+            unbindConnectionService()
+        }
     }
 
     private fun updateWebViewActivityState() {
