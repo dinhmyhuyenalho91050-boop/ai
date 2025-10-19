@@ -453,6 +453,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun deliverConnectionEvent(type: String, payload: String?) {
+        if (!connectionServiceRequested) {
+            return
+        }
         val json = JSONObject().apply {
             put("type", type)
             if (payload != null) {
@@ -485,7 +488,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun flushPendingConnectionEvents() {
-        if (pendingConnectionEvents.isEmpty()) return
+        if (!connectionServiceRequested || pendingConnectionEvents.isEmpty()) return
         while (pendingConnectionEvents.isNotEmpty()) {
             val payload = pendingConnectionEvents.first()
             if (tryDeliverToWebView(payload)) {
