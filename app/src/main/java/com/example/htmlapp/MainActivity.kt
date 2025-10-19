@@ -90,6 +90,7 @@ class MainActivity : AppCompatActivity() {
     private var isConnectionBinding = false
     private var isNotificationPermissionRequestInFlight = false
     private var hasShownNotificationPermissionWarning = false
+    private var lastKnownConnectionVisibility: Boolean? = null
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
             handleAppVisibility(true)
@@ -154,6 +155,8 @@ class MainActivity : AppCompatActivity() {
                     enableConnectionService()
                 } else {
                     isConnectionServiceEnabled = false
+                    lastKnownConnectionVisibility = null
+                    refreshConnectionServiceState()
                     showConnectionPermissionWarning(false)
                 }
             }
@@ -389,6 +392,7 @@ class MainActivity : AppCompatActivity() {
         } catch (_: IllegalArgumentException) {
         }
         connectionService?.setClientVisibility(false)
+        lastKnownConnectionVisibility = null
         unbindConnectionService()
         ProcessLifecycleOwner.get().lifecycle.removeObserver(appVisibilityObserver)
         super.onDestroy()
@@ -452,11 +456,11 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) {
             return false
         }
-        if (!isAppInForeground) {
-            return false
-        }
         val handler = connectionCallbackName
         if (handler.isNullOrBlank()) {
+            return false
+        }
+        if (!shouldKeepWebViewActive()) {
             return false
         }
         webView.post {
@@ -525,23 +529,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleAppVisibility(isForeground: Boolean) {
+        val changed = isAppInForeground != isForeground
+        isAppInForeground = isForeground
         if (isForeground && !isConnectionServiceEnabled) {
             maybeStartConnectionService()
         }
-        val changed = isAppInForeground != isForeground
-        isAppInForeground = isForeground
-        if (isConnectionServiceEnabled) {
-            if (isForeground) {
-                ConnectionService.updateClientVisibility(applicationContext, true)
-                bindConnectionService()
-                connectionService?.setClientVisibility(true)
-                flushPendingConnectionEvents()
-            } else {
-                ConnectionService.updateClientVisibility(applicationContext, false)
-                connectionService?.setClientVisibility(false)
-                unbindConnectionService()
-            }
-        }
+        refreshConnectionServiceState()
         updateWebViewActivityState()
         if (changed) {
             notifyWebVisibility(if (isForeground) "foreground" else "background")
@@ -552,12 +545,16 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) return
         if (isStreaming == active) return
         isStreaming = active
+        refreshConnectionServiceState()
+        if (shouldKeepWebViewActive()) {
+            flushPendingConnectionEvents()
+        }
         updateWebViewActivityState()
     }
 
     private fun updateWebViewActivityState() {
         if (!this::webView.isInitialized) return
-        val shouldKeepActive = isAppInForeground || isStreaming
+        val shouldKeepActive = shouldKeepWebViewActive()
         if (shouldKeepActive) {
             if (areImagesBlocked) {
                 webView.settings.blockNetworkImage = false
@@ -625,7 +622,8 @@ class MainActivity : AppCompatActivity() {
         try {
             ConnectionService.startAndConnect(applicationContext)
             isConnectionServiceEnabled = true
-            handleAppVisibility(isAppInForeground)
+            lastKnownConnectionVisibility = null
+            refreshConnectionServiceState()
         } catch (e: SecurityException) {
             Log.w("MainActivity", "Unable to start ConnectionService: missing permission", e)
             isConnectionServiceEnabled = false
@@ -635,6 +633,42 @@ class MainActivity : AppCompatActivity() {
             isConnectionServiceEnabled = false
             showConnectionPermissionWarning(false)
         }
+    }
+
+    private fun refreshConnectionServiceState() {
+        if (!isConnectionServiceEnabled) {
+            connectionService?.setClientVisibility(false)
+            lastKnownConnectionVisibility = null
+            if (connectionServiceBound || isConnectionBinding) {
+                unbindConnectionService()
+            }
+            return
+        }
+
+        val shouldBind = shouldKeepWebViewActive()
+        val shouldBeVisible = isAppInForeground
+        val lastVisible = lastKnownConnectionVisibility
+        if (lastVisible == null || lastVisible != shouldBeVisible) {
+            ConnectionService.updateClientVisibility(applicationContext, shouldBeVisible)
+            connectionService?.setClientVisibility(shouldBeVisible)
+            lastKnownConnectionVisibility = shouldBeVisible
+        } else if (connectionServiceBound) {
+            connectionService?.setClientVisibility(shouldBeVisible)
+        }
+
+        if (shouldBind) {
+            bindConnectionService()
+            flushPendingConnectionEvents()
+        } else {
+            connectionService?.setClientVisibility(false)
+            if (connectionServiceBound || isConnectionBinding) {
+                unbindConnectionService()
+            }
+        }
+    }
+
+    private fun shouldKeepWebViewActive(): Boolean {
+        return isAppInForeground || isStreaming
     }
 
     private fun showConnectionPermissionWarning(short: Boolean) {
