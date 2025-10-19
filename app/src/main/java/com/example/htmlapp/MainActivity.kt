@@ -493,7 +493,14 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) return
         if (isStreaming == active) return
         isStreaming = active
-        connectionService?.setStreamingActive(active)
+        val service = connectionService
+        if (service != null) {
+            service.setStreamingActive(active)
+        } else {
+            startConnectionServiceIfNeeded()
+            val intent = ConnectionService.streamingStateIntent(this, active)
+            ContextCompat.startForegroundService(this, intent)
+        }
         updateWebViewActivityState()
     }
 

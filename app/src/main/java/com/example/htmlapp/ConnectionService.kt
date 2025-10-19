@@ -64,6 +64,10 @@ class ConnectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val endpoint = intent?.getStringExtra(EXTRA_ENDPOINT) ?: currentEndpoint ?: DEFAULT_ENDPOINT
+        if (intent?.hasExtra(EXTRA_STREAMING_ACTIVE) == true) {
+            val active = intent.getBooleanExtra(EXTRA_STREAMING_ACTIVE, false)
+            setStreamingActive(active)
+        }
         ensureConnection(endpoint)
         return START_STICKY
     }
@@ -272,9 +276,16 @@ class ConnectionService : Service() {
 
     companion object {
         const val EXTRA_ENDPOINT = "extra_connection_endpoint"
+        const val EXTRA_STREAMING_ACTIVE = "extra_streaming_active"
         private const val CHANNEL_ID = "connection_service_channel"
         private const val NOTIFICATION_ID = 0x33
         private const val RETRY_DELAY_MS = 3_500L
         const val DEFAULT_ENDPOINT = "wss://example.com/stream"
+
+        fun streamingStateIntent(context: Context, active: Boolean): Intent {
+            return Intent(context, ConnectionService::class.java).apply {
+                putExtra(EXTRA_STREAMING_ACTIVE, active)
+            }
+        }
     }
 }
