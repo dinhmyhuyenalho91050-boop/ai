@@ -560,7 +560,10 @@ class AdaptiveStreamBatcher{
     this.adjustInterval();
 
     if(isBackground){
-      const delay=Math.max(this.currentInterval,120);
+      const cfg=window.__STREAM_CFG||{};
+      const baseGap=typeof cfg.minGapMs==='number'?cfg.minGapMs:this.currentInterval;
+      const bgGap=typeof cfg.backgroundMinGap==='number'?cfg.backgroundMinGap:160;
+      const delay=Math.max(this.currentInterval,baseGap,bgGap);
       if(this.timeoutId)clearTimeout(this.timeoutId);
       this.timeoutId=setTimeout(()=>{
         this.timeoutId=null;
@@ -1769,6 +1772,11 @@ class UIManager{
 
   
   ensureBottom(retries=2, delay=120){
+    if(this._isBackgroundActive()){
+      this._deferredEnsureBottom={retries,delay};
+      return;
+    }
+    this._deferredEnsureBottom=null;
     const box=Utils.$('#messages'); if(!box) return;
     const stick=()=>{ try{ box.scrollTop = box.scrollHeight; }catch(_){} };
     requestAnimationFrame(()=>{
@@ -1776,7 +1784,13 @@ class UIManager{
       requestAnimationFrame(()=>{ stick(); });
     });
     if(retries>0){
-      setTimeout(()=>this.ensureBottom(retries-1, delay), delay);
+      setTimeout(()=>{
+        if(this._isBackgroundActive()){
+          this._deferredEnsureBottom={retries:retries-1,delay};
+        }else{
+          this.ensureBottom(retries-1, delay);
+        }
+      }, delay);
     }
   }
 /* Release suppressed auto-stick and optionally scroll to bottom once */
@@ -1828,6 +1842,8 @@ class UIManager{
     this.isLoadingEarlier=false;
     this._regexInputDebounced=null;
     this._pendingTypingUpdate=null;
+    this._deferredEnsureBottom=null;
+    this._deferredSmoothScroll=null;
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
 
     window._sanitizer=this.sanitizer;
@@ -1836,6 +1852,7 @@ class UIManager{
     this.events.on(document,'visibilitychange',()=>{
       this._handleVisibilityChange(document.hidden);
     });
+    this._syncStreamConfig();
   }
 
   /* === Motion & Scroll helpers (added) === */
@@ -1868,14 +1885,69 @@ class UIManager{
     this._appHidden=hidden;
     if(hidden){
       this.dom.stopAutoCleanup();
+      this._cancelActiveScroll();
     }else{
       this.dom.startAutoCleanup();
       this.flushPendingTyping(true);
+      this._flushDeferredUiWork();
     }
+    this._syncStreamConfig();
   }
 
   _isBackgroundActive(){
     return !!this._appHidden;
+  }
+
+  _cancelActiveScroll(){
+    if(this._scrollRAF){
+      cancelAnimationFrame(this._scrollRAF);
+      this._scrollRAF=null;
+    }
+  }
+
+  _flushDeferredUiWork(){
+    if(this._deferredEnsureBottom){
+      const job=this._deferredEnsureBottom;
+      this._deferredEnsureBottom=null;
+      if(job&&typeof job.retries==='number'){
+        this.ensureBottom(job.retries,job.delay||120);
+      }
+    }
+    if(this._deferredSmoothScroll){
+      const job=this._deferredSmoothScroll;
+      this._deferredSmoothScroll=null;
+      if(job&&typeof job.duration==='number'){
+        this._smoothStickBottom(job.duration);
+      }
+    }
+  }
+
+  _syncStreamConfig(){
+    const cfg=window.__STREAM_CFG||(window.__STREAM_CFG={});
+    if(this._appHidden){
+      if(cfg._cachedMinGap==null){
+        cfg._cachedMinGap=typeof cfg.minGapMs==='number'?cfg.minGapMs:16;
+      }
+      if(cfg._cachedScrollDelta==null){
+        cfg._cachedScrollDelta=typeof cfg.scrollDeltaMin==='number'?cfg.scrollDeltaMin:8;
+      }
+      const bgGap=(typeof cfg.backgroundMinGap==='number'&&cfg.backgroundMinGap>0)?cfg.backgroundMinGap:160;
+      const nextGap=typeof cfg.minGapMs==='number'?cfg.minGapMs:bgGap;
+      cfg.minGapMs=Math.max(bgGap,nextGap);
+      if(typeof cfg.backgroundScrollDeltaMin==='number'&&cfg.backgroundScrollDeltaMin>0){
+        const current=typeof cfg.scrollDeltaMin==='number'?cfg.scrollDeltaMin:cfg.backgroundScrollDeltaMin;
+        cfg.scrollDeltaMin=Math.max(cfg.backgroundScrollDeltaMin,current);
+      }
+    }else{
+      if(cfg._cachedMinGap!=null){
+        cfg.minGapMs=cfg._cachedMinGap;
+        cfg._cachedMinGap=null;
+      }
+      if(cfg._cachedScrollDelta!=null){
+        cfg.scrollDeltaMin=cfg._cachedScrollDelta;
+        cfg._cachedScrollDelta=null;
+      }
+    }
   }
 
   flushPendingTyping(forceStick=false){
@@ -4053,12 +4125,21 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const updatePad = Utils.rafThrottle(()=> this._updateBottomPadding());
 
     this._smoothStickBottom = (duration=220)=>{
+      if(this._isBackgroundActive()){
+        this._deferredSmoothScroll={duration};
+        return;
+      }
+      this._deferredSmoothScroll=null;
       const start = box.scrollTop;
       const target = box.scrollHeight - box.clientHeight;
       if(target - start < 2) return;
       const t0 = performance.now();
       const ease = t => (t<.5 ? 2*t*t : 1 - Math.pow(-2*t+2,2)/2);
       const step = (now)=>{
+        if(this._isBackgroundActive()){
+          this._deferredSmoothScroll={duration};
+          return;
+        }
         const p = Math.min(1,(now - t0)/duration);
         box.scrollTop = start + (target - start) * ease(p);
         if(p<1) requestAnimationFrame(step);
@@ -4348,7 +4429,9 @@ if(document.readyState==='loading'){
   window.__STREAM_CFG = window.__STREAM_CFG || {
     minGapMs: 16,
     nearBottomPx: 120,
-    scrollDeltaMin: 8
+    scrollDeltaMin: 8,
+    backgroundMinGap: 160,
+    backgroundScrollDeltaMin: 24
   };
   class StreamFormatterB {
     constructor(){ this.reset(); }

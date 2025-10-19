@@ -42,8 +42,8 @@ import java.io.FileOutputStream
 import java.util.UUID
 import android.util.Base64
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
@@ -53,6 +53,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var downloadBridge: DownloadBridge
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
+    private val visibilityHandler = Handler(Looper.getMainLooper())
+    private val visibilityDispatch = Runnable { dispatchPendingVisibility() }
+    private var pendingVisibilityState: String? = null
+    private var lastVisibilityState: String? = null
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
             notifyWebVisibility("foreground")
@@ -275,17 +279,45 @@ class MainActivity : AppCompatActivity() {
         if (this::downloadBridge.isInitialized) {
             downloadBridge.dispose()
         }
+        visibilityHandler.removeCallbacks(visibilityDispatch)
+        pendingVisibilityState = null
         ProcessLifecycleOwner.get().lifecycle.removeObserver(appVisibilityObserver)
         super.onDestroy()
     }
 
     private fun notifyWebVisibility(state: String) {
         if (!this::webView.isInitialized) return
+        if (state == lastVisibilityState && pendingVisibilityState == null) {
+            return
+        }
+        pendingVisibilityState = state
+        visibilityHandler.removeCallbacks(visibilityDispatch)
+        visibilityHandler.post(visibilityDispatch)
+    }
+
+    private fun dispatchPendingVisibility() {
+        if (!this::webView.isInitialized) {
+            pendingVisibilityState = null
+            return
+        }
+        val desiredState = pendingVisibilityState
+        if (desiredState.isNullOrEmpty() || desiredState == lastVisibilityState) {
+            pendingVisibilityState = null
+            return
+        }
+        pendingVisibilityState = null
         webView.post {
+            if (!this::webView.isInitialized) {
+                return@post
+            }
+            if (desiredState == lastVisibilityState) {
+                return@post
+            }
             webView.evaluateJavascript(
-                "window.__setNativeVisibility && window.__setNativeVisibility('$state');",
+                "window.__setNativeVisibility && window.__setNativeVisibility('$desiredState');",
                 null
             )
+            lastVisibilityState = desiredState
         }
     }
 }
@@ -294,11 +326,11 @@ private class DownloadBridge(activity: MainActivity) {
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ioExecutor: ExecutorService = ThreadPoolExecutor(
-        0,
-        Runtime.getRuntime().availableProcessors(),
-        30L,
+        1,
+        1,
+        15L,
         TimeUnit.SECONDS,
-        SynchronousQueue()
+        LinkedBlockingQueue()
     ) { runnable ->
         Thread(runnable, "bg-io").apply {
             priority = Thread.MIN_PRIORITY
