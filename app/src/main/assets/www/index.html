@@ -219,7 +219,7 @@
     #app{height:var(--native-viewport-height,100vh)}
   }
   /* During viewport freeze, lock height and disable scroll anchoring that can cause jumps */
-  body.vp-freeze #app{height:var(--vp-lock-h,100dvh)}
+  body.vp-freeze #app{height:var(--vp-lock-h,var(--native-viewport-height,100dvh))}
   #messages{overflow-anchor:auto}
   body.vp-freeze #messages{overflow-anchor:none}
   /* Avoid transitions fighting during viewport changes */
