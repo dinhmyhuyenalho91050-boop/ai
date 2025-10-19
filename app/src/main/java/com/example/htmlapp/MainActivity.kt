@@ -42,14 +42,13 @@ import java.io.FileOutputStream
 import java.util.UUID
 import android.util.Base64
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.SynchronousQueue
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private var lastVisibilityState: String = ""
     private lateinit var downloadBridge: DownloadBridge
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
@@ -127,6 +126,7 @@ class MainActivity : AppCompatActivity() {
             builtInZoomControls = false
             displayZoomControls = false
             offscreenPreRaster = false
+            setNeedInitialFocus(false)
         }
 
         webView.isVerticalScrollBarEnabled = false
@@ -147,9 +147,7 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Throwable) {
             }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
-        }
+        updateRendererPriority(true)
         downloadBridge = DownloadBridge(this)
         webView.addJavascriptInterface(downloadBridge, "HtmlAppNative")
         webView.webChromeClient = object : WebChromeClient() {
@@ -281,10 +279,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun notifyWebVisibility(state: String) {
         if (!this::webView.isInitialized) return
+        if (lastVisibilityState != state) {
+            applyPowerProfile(state == "foreground")
+            lastVisibilityState = state
+        }
         webView.post {
             webView.evaluateJavascript(
                 "window.__setNativeVisibility && window.__setNativeVisibility('$state');",
                 null
+            )
+        }
+    }
+
+    private fun applyPowerProfile(isForeground: Boolean) {
+        updateRendererPriority(isForeground)
+        val settings = webView.settings
+        settings.blockNetworkImage = !isForeground
+        if (isForeground) {
+            settings.loadsImagesAutomatically = true
+        }
+    }
+
+    private fun updateRendererPriority(isForeground: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            webView.setRendererPriorityPolicy(
+                WebView.RENDERER_PRIORITY_IMPORTANT,
+                isForeground
             )
         }
     }
@@ -293,19 +313,11 @@ class MainActivity : AppCompatActivity() {
 private class DownloadBridge(activity: MainActivity) {
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = ThreadPoolExecutor(
-        0,
-        Runtime.getRuntime().availableProcessors(),
-        30L,
-        TimeUnit.SECONDS,
-        SynchronousQueue()
-    ) { runnable ->
+    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "bg-io").apply {
             priority = Thread.MIN_PRIORITY
             isDaemon = true
         }
-    }.apply {
-        allowCoreThreadTimeOut(true)
     }
 
     fun dispose() {
