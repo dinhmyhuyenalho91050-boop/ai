@@ -2016,6 +2016,102 @@ class UIManager{
     StorageManager.registerMessagesObserverHandler((el)=>this.animateIn(el));
   }
 
+  createEmptyRenderCache(){
+    return{
+      content:{source:null,html:null},
+      thinking:{source:null,html:null}
+    };
+  }
+
+  ensureMessageCache(msg){
+    if(!msg)return;
+    if(!msg.renderCache||typeof msg.renderCache!=='object'){
+      msg.renderCache=this.createEmptyRenderCache();
+    }
+
+    if(!msg.renderCache.content||typeof msg.renderCache.content!=='object'){
+      msg.renderCache.content={source:null,html:null};
+    }else{
+      if(!Object.prototype.hasOwnProperty.call(msg.renderCache.content,'source')){
+        msg.renderCache.content.source=null;
+      }
+      if(!Object.prototype.hasOwnProperty.call(msg.renderCache.content,'html')){
+        msg.renderCache.content.html=null;
+      }
+    }
+
+    if(!msg.renderCache.thinking||typeof msg.renderCache.thinking!=='object'){
+      msg.renderCache.thinking={source:null,html:null};
+    }else{
+      if(!Object.prototype.hasOwnProperty.call(msg.renderCache.thinking,'source')){
+        msg.renderCache.thinking.source=null;
+      }
+      if(!Object.prototype.hasOwnProperty.call(msg.renderCache.thinking,'html')){
+        msg.renderCache.thinking.html=null;
+      }
+    }
+  }
+
+  clearMessageCache(msg,key=null){
+    if(!msg)return;
+    this.ensureMessageCache(msg);
+    const targets=key?[key]:['content','thinking'];
+    targets.forEach(k=>{
+      if(msg.renderCache[k]){
+        msg.renderCache[k].source=null;
+        msg.renderCache[k].html=null;
+      }
+    });
+  }
+
+  sanitizeMessagePart(msg,key,{isStreaming=false,targetEl=null}={}){
+    if(!msg)return'';
+    this.ensureMessageCache(msg);
+    const raw=(key==='thinking'?msg.thinking:msg.content)||'';
+    const cache=msg.renderCache[key];
+
+    if(!isStreaming&&cache&&cache.source===raw&&cache.html!=null){
+      return cache.html;
+    }
+
+    const result=this.sanitizer.sanitize(raw,isStreaming,targetEl);
+    if(cache){
+      cache.source=raw;
+      cache.html=result;
+    }
+    return result;
+  }
+
+  prepareMessagePayload(msg){
+    if(!msg)return null;
+    const prepared={...msg};
+    if(!prepared.id){
+      prepared.id=`msg_${Date.now()}_${Math.random().toString(36).slice(2,9)}`;
+    }
+    if(prepared.renderCache)delete prepared.renderCache;
+    this.ensureMessageCache(prepared);
+    this.clearMessageCache(prepared);
+    return prepared;
+  }
+
+  resetSessionsRenderCache(sessions){
+    if(!sessions||typeof sessions!=='object')return;
+    Object.values(sessions).forEach(session=>{
+      if(!session||!Array.isArray(session.history))return;
+      session.history.forEach(msg=>{
+        if(!msg)return;
+        if(msg.renderCache)delete msg.renderCache;
+      });
+    });
+  }
+
+  invalidateSessionCache(session,startIndex=0){
+    if(!session||!Array.isArray(session.history))return;
+    for(let i=Math.max(0,startIndex);i<session.history.length;i++){
+      this.clearMessageCache(session.history[i]);
+    }
+  }
+
   /* === Motion & Scroll helpers (added) === */
   animateIn(el){
     if(!el) return;
@@ -2201,16 +2297,18 @@ class UIManager{
     const pc=this.state.get('promptPresets')[presetKey]||this.state.getCurrentPromptConfig();
     const preset=this.state.getCurrentPreset();
     
+    const initialHistory=pc.firstAssistant?
+      [this.prepareMessagePayload({
+        role:'assistant',
+        content:pc.firstAssistant,
+        modelName:preset?.name
+      })]:[];
+
     sessions[id]={
       name:`对话 ${Object.keys(sessions).length+1}`,
       modelName:preset?.name||'未知',
       promptPresetName:presetKey,
-      history:pc.firstAssistant?[{
-        id:`msg_${Date.now()}_init`,
-        role:'assistant',
-        content:pc.firstAssistant,
-        modelName:preset?.name
-      }]:[]
+      history:initialHistory
     };
     
     this.state.set('sessions',sessions);
@@ -2416,7 +2514,8 @@ class UIManager{
   // ✅ 核心改进：复用子元素而不是重建
   buildMessageElement(msg,idx){
     const el=this.domPool.acquire('article',`msg ${msg.role}`);
-    
+    this.ensureMessageCache(msg);
+
     // 查找或创建子元素
     let header=el.querySelector('header');
     if(!header){
@@ -2451,26 +2550,29 @@ class UIManager{
     
     // 添加思维链显示
     if(msg.thinking&&msg.thinking.trim()){
-      const thinkingText=this.sanitizer.sanitize(msg.thinking);
+      const thinkingText=this.sanitizeMessagePart(msg,'thinking');
       const details=document.createElement('details');
       details.style.cssText='margin-bottom:0.75rem;border:1px solid var(--border);border-radius:0.5rem;background:rgba(96,165,250,0.05);padding:0.75rem';
-      
+
       const summary=document.createElement('summary');
       summary.style.cssText='cursor:pointer;font-weight:600;font-size:13px;color:var(--accent2);user-select:none;display:flex;align-items:center;gap:0.5rem';
       summary.innerHTML=`<span>💭 思维链</span><span style="font-size:11px;color:var(--muted);font-weight:normal">(${msg.thinking.length}字)</span>`;
-      
+
       const content=document.createElement('div');
       content.style.cssText='margin-top:0.75rem;padding:0.75rem;font-size:13px;color:var(--fg);line-height:1.7;white-space:pre-wrap;border-top:1px solid var(--border)';
-      content.innerHTML=thinkingText;
-      
+      this.domDiffer.updateHTML(content,thinkingText);
+
       details.appendChild(summary);
       details.appendChild(content);
       fragment.appendChild(details);
+    }else{
+      this.clearMessageCache(msg,'thinking');
     }
-    
+
     // 添加消息内容
     const contentDiv=document.createElement('div');
-    contentDiv.innerHTML=this.sanitizer.sanitize(msg.content||'');
+    const contentHTML=this.sanitizeMessagePart(msg,'content');
+    this.domDiffer.updateHTML(contentDiv,contentHTML);
     fragment.appendChild(contentDiv);
     
     body.innerHTML='';
@@ -2556,13 +2658,14 @@ class UIManager{
   // ✅ 核心改进：批量更新
   appendMessage(msg){
     const session=this.state.getActiveSession();
-    if(!session)return;
-    
-    if(!msg.id)msg.id=`msg_${Date.now()}_${Math.random().toString(36).slice(2,9)}`;
-    session.history.push(msg);
-    
-    this.pendingUpdates.add(msg.id);
+    if(!session)return null;
+
+    const prepared=this.prepareMessagePayload(msg);
+    session.history.push(prepared);
+
+    this.pendingUpdates.add(prepared.id);
     this.scheduleUpdate();
+    return prepared;
   }
   
   scheduleUpdate(){
@@ -2833,7 +2936,7 @@ box.appendChild(el);
           const content=document.createElement('div');
           content.style.cssText='margin-top:0.5rem;padding:0.5rem;font-size:13px;color:var(--muted);line-height:1.6;white-space:pre-wrap';
           content.className='thinking-content';
-          content.innerHTML=this.sanitizer.sanitize(thinking,true,el);
+          this.domDiffer.updateHTML(content,this.sanitizer.sanitize(thinking,true,el));
           
           details.appendChild(summary);
           details.appendChild(content);
@@ -2842,7 +2945,7 @@ box.appendChild(el);
           // 更新现有思维链内容
           const thinkingContent=existingDetails.querySelector('.thinking-content');
           if(thinkingContent){
-            thinkingContent.innerHTML=this.sanitizer.sanitize(thinking,true,el);
+            this.domDiffer.updateHTML(thinkingContent,this.sanitizer.sanitize(thinking,true,el));
           }
         }
       }
@@ -3500,7 +3603,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         }
         this.state.set('sessions',mergedSessions);
       }
-      
+
+      this.resetSessionsRenderCache(this.state.get('sessions'));
       this.state.forceSave();
       this.ensureSession();
       this.clearMessages();
@@ -3841,7 +3945,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         
         const actualIdx=msgIdx-1-userIdx;
         const removedMsgs=session.history.splice(actualIdx+1);
-        
+
         // 清理删除的消息DOM
         removedMsgs.forEach(msg=>{
           const el=this.messageElements.get(msg.id);
@@ -3941,9 +4045,11 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
     
     msg.content=finalContent;
-    
+    this.clearMessageCache(msg,'content');
+
     const bodyEl=textarea.closest('.body');
-    bodyEl.innerHTML=this.sanitizer.sanitize(finalContent);
+    const rendered=this.sanitizeMessagePart(msg,'content');
+    this.domDiffer.updateHTML(bodyEl,rendered);
     delete bodyEl.dataset.originalContent;
     delete bodyEl.dataset.editingMessageId;
     
@@ -3973,9 +4079,14 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(!msg)return;
     
     const bodyEl=textarea.closest('.body');
-    const originalContent=bodyEl.dataset.originalContent||msg.content||'';
-    
-    bodyEl.innerHTML=this.sanitizer.sanitize(originalContent);
+    const originalContent=bodyEl.dataset.originalContent??msg.content??'';
+    if(originalContent!==msg.content){
+      msg.content=originalContent;
+      this.clearMessageCache(msg,'content');
+    }
+
+    const rendered=this.sanitizeMessagePart(msg,'content');
+    this.domDiffer.updateHTML(bodyEl,rendered);
     delete bodyEl.dataset.originalContent;
     delete bodyEl.dataset.editingMessageId;
     
@@ -4032,6 +4143,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         finalContent=newContent;
       }
       msg.content=finalContent;
+      this.clearMessageCache(msg,'content');
       this.state.markSessionsDirty(this.state.get('currentId'));
     }
     
