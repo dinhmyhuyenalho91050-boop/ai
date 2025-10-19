@@ -538,36 +538,43 @@ class AdaptiveStreamBatcher{
     this.currentInterval=30;
     this.avgRenderTime=0;
     this.renderSamples=[];
+    this.isBackground=false;
+    this.hasPending=false;
   }
-  
+
   push(text,thinking){
     this.buffer=text;
     this.thinkingBuffer=thinking||'';
     this.updateCount++;
+    this.hasPending=true;
+    if(this.isBackground){
+      return;
+    }
     this.scheduleUpdate();
   }
-  
+
+  setBackgroundMode(flag){
+    const next=!!flag;
+    if(this.isBackground===next)return;
+    this.isBackground=next;
+    if(next){
+      if(this.rafId){ cancelAnimationFrame(this.rafId); this.rafId=null; }
+      if(this.timeoutId){ clearTimeout(this.timeoutId); this.timeoutId=null; }
+    }else{
+      this.flushPending(true);
+    }
+  }
+
   scheduleUpdate(){
-    const isBackground=typeof document!=='undefined'&&(document.hidden||window.__APP_VISIBILITY__==='background');
-    if(isBackground&&this.rafId){
-      cancelAnimationFrame(this.rafId);
-      this.rafId=null;
-    }else if(this.rafId){
+    if(this.isBackground){
+      return;
+    }
+    if(this.rafId){
       return;
     }
     const now=performance.now();
     const elapsed=now-this.lastUpdate;
     this.adjustInterval();
-
-    if(isBackground){
-      const delay=Math.max(this.currentInterval,240);
-      if(this.timeoutId)clearTimeout(this.timeoutId);
-      this.timeoutId=setTimeout(()=>{
-        this.timeoutId=null;
-        this.flush();
-      },delay);
-      return;
-    }
 
     if(elapsed>=this.currentInterval){
       this.rafId=requestAnimationFrame(()=>this.flush());
@@ -589,8 +596,9 @@ class AdaptiveStreamBatcher{
     this.lastUpdate=performance.now();
     this.rafId=null;
     this.timeoutId=null;
+    this.hasPending=false;
   }
-  
+
   adjustInterval(){
     const now=Date.now();
     const windowDuration=now-this.windowStart;
@@ -614,8 +622,9 @@ class AdaptiveStreamBatcher{
     if(this.renderSamples.length>10)this.renderSamples.shift();
     this.avgRenderTime=this.renderSamples.reduce((a,b)=>a+b,0)/this.renderSamples.length;
   }
-  
-  stop(){
+
+  flushPending(force=false){
+    if(!this.hasPending&&!force)return;
     if(this.rafId){
       cancelAnimationFrame(this.rafId);
       this.rafId=null;
@@ -625,6 +634,17 @@ class AdaptiveStreamBatcher{
       this.timeoutId=null;
     }
     this.flush();
+  }
+
+  stop(){
+    if(this.rafId){
+      cancelAnimationFrame(this.rafId);
+      this.rafId=null;
+    }
+    if(this.timeoutId){
+      clearTimeout(this.timeoutId);
+      this.timeoutId=null;
+    }
   }
 }
 
@@ -2021,6 +2041,7 @@ class UIManager{
     this._regexInputDebounced=null;
     this._pendingTypingUpdate=null;
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
+    this._currentBatcher=null;
 
     window._sanitizer=this.sanitizer;
 
@@ -2060,9 +2081,16 @@ class UIManager{
     this._appHidden=hidden;
     if(hidden){
       this.dom.stopAutoCleanup();
+      if(this._currentBatcher){
+        this._currentBatcher.setBackgroundMode(true);
+      }
     }else{
       this.dom.startAutoCleanup();
       this.flushPendingTyping(true);
+      if(this._currentBatcher){
+        this._currentBatcher.setBackgroundMode(false);
+        this._currentBatcher.flushPending(true);
+      }
     }
   }
 
@@ -2747,7 +2775,11 @@ class UIManager{
     const batcher=isStream?new AdaptiveStreamBatcher((text,thinking)=>{
       if(typing) this.updateTyping(typing,text,thinking);
     }):null;
-    
+    if(batcher){
+      this._currentBatcher=batcher;
+      batcher.setBackgroundMode(this._isBackgroundActive());
+    }
+
     try{
       const result=await this.api.send(session,(text,thinking)=>{
         partial=text;
@@ -2755,8 +2787,7 @@ class UIManager{
         if(batcher)batcher.push(text,thinking);
         else this.updateTyping(typing,text,thinking);
       });
-      
-      if(batcher)batcher.stop();
+
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
       if(typing){ const __delay=Math.max(0,240-(performance.now()-__typingStart)); setTimeout(()=>this.removeTyping(typing), __delay);}
       
@@ -2782,10 +2813,9 @@ this.appendMessage({
       });
       sessionDirty=true;
     }catch(error){
-      if(batcher)batcher.stop();
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
       if(typing){ const __delay=Math.max(0,240-(performance.now()-__typingStart)); setTimeout(()=>this.removeTyping(typing), __delay);}
-      
+
       const isAbort=error?.name==='AbortError';
       if(isAbort&&isStream&&partial){
         let finalPartial=partial;
@@ -2814,6 +2844,12 @@ this.appendMessage({
         sessionDirty=true;
       }
     }finally{
+      if(batcher){
+        batcher.flushPending(true);
+        batcher.setBackgroundMode(false);
+        batcher.stop();
+      }
+      this._currentBatcher=null;
       notifyNativeStreaming(false);
       if(sessionDirty&&sessionId) this.state.markSessionsDirty(sessionId);
       setTimeout(()=>{ try{ this._releaseAutoStick(); }catch{} }, 240);
@@ -4384,6 +4420,18 @@ class ChatApp{
   
   async init(){
     await this.ui.init();
+
+    if(window.HtmlAppNative&&typeof window.HtmlAppNative.registerConnectionHandler==='function'){
+      window.__handleNativeConnectionEvent=(payload)=>{
+        try{
+          const data=typeof payload==='string'?JSON.parse(payload):payload;
+          window.dispatchEvent(new CustomEvent('native-connection',{detail:data}));
+        }catch(e){
+          console.warn('Failed to handle native payload',e);
+        }
+      };
+      try{ window.HtmlAppNative.registerConnectionHandler('__handleNativeConnectionEvent'); }catch(e){}
+    }
 
     const visibility=window.__APP_VISIBILITY__||(document.hidden?'background':'foreground');
     if(typeof this.ui.onNativeVisibilityChange==='function'){
