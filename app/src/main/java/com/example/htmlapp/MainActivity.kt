@@ -37,6 +37,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -131,7 +132,10 @@ class MainActivity : AppCompatActivity() {
 
         webView.isVerticalScrollBarEnabled = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WebView.setSafeBrowsingEnabled(false)
+            try {
+                WebViewCompat.setSafeBrowsingEnabled(webView, false)
+            } catch (_: Throwable) {
+            }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             WebSettingsCompat.setForceDark(webView.settings, WebSettingsCompat.FORCE_DARK_ON)
@@ -141,7 +145,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
         }
         downloadBridge = DownloadBridge(this)
         webView.addJavascriptInterface(downloadBridge, "HtmlAppNative")
