@@ -10,16 +10,16 @@
     --accent3:#10b981;--danger:#ef4444;--border:#1f2937;--shadow:rgba(0,0,0,.3);--glow:rgba(96,165,250,.15);
     --transition-fast:.15s cubic-bezier(0.4,0,0.2,1);--transition-normal:.2s ease;--transition-slow:.3s cubic-bezier(.4,0,.2,1);
     --shadow-sm:0 2px 8px var(--shadow);--shadow-md:0 4px 16px var(--shadow);--shadow-lg:0 22px 60px rgba(0,0,0,.55);
-    --native-ime-bottom:0px;--native-ime-total-bottom:0px;--native-viewport-height:100svh;
+    --native-ime-bottom:0px;--native-ime-total-bottom:0px;--native-viewport-height:100svh;--app-height:100svh;
   }
   @supports not (height:100svh){
-    :root{--native-viewport-height:100vh;}
+    :root{--native-viewport-height:100vh;--app-height:100vh;}
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%}
   body{overflow:hidden;background:linear-gradient(135deg,#0a0e14 0%,#141824 100%);color:var(--fg);
        font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
-  .app{display:flex;flex-direction:column;height:var(--native-viewport-height,100vh);min-height:var(--native-viewport-height,100vh);}
+  .app,#app{display:flex;flex-direction:column;height:var(--app-height,var(--native-viewport-height,100vh));min-height:var(--app-height,var(--native-viewport-height,100vh));}
   header{flex-shrink:0;height:60px;display:flex;align-items:center;justify-content:space-between;padding:0 1.25rem;
     background:linear-gradient(180deg,rgba(21,25,33,.98),rgba(10,14,20,1));border-bottom:1px solid var(--border);
     box-shadow:var(--shadow-sm);z-index:100}
@@ -112,11 +112,11 @@
   body.ime-open dialog{
     top:max(24px,calc(50% - var(--native-ime-bottom,0px)/2));
     transform:translate(-50%,-50%);
-    max-height:max(320px,calc(var(--native-viewport-height,100vh) - 32px));
+    max-height:max(320px,calc(var(--app-height,var(--native-viewport-height,100vh)) - 32px));
     margin-bottom:var(--native-ime-total-bottom,0px);
   }
-  body.ime-open dialog .settings{max-height:max(280px,calc(var(--native-viewport-height,100vh) - 80px));}
-  body.ime-open dialog .pane{max-height:max(160px,calc(var(--native-viewport-height,100vh) - 212px));}
+  body.ime-open dialog .settings{max-height:max(280px,calc(var(--app-height,var(--native-viewport-height,100vh)) - 80px));}
+  body.ime-open dialog .pane{max-height:max(160px,calc(var(--app-height,var(--native-viewport-height,100vh)) - 212px));}
   .settings{display:grid;grid-template-columns:200px 1fr;min-height:500px}
   .settings .tabs{border-right:1px solid var(--border);background:rgba(0,0,0,.2);overflow:auto}
   .settings .tabs::-webkit-scrollbar{width:0;height:0}
@@ -217,15 +217,8 @@
 
   /* === Mobile viewport stability & IME flicker fixes === */
   html,body{height:100%}
-  #app{min-height:var(--native-viewport-height,100svh) !important;height:var(--native-viewport-height,100svh) !important}
-  @supports not (height:100svh){
-    #app{min-height:var(--native-viewport-height,100vh) !important;height:var(--native-viewport-height,100vh) !important}
-  }
   /* During viewport freeze, lock height and disable scroll anchoring that can cause jumps */
-  body.vp-freeze #app{height:var(--vp-lock-h,var(--native-viewport-height,100svh))}
-  @supports not (height:100svh){
-    body.vp-freeze #app{height:var(--vp-lock-h,var(--native-viewport-height,100vh))}
-  }
+  body.vp-freeze #app{height:var(--vp-lock-h,var(--app-height,var(--native-viewport-height,100vh)));}
   #messages{overflow-anchor:auto}
   body.vp-freeze #messages{overflow-anchor:none}
   /* Avoid transitions fighting during viewport changes */
@@ -233,15 +226,6 @@
 
 
   /* === Mobile IME flicker hardening (override) === */
-  /* Prefer the STABLE viewport units to avoid jumps when address bar/IME changes */
-  #app{min-height:var(--native-viewport-height,100svh) !important;height:var(--native-viewport-height,100svh) !important}
-  @supports (height:100dvh){
-    /* Use svh as authoritative; dvh can still jump when IME hides */
-    #app{min-height:var(--native-viewport-height,100svh) !important;height:var(--native-viewport-height,100svh) !important}
-  }
-  @supports not (height:100svh){
-    #app{min-height:var(--native-viewport-height,100vh) !important;height:var(--native-viewport-height,100vh) !important}
-  }
   /* Prevent rubber-banding from interfering with scroll position during transitions */
   html,body{overscroll-behavior-y:contain}
   #messages{backface-visibility:hidden;transform:translateZ(0);overscroll-behavior:contain}
@@ -468,9 +452,83 @@
 <script>
 (function(){'use strict';
 
-const NativeImeBridge=(()=>{
+const ViewportHeightManager=(()=>{
   const docEl=document.documentElement;
   const body=document.body;
+  const KEYBOARD_THRESHOLD=80;
+  let nativeKeyboardOpen=false;
+  let rafId=0;
+
+  const setAppHeight=(height)=>{
+    if(typeof height==='number'&&height>0){
+      const px=Math.round(height);
+      docEl.style.setProperty('--app-height',`${px}px`);
+    }else if(!window.visualViewport){
+      docEl.style.removeProperty('--app-height');
+    }
+  };
+
+  const computeViewportKeyboardOpen=()=>{
+    if(!window.visualViewport)return false;
+    try{
+      const inner=window.innerHeight||window.visualViewport.height;
+      const delta=Math.max(0,inner-window.visualViewport.height-window.visualViewport.offsetTop);
+      return delta>KEYBOARD_THRESHOLD;
+    }catch(_){
+      return false;
+    }
+  };
+
+  const sync=()=>{
+    rafId=0;
+    const vv=window.visualViewport;
+    const height=vv?vv.height:window.innerHeight;
+    if(height)setAppHeight(height);
+    const viewportKeyboardOpen=computeViewportKeyboardOpen();
+    body.classList.toggle('ime-open',nativeKeyboardOpen||viewportKeyboardOpen);
+  };
+
+  const scheduleSync=()=>{
+    if(rafId)return;
+    rafId=requestAnimationFrame(sync);
+  };
+
+  const init=()=>{
+    scheduleSync();
+    if(window.visualViewport){
+      window.visualViewport.addEventListener('resize',scheduleSync,{passive:true});
+      window.visualViewport.addEventListener('scroll',scheduleSync,{passive:true});
+    }else{
+      window.addEventListener('resize',scheduleSync,{passive:true});
+    }
+    window.addEventListener('orientationchange',scheduleSync,{passive:true});
+  };
+
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded',init,{once:true});
+  }else{
+    init();
+  }
+
+  return{
+    applyNativeHeight(value){
+      if(typeof value==='number'&&value>0){
+        setAppHeight(value);
+      }else if(!window.visualViewport){
+        docEl.style.removeProperty('--app-height');
+      }
+      scheduleSync();
+    },
+    setNativeKeyboardState(isOpen){
+      nativeKeyboardOpen=!!isOpen;
+      scheduleSync();
+    },
+    refresh:scheduleSync
+  };
+})();
+
+const NativeImeBridge=(()=>{
+  const docEl=document.documentElement;
   let lastBottom=0;
   let lastTotal=0;
   let lastViewport=0;
@@ -496,7 +554,8 @@ const NativeImeBridge=(()=>{
     }else{
       docEl.style.removeProperty('--native-viewport-height');
     }
-    body.classList.toggle('ime-open',lastBottom>0);
+    ViewportHeightManager.applyNativeHeight(lastViewport>0?lastViewport:null);
+    ViewportHeightManager.setNativeKeyboardState(lastBottom>0||lastTotal>0);
     window.dispatchEvent(new CustomEvent('nativeimechange',{
       detail:{bottom:lastBottom,total:lastTotal,viewport:lastViewport}
     }));
