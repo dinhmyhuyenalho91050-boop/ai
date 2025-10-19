@@ -161,6 +161,7 @@ class MainActivity : AppCompatActivity() {
                     isConnectionServiceEnabled = false
                     lastKnownConnectionVisibility = null
                     connectionServiceRequested = false
+                    pendingConnectionEvents.clear()
                     isConnectionServiceRunning = false
                     refreshConnectionServiceState()
                     showConnectionPermissionWarning(false)
@@ -203,7 +204,6 @@ class MainActivity : AppCompatActivity() {
         setupBackNavigation()
         LocalBroadcastManager.getInstance(this)
             .registerReceiver(connectionEventReceiver, IntentFilter(ConnectionService.ACTION_EVENT))
-        maybeStartConnectionService()
         handleAppVisibility(true)
         notifyWebVisibility("foreground")
         ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver)
@@ -398,6 +398,7 @@ class MainActivity : AppCompatActivity() {
         } catch (_: IllegalArgumentException) {
         }
         connectionServiceRequested = false
+        pendingConnectionEvents.clear()
         connectionService?.setClientVisibility(false)
         lastKnownConnectionVisibility = null
         if (isConnectionServiceRunning) {
@@ -439,7 +440,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleConnectionEvent(event: ConnectionService.ConnectionEvent) {
         deliverConnectionEvent(event.type, event.payload)
-        if (event is ConnectionService.ConnectionEvent.Error && isAppInForeground) {
+        if (
+            event is ConnectionService.ConnectionEvent.Error &&
+            isAppInForeground &&
+            connectionServiceRequested
+        ) {
             Toast.makeText(
                 this,
                 getString(R.string.service_retrying) + " (" + (event.payload ?: "") + ")",
@@ -449,6 +454,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun deliverConnectionEvent(type: String, payload: String?) {
+        if (!connectionServiceRequested) {
+            return
+        }
         val json = JSONObject().apply {
             put("type", type)
             if (payload != null) {
@@ -481,7 +489,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun flushPendingConnectionEvents() {
-        if (pendingConnectionEvents.isEmpty()) return
+        if (!connectionServiceRequested || pendingConnectionEvents.isEmpty()) return
         while (pendingConnectionEvents.isNotEmpty()) {
             val payload = pendingConnectionEvents.first()
             if (tryDeliverToWebView(payload)) {
@@ -561,10 +569,11 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) return
         if (isStreaming == active) return
         isStreaming = active
-        if (active) {
-            requestConnectionService()
-        } else {
-            connectionServiceRequested = false
+        if (!active) {
+            if (connectionServiceRequested) {
+                connectionServiceRequested = false
+                pendingConnectionEvents.clear()
+            }
         }
         refreshConnectionServiceState()
         if (shouldKeepWebViewActive()) {
@@ -743,6 +752,7 @@ class MainActivity : AppCompatActivity() {
         isConnectionServiceRunning = false
         isConnectionServiceEnabled = false
         connectionServiceRequested = false
+        pendingConnectionEvents.clear()
         if (!hasShownConnectionStartError && isAppInForeground && !(isFinishing || isDestroyed)) {
             Toast.makeText(this, getString(R.string.service_start_failed), Toast.LENGTH_LONG).show()
             hasShownConnectionStartError = true
