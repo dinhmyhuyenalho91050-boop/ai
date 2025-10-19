@@ -538,36 +538,41 @@ class AdaptiveStreamBatcher{
     this.currentInterval=30;
     this.avgRenderTime=0;
     this.renderSamples=[];
+    this.isBackground=typeof document!=='undefined'&&(document.hidden||window.__APP_VISIBILITY__==='background');
+    this.pendingPayload=null;
   }
-  
+
+  setBackground(flag){
+    const target=!!flag;
+    if(this.isBackground===target)return;
+    this.isBackground=target;
+    if(target){
+      if(this.rafId){cancelAnimationFrame(this.rafId); this.rafId=null;}
+      if(this.timeoutId){clearTimeout(this.timeoutId); this.timeoutId=null;}
+    }else{
+      this.scheduleUpdate();
+    }
+  }
+
   push(text,thinking){
     this.buffer=text;
     this.thinkingBuffer=thinking||'';
+    this.pendingPayload={text:this.buffer,thinking:this.thinkingBuffer};
     this.updateCount++;
+    if(this.isBackground)return;
     this.scheduleUpdate();
   }
-  
+
   scheduleUpdate(){
-    const isBackground=typeof document!=='undefined'&&(document.hidden||window.__APP_VISIBILITY__==='background');
-    if(isBackground&&this.rafId){
-      cancelAnimationFrame(this.rafId);
-      this.rafId=null;
-    }else if(this.rafId){
+    if(this.isBackground){
+      if(this.timeoutId){clearTimeout(this.timeoutId); this.timeoutId=null;}
+      if(this.rafId){cancelAnimationFrame(this.rafId); this.rafId=null;}
       return;
     }
+    if(this.rafId)return;
     const now=performance.now();
     const elapsed=now-this.lastUpdate;
     this.adjustInterval();
-
-    if(isBackground){
-      const delay=Math.max(this.currentInterval,240);
-      if(this.timeoutId)clearTimeout(this.timeoutId);
-      this.timeoutId=setTimeout(()=>{
-        this.timeoutId=null;
-        this.flush();
-      },delay);
-      return;
-    }
 
     if(elapsed>=this.currentInterval){
       this.rafId=requestAnimationFrame(()=>this.flush());
@@ -578,17 +583,36 @@ class AdaptiveStreamBatcher{
       },this.currentInterval-elapsed);
     }
   }
-  
+
   flush(){
+    const payload=this.pendingPayload||{text:this.buffer,thinking:this.thinkingBuffer};
+    this.pendingPayload=null;
+    this.rafId=null;
+    this.timeoutId=null;
+    this.applyUpdate(payload.text,payload.thinking);
+  }
+
+  applyUpdate(text,thinking){
     const start=performance.now();
     try{
-      this.updateFn(this.buffer,this.thinkingBuffer);
+      this.updateFn(text,thinking);
     }catch{}
     const renderTime=performance.now()-start;
     this.recordRenderTime(renderTime);
     this.lastUpdate=performance.now();
-    this.rafId=null;
-    this.timeoutId=null;
+  }
+
+  flushPending(force=false){
+    if(this.pendingPayload){
+      if(this.isBackground&&!force)return;
+      const payload=this.pendingPayload;
+      this.pendingPayload=null;
+      this.applyUpdate(payload.text,payload.thinking);
+      return;
+    }
+    if(force&&(this.buffer||this.thinkingBuffer)){
+      this.applyUpdate(this.buffer,this.thinkingBuffer);
+    }
   }
   
   adjustInterval(){
@@ -624,7 +648,10 @@ class AdaptiveStreamBatcher{
       clearTimeout(this.timeoutId);
       this.timeoutId=null;
     }
-    this.flush();
+    if(this.pendingPayload){
+      this.flushPending(true);
+      this.pendingPayload=null;
+    }
   }
 }
 
@@ -2015,6 +2042,7 @@ class UIManager{
     
     this.isSending=false;
     this.typingElement=null;
+    this._activeBatcher=null;
     this._scrollRAF=null;
     this._settingsRendered=false;
     this.isLoadingEarlier=false;
@@ -2058,6 +2086,10 @@ class UIManager{
     const hidden=!!isHidden;
     if(this._appHidden===hidden)return;
     this._appHidden=hidden;
+    if(this._activeBatcher){
+      this._activeBatcher.setBackground(hidden);
+      if(!hidden)this._activeBatcher.flushPending(true);
+    }
     if(hidden){
       this.dom.stopAutoCleanup();
     }else{
@@ -2747,6 +2779,12 @@ class UIManager{
     const batcher=isStream?new AdaptiveStreamBatcher((text,thinking)=>{
       if(typing) this.updateTyping(typing,text,thinking);
     }):null;
+    if(batcher){
+      this._activeBatcher=batcher;
+      batcher.setBackground(this._isBackgroundActive());
+    }else{
+      this._activeBatcher=null;
+    }
     
     try{
       const result=await this.api.send(session,(text,thinking)=>{
@@ -2756,7 +2794,10 @@ class UIManager{
         else this.updateTyping(typing,text,thinking);
       });
       
-      if(batcher)batcher.stop();
+      if(batcher){
+        batcher.flushPending(true);
+        batcher.stop();
+      }
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
       if(typing){ const __delay=Math.max(0,240-(performance.now()-__typingStart)); setTimeout(()=>this.removeTyping(typing), __delay);}
       
@@ -2782,7 +2823,10 @@ this.appendMessage({
       });
       sessionDirty=true;
     }catch(error){
-      if(batcher)batcher.stop();
+      if(batcher){
+        batcher.flushPending(true);
+        batcher.stop();
+      }
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
       if(typing){ const __delay=Math.max(0,240-(performance.now()-__typingStart)); setTimeout(()=>this.removeTyping(typing), __delay);}
       
@@ -2814,6 +2858,7 @@ this.appendMessage({
         sessionDirty=true;
       }
     }finally{
+      if(batcher)this._activeBatcher=null;
       notifyNativeStreaming(false);
       if(sessionDirty&&sessionId) this.state.markSessionsDirty(sessionId);
       setTimeout(()=>{ try{ this._releaseAutoStick(); }catch{} }, 240);
@@ -4577,6 +4622,24 @@ if(document.readyState==='loading'){
   },{passive:true});
 
   applyState(window.__APP_VISIBILITY__);
+})();
+</script>
+
+<script>
+(function(){
+  if(typeof window.__handleNativeConnection!=='function'){
+    window.__handleNativeConnection=function(evt){
+      if(!evt||!evt.type)return;
+      try{
+        if(evt.type==='message'&&evt.message){
+          console.debug('[NativeMessage]',evt.message);
+        }
+      }catch(e){}
+    };
+  }
+  if(window.HtmlAppNative&&typeof window.HtmlAppNative.registerConnectionEventCallback==='function'){
+    try{ window.HtmlAppNative.registerConnectionEventCallback('__handleNativeConnection'); }catch(e){}
+  }
 })();
 </script>
 

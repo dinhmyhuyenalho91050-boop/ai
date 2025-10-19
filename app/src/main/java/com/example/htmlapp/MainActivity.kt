@@ -3,8 +3,11 @@ package com.example.htmlapp
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -14,6 +17,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.IBinder
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.view.View
@@ -33,11 +37,13 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.webkit.WebSettingsCompat
+import androidx.lifecycle.lifecycleScope
 import kotlin.math.max
 import java.io.File
 import java.io.FileOutputStream
@@ -47,6 +53,10 @@ import android.util.Base64
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
@@ -63,6 +73,29 @@ class MainActivity : AppCompatActivity() {
     private var lastRendererWaived: Boolean? = null
     private var isPageReady = false
     private var pendingVisibilityState: String? = null
+    private var connectionService: ConnectionService? = null
+    private var connectionServiceBound = false
+    private var connectionServiceStarted = false
+    private var connectionEventsJob: Job? = null
+    private var connectionCallbackName: String? = null
+    private val connectionServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as? ConnectionService.LocalBinder ?: return
+            connectionService = binder.getService().also { svc ->
+                connectionServiceBound = true
+                svc.updateClientActive(isAppInForeground)
+                svc.updateStreaming(isStreaming)
+                startCollectingServiceEvents(svc)
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            connectionEventsJob?.cancel()
+            connectionEventsJob = null
+            connectionServiceBound = false
+            connectionService = null
+        }
+    }
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
             handleAppVisibility(true)
@@ -288,6 +321,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        unbindConnectionService()
         if (this::webView.isInitialized) {
             webView.apply {
                 loadUrl("about:blank")
@@ -335,6 +369,17 @@ class MainActivity : AppCompatActivity() {
     private fun handleAppVisibility(isForeground: Boolean) {
         val changed = isAppInForeground != isForeground
         isAppInForeground = isForeground
+        ensureConnectionServiceStarted()
+        ContextCompat.startForegroundService(
+            this,
+            ConnectionService.createClientActiveIntent(this, isForeground)
+        )
+        if (isForeground) {
+            bindConnectionService()
+        } else {
+            connectionService?.updateClientActive(false)
+            unbindConnectionService()
+        }
         updateWebViewActivityState()
         if (changed) {
             notifyWebVisibility(if (isForeground) "foreground" else "background")
@@ -345,12 +390,18 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) return
         if (isStreaming == active) return
         isStreaming = active
+        ensureConnectionServiceStarted()
+        ContextCompat.startForegroundService(
+            this,
+            ConnectionService.createStreamingIntent(this, active)
+        )
+        connectionService?.updateStreaming(active)
         updateWebViewActivityState()
     }
 
     private fun updateWebViewActivityState() {
         if (!this::webView.isInitialized) return
-        val keepActive = isAppInForeground || isStreaming
+        val keepActive = isAppInForeground
         if (keepActive) {
             if (areImagesBlocked) {
                 webView.settings.blockNetworkImage = false
@@ -374,18 +425,88 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val desiredPriority = if (!isAppInForeground && isStreaming) {
+            val desiredPriority = if (keepActive) {
                 WebView.RENDERER_PRIORITY_IMPORTANT
             } else {
                 WebView.RENDERER_PRIORITY_BOUND
             }
-            val desiredWaived = !isAppInForeground && !isStreaming
+            val desiredWaived = !keepActive
             if (desiredPriority != lastRendererPriority || desiredWaived != lastRendererWaived) {
                 webView.setRendererPriorityPolicy(desiredPriority, desiredWaived)
                 lastRendererPriority = desiredPriority
                 lastRendererWaived = desiredWaived
             }
         }
+    }
+
+    private fun ensureConnectionServiceStarted() {
+        if (connectionServiceStarted) return
+        ContextCompat.startForegroundService(
+            this,
+            ConnectionService.createStartIntent(this)
+        )
+        connectionServiceStarted = true
+    }
+
+    private fun bindConnectionService() {
+        if (connectionServiceBound) return
+        val intent = ConnectionService.createStartIntent(this)
+        bindService(intent, connectionServiceConnection, Context.BIND_AUTO_CREATE)
+    }
+
+    private fun unbindConnectionService() {
+        if (!connectionServiceBound) {
+            connectionEventsJob?.cancel()
+            connectionEventsJob = null
+            connectionService = null
+            return
+        }
+        try {
+            unbindService(connectionServiceConnection)
+        } catch (_: IllegalArgumentException) {
+        }
+        connectionEventsJob?.cancel()
+        connectionEventsJob = null
+        connectionServiceBound = false
+        connectionService = null
+    }
+
+    private fun startCollectingServiceEvents(service: ConnectionService) {
+        connectionEventsJob?.cancel()
+        connectionEventsJob = lifecycleScope.launch {
+            service.events.collectLatest { event ->
+                dispatchConnectionEvent(event)
+            }
+        }
+    }
+
+    private fun dispatchConnectionEvent(event: ConnectionService.ConnectionEvent) {
+        if (!this::webView.isInitialized) return
+        val callbackName = sanitizeCallbackName(connectionCallbackName)
+            ?: DEFAULT_CONNECTION_CALLBACK
+        val payload = JSONObject().apply {
+            put("type", event.type)
+            event.message?.let { put("message", it) }
+            event.retryInMs?.let { put("retryInMs", it) }
+        }.toString()
+        val script = "window['$callbackName'] && window['$callbackName']($payload);"
+        webView.post {
+            webView.evaluateJavascript(script, null)
+        }
+    }
+
+    fun registerConnectionCallback(callbackName: String) {
+        connectionCallbackName = sanitizeCallbackName(callbackName)
+    }
+
+    private fun sanitizeCallbackName(name: String?): String? {
+        if (name.isNullOrBlank()) return null
+        return if (CALLBACK_NAME_PATTERN.matches(name)) name else null
+    }
+
+    companion object {
+        private const val DEFAULT_CONNECTION_CALLBACK = "__handleNativeConnection"
+        private val CALLBACK_NAME_PATTERN = Regex("^[A-Za-z_\\$][A-Za-z0-9_\\$.]*$")
     }
 }
 
@@ -426,6 +547,15 @@ private class DownloadBridge(activity: MainActivity) {
         activityRef.get()?.let { activity ->
             activity.runOnUiThread {
                 activity.onStreamingStateChanged(active)
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun registerConnectionEventCallback(callbackName: String) {
+        activityRef.get()?.let { activity ->
+            activity.runOnUiThread {
+                activity.registerConnectionCallback(callbackName)
             }
         }
     }
