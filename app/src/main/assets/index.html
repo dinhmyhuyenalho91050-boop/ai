@@ -2038,10 +2038,12 @@ class UIManager{
     this._scrollRAF=null;
     this._settingsRendered=false;
     this.isLoadingEarlier=false;
+    this._pendingAutoLoad=false;
     this._regexInputDebounced=null;
     this._pendingTypingUpdate=null;
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
     this._currentBatcher=null;
+    this._pendingFoldCheck=false;
 
     window._sanitizer=this.sanitizer;
 
@@ -2436,25 +2438,66 @@ class UIManager{
   }
   
   updateLoadTip(box,win){
-    const needTip=win.enabled&&win.start>0;
-    let tipEl=box.querySelector('.load-older');
-    
-    if(needTip){
-      if(!tipEl){
-        tipEl=document.createElement('div');
-        tipEl.className='load-older';
-        box.insertBefore(tipEl,box.firstChild);
-      }
-      
-      tipEl.innerHTML=`<div class="info">共 ${win.total} 条,已折叠 ${win.start} 条更早消息</div><button class="btn small" id="btnLoadEarlier">加载更早消息</button>`;
-      
-      const btn=tipEl.querySelector('#btnLoadEarlier');
-      if(btn)btn.onclick=()=>this.loadEarlierMessages();
-    }else if(tipEl){
-      tipEl.remove();
+    const tipEl=box.querySelector('.load-older');
+    if(tipEl)tipEl.remove();
+
+    if(win.enabled&&win.start>0&&!this.isLoadingEarlier&&!this._pendingAutoLoad&&!this.isNearBottom(box)){
+      this._pendingAutoLoad=true;
+      requestAnimationFrame(()=>{
+        this._pendingAutoLoad=false;
+        this.loadEarlierMessages();
+      });
     }
   }
-  
+
+  maybeCollapseEarlierOnScroll(box){
+    if(!box||this.isLoadingEarlier)return;
+
+    const win=this.windowManager?.window;
+    if(!win||!win.enabled)return;
+    if(!this.isNearBottom(box))return;
+
+    const session=this.state.getActiveSession();
+    const history=session?.history||[];
+    const total=history.length;
+    if(!total)return;
+
+    const prevStart=win.start;
+    this.windowManager.appendNew(total,true);
+    const targetStart=this.windowManager.window.start;
+    if(targetStart<=prevStart)return;
+
+    if(this.editingState){
+      const editingIdx=history.findIndex(m=>m.id===this.editingState.msgId);
+      if(editingIdx>-1&&editingIdx<targetStart){
+        this.windowManager.window.start=prevStart;
+        return;
+      }
+    }
+
+    let removed=false;
+    for(let i=0;i<targetStart;i++){
+      const msg=history[i];
+      if(!msg)continue;
+      const el=this.messageElements.get(msg.id);
+      if(!el)continue;
+      this.domPool.release('article',el);
+      el.remove();
+      this.messageElements.delete(msg.id);
+      removed=true;
+    }
+
+    if(removed){
+      const sentinel=box.querySelector('.top-sentinel');
+      if(sentinel){
+        box.insertBefore(sentinel,box.firstChild);
+      }
+      requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
+    }
+
+    this.updateLoadTip(box,this.windowManager.window);
+  }
+
   loadEarlierMessages(){
     if(this.isLoadingEarlier)return;
     this.isLoadingEarlier=true;
@@ -2488,18 +2531,29 @@ class UIManager{
       }
     }
     
-    const tip=box.querySelector('.load-older');
-    const anchor=tip?tip.nextElementSibling:box.firstChild;
-    box.insertBefore(fragment,anchor);
-    
-    if(tip){
-      tip.querySelector('.info').textContent=`共 ${history.length} 条,已折叠 ${newStart} 条更早消息`;
+    const sentinel=box.querySelector('.top-sentinel');
+    if(sentinel){
+      const anchor=sentinel.nextSibling;
+      if(anchor){
+        box.insertBefore(fragment,anchor);
+      }else{
+        box.appendChild(fragment);
+      }
+      box.insertBefore(sentinel,box.firstChild);
+    }else{
+      const anchor=box.firstChild;
+      if(anchor){
+        box.insertBefore(fragment,anchor);
+      }else{
+        box.appendChild(fragment);
+      }
     }
-    
+
     const delta=box.scrollHeight-prevHeight;
     box.scrollTop=prevTop+delta;
-    
+
     this.isLoadingEarlier=false;
+    this.updateLoadTip(box,this.windowManager.window);
   }
   
   setupTopObserver(){
@@ -3960,6 +4014,15 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         this.renameSession(btn.dataset.sessionId);
       }
     });
+
+    this.events.on(messages,'scroll',()=>{
+      if(this._pendingFoldCheck)return;
+      this._pendingFoldCheck=true;
+      requestAnimationFrame(()=>{
+        this._pendingFoldCheck=false;
+        this.maybeCollapseEarlierOnScroll(messages);
+      });
+    },{passive:true});
   }
   
   isMessageEditing(){
