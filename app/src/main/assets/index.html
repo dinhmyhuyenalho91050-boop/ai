@@ -2043,6 +2043,7 @@ class UIManager{
     this._pendingTypingUpdate=null;
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
     this._currentBatcher=null;
+    this._pendingFoldCheck=false;
 
     window._sanitizer=this.sanitizer;
 
@@ -2440,13 +2441,61 @@ class UIManager{
     const tipEl=box.querySelector('.load-older');
     if(tipEl)tipEl.remove();
 
-    if(win.enabled&&win.start>0&&!this.isLoadingEarlier&&!this._pendingAutoLoad){
+    if(win.enabled&&win.start>0&&!this.isLoadingEarlier&&!this._pendingAutoLoad&&!this.isNearBottom(box)){
       this._pendingAutoLoad=true;
       requestAnimationFrame(()=>{
         this._pendingAutoLoad=false;
         this.loadEarlierMessages();
       });
     }
+  }
+
+  maybeCollapseEarlierOnScroll(box){
+    if(!box||this.isLoadingEarlier)return;
+
+    const win=this.windowManager?.window;
+    if(!win||!win.enabled)return;
+    if(!this.isNearBottom(box))return;
+
+    const session=this.state.getActiveSession();
+    const history=session?.history||[];
+    const total=history.length;
+    if(!total)return;
+
+    const prevStart=win.start;
+    this.windowManager.appendNew(total,true);
+    const targetStart=this.windowManager.window.start;
+    if(targetStart<=prevStart)return;
+
+    if(this.editingState){
+      const editingIdx=history.findIndex(m=>m.id===this.editingState.msgId);
+      if(editingIdx>-1&&editingIdx<targetStart){
+        this.windowManager.window.start=prevStart;
+        return;
+      }
+    }
+
+    let removed=false;
+    for(let i=0;i<targetStart;i++){
+      const msg=history[i];
+      if(!msg)continue;
+      const el=this.messageElements.get(msg.id);
+      if(!el)continue;
+      this.domPool.release('article',el);
+      el.remove();
+      this.messageElements.delete(msg.id);
+      removed=true;
+    }
+
+    if(removed){
+      const sentinel=box.querySelector('.top-sentinel');
+      if(sentinel){
+        box.insertBefore(sentinel,box.firstChild);
+      }
+      requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
+    }
+
+    this.updateLoadTip(box,this.windowManager.window);
   }
 
   loadEarlierMessages(){
@@ -3965,6 +4014,15 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         this.renameSession(btn.dataset.sessionId);
       }
     });
+
+    this.events.on(messages,'scroll',()=>{
+      if(this._pendingFoldCheck)return;
+      this._pendingFoldCheck=true;
+      requestAnimationFrame(()=>{
+        this._pendingFoldCheck=false;
+        this.maybeCollapseEarlierOnScroll(messages);
+      });
+    },{passive:true});
   }
   
   isMessageEditing(){
