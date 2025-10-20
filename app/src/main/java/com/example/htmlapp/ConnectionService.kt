@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -51,7 +52,9 @@ class ConnectionService : Service() {
 
     private var currentEndpoint: String = DEFAULT_ENDPOINT
     private var webSocket: WebSocket? = null
+    private val shouldStayConnected = AtomicBoolean(connectionRequested.get())
     private var reconnectJobActive = AtomicBoolean(false)
+    private var reconnectJob: Job? = null
     private var clientVisible = AtomicBoolean(false)
     private var currentState: ConnectionState = ConnectionState.DISCONNECTED
     private var lastStatusEvent: ConnectionEvent.Status? = null
@@ -77,7 +80,9 @@ class ConnectionService : Service() {
             stopSelf()
             return
         }
-        ensureConnection()
+        if (shouldStayConnected.get()) {
+            ensureConnection()
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder {
@@ -95,6 +100,8 @@ class ConnectionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CONNECT -> {
+                shouldStayConnected.set(true)
+                connectionRequested.set(true)
                 intent.getStringExtra(EXTRA_ENDPOINT)?.let { endpoint ->
                     if (endpoint.isNotBlank()) {
                         currentEndpoint = endpoint
@@ -105,6 +112,8 @@ class ConnectionService : Service() {
             }
 
             ACTION_SEND -> {
+                shouldStayConnected.set(true)
+                connectionRequested.set(true)
                 val payload = intent.getStringExtra(EXTRA_PAYLOAD)
                 if (!payload.isNullOrBlank()) {
                     sendMessage(payload)
@@ -116,13 +125,36 @@ class ConnectionService : Service() {
                 setClientVisibility(visible)
             }
 
-            else -> ensureConnection()
+            ACTION_STOP -> {
+                connectionRequested.set(false)
+                shouldStayConnected.set(false)
+                clientVisible.set(false)
+                reconnectJob?.cancel()
+                reconnectJob = null
+                reconnectJobActive.set(false)
+                dispatchStatus(ConnectionState.DISCONNECTED)
+                webSocket?.close(NORMAL_CLOSE_CODE, null)
+                webSocket = null
+                serviceScope.cancel()
+                stopForeground(true)
+                stopSelfResult(startId)
+                return START_NOT_STICKY
+            }
+
+            else -> {
+                if (shouldStayConnected.get()) {
+                    ensureConnection()
+                }
+            }
         }
-        return START_STICKY
+        return if (shouldStayConnected.get()) START_STICKY else START_NOT_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectJobActive.set(false)
         serviceScope.cancel()
         webSocket?.close(NORMAL_CLOSE_CODE, null)
         webSocket = null
@@ -130,22 +162,29 @@ class ConnectionService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        ensureConnection()
+        if (shouldStayConnected.get()) {
+            ensureConnection()
+        }
     }
 
     override fun onLowMemory() {
         super.onLowMemory()
-        scheduleReconnect()
+        if (shouldStayConnected.get()) {
+            scheduleReconnect()
+        }
     }
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (level >= TRIM_MEMORY_RUNNING_CRITICAL) {
+        if (level >= TRIM_MEMORY_RUNNING_CRITICAL && shouldStayConnected.get()) {
             scheduleReconnect()
         }
     }
 
     private fun ensureConnection() {
+        if (!shouldStayConnected.get()) {
+            return
+        }
         if (webSocket == null) {
             connect()
         } else if (currentState == ConnectionState.DISCONNECTED) {
@@ -156,6 +195,9 @@ class ConnectionService : Service() {
     }
 
     private fun connect() {
+        if (!shouldStayConnected.get()) {
+            return
+        }
         dispatchStatus(ConnectionState.CONNECTING)
         val request = Request.Builder()
             .url(currentEndpoint)
@@ -165,19 +207,31 @@ class ConnectionService : Service() {
     }
 
     private fun restartConnection() {
+        if (!shouldStayConnected.get()) {
+            return
+        }
         webSocket?.cancel()
         webSocket = null
         connect()
     }
 
     private fun scheduleReconnect() {
+        if (!shouldStayConnected.get()) {
+            return
+        }
         if (reconnectJobActive.getAndSet(true)) {
             return
         }
-        serviceScope.launch {
-            delay(RECONNECT_DELAY_MS)
-            reconnectJobActive.set(false)
-            restartConnection()
+        reconnectJob = serviceScope.launch {
+            try {
+                delay(RECONNECT_DELAY_MS)
+                if (shouldStayConnected.get()) {
+                    restartConnection()
+                }
+            } finally {
+                reconnectJobActive.set(false)
+                reconnectJob = null
+            }
         }
     }
 
@@ -388,27 +442,41 @@ class ConnectionService : Service() {
         private const val ACTION_CONNECT = "com.example.htmlapp.action.CONNECT"
         private const val ACTION_SEND = "com.example.htmlapp.action.SEND"
         private const val ACTION_VISIBILITY = "com.example.htmlapp.action.VISIBILITY"
+        private const val ACTION_STOP = "com.example.htmlapp.action.STOP"
         const val ACTION_EVENT = "com.example.htmlapp.action.EVENT"
         const val EXTRA_EVENT_TYPE = "extra_event_type"
         const val EXTRA_ENDPOINT = "extra_endpoint"
         const val EXTRA_PAYLOAD = "extra_payload"
         private const val EXTRA_VISIBLE = "extra_visible"
         const val DEFAULT_ENDPOINT = "wss://example.com/stream"
+        private val connectionRequested = AtomicBoolean(false)
 
         fun startAndConnect(context: Context, endpoint: String? = null): Boolean {
+            val previous = connectionRequested.getAndSet(true)
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_CONNECT
                 endpoint?.let { putExtra(EXTRA_ENDPOINT, it) }
             }
-            return startForegroundServiceCompat(context, intent)
+            return if (startForegroundServiceCompat(context, intent)) {
+                true
+            } else {
+                connectionRequested.set(previous)
+                false
+            }
         }
 
         fun enqueueSend(context: Context, payload: String): Boolean {
+            val previous = connectionRequested.getAndSet(true)
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_SEND
                 putExtra(EXTRA_PAYLOAD, payload)
             }
-            return startForegroundServiceCompat(context, intent)
+            return if (startForegroundServiceCompat(context, intent)) {
+                true
+            } else {
+                connectionRequested.set(previous)
+                false
+            }
         }
 
         fun updateClientVisibility(context: Context, visible: Boolean): Boolean {
@@ -417,6 +485,22 @@ class ConnectionService : Service() {
                 putExtra(EXTRA_VISIBLE, visible)
             }
             return startForegroundServiceCompat(context, intent)
+        }
+
+        fun stop(context: Context) {
+            connectionRequested.set(false)
+            val intent = Intent(context, ConnectionService::class.java).apply {
+                action = ACTION_STOP
+            }
+            try {
+                ContextCompat.startForegroundService(context, intent)
+            } catch (throwable: Throwable) {
+                if (throwable is IllegalStateException || throwable is SecurityException) {
+                    context.stopService(Intent(context, ConnectionService::class.java))
+                } else {
+                    throw throwable
+                }
+            }
         }
 
         private fun startForegroundServiceCompat(context: Context, intent: Intent): Boolean {

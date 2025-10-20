@@ -402,7 +402,7 @@ class MainActivity : AppCompatActivity() {
         connectionService?.setClientVisibility(false)
         lastKnownConnectionVisibility = null
         if (isConnectionServiceRunning) {
-            stopService(Intent(this, ConnectionService::class.java))
+            ConnectionService.stop(applicationContext)
         }
         isConnectionServiceRunning = false
         unbindConnectionService()
@@ -695,7 +695,7 @@ class MainActivity : AppCompatActivity() {
                 unbindConnectionService()
             }
             if (isConnectionServiceRunning) {
-                stopService(Intent(this, ConnectionService::class.java))
+                ConnectionService.stop(applicationContext)
                 isConnectionServiceRunning = false
             }
             if (!isConnectionServiceEnabled) {
