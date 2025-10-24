@@ -1785,7 +1785,7 @@ class APIManager{
   
   async sendOpenAI(session,cfg,onDelta,signal){
     const url=(cfg.base||'https://api.openai.com/v1').replace(/\/+$/,'')+'/chat/completions';
-    const isDeepSeek=(cfg.base||'').includes('api.deepseek.com')||/^deepseek/i.test(cfg.model||'');
+    const isDeepSeek=(cfg.base||'').includes('api.deepseek.com');
     const body={
       model:cfg.model||'gpt-4o-mini',
       messages:this.buildMessages(session,{isDeepSeek}),
