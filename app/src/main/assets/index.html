@@ -2030,6 +2030,7 @@ class UIManager{
     this.regexProcessor=new RegexProcessor();
     this.observerMgr=new LeakSafeObserverManager();
     this.windowManager=new MessageWindowManager();
+    this.promptPresetDraft=null;
 
     // ✅ 核心改进1：维护idx到element的映射
     this.messageElements=new Map();
@@ -2062,6 +2063,40 @@ class UIManager{
     this.events.on(document,'visibilitychange',()=>{
       this._handleVisibilityChange(document.hidden);
     });
+  }
+
+  _clonePromptPreset(preset){
+    if(!preset)return{
+      name:'',
+      sysPrompt:'',
+      firstUser:'',
+      firstAssistant:'',
+      messagePrefix:'',
+      assistantPrefill:'',
+      regexRules:[]
+    };
+    try{
+      if(typeof structuredClone==='function')return structuredClone(preset);
+    }catch(_){/* ignore */}
+    try{
+      return JSON.parse(JSON.stringify(preset));
+    }catch(_){
+      const cloned={
+        name:preset.name||'',
+        sysPrompt:preset.sysPrompt||'',
+        firstUser:preset.firstUser||'',
+        firstAssistant:preset.firstAssistant||'',
+        messagePrefix:preset.messagePrefix||'',
+        assistantPrefill:preset.assistantPrefill||'',
+        regexRules:Array.isArray(preset.regexRules)?preset.regexRules.map(rule=>({
+          name:rule?.name||'',
+          pattern:rule?.pattern||'',
+          replacement:rule?.replacement||''
+        })):[
+        ]
+      };
+      return cloned;
+    }
   }
 
   /* === Motion & Scroll helpers (added) === */
@@ -3295,17 +3330,19 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const presets=this.state.get('promptPresets');
     const preset=presets[key];
     if(!preset)return;
-    
+
+    this.promptPresetDraft=this._clonePromptPreset(preset);
+
     const nameInput=Utils.$('#promptPresetName');
-    if(nameInput)nameInput.value=preset.name||'';
-    if(Utils.$('#sysPrompt'))Utils.$('#sysPrompt').value=preset.sysPrompt||'';
-    if(Utils.$('#firstUser'))Utils.$('#firstUser').value=preset.firstUser||'';
-    if(Utils.$('#firstAssistant'))Utils.$('#firstAssistant').value=preset.firstAssistant||'';
-    if(Utils.$('#messagePrefix'))Utils.$('#messagePrefix').value=preset.messagePrefix||'';
-    if(Utils.$('#assistantPrefill'))Utils.$('#assistantPrefill').value=preset.assistantPrefill||'';
-    
-    this.renderRegexRules(preset.regexRules||[]);
-    
+    if(nameInput)nameInput.value=this.promptPresetDraft.name||'';
+    if(Utils.$('#sysPrompt'))Utils.$('#sysPrompt').value=this.promptPresetDraft.sysPrompt||'';
+    if(Utils.$('#firstUser'))Utils.$('#firstUser').value=this.promptPresetDraft.firstUser||'';
+    if(Utils.$('#firstAssistant'))Utils.$('#firstAssistant').value=this.promptPresetDraft.firstAssistant||'';
+    if(Utils.$('#messagePrefix'))Utils.$('#messagePrefix').value=this.promptPresetDraft.messagePrefix||'';
+    if(Utils.$('#assistantPrefill'))Utils.$('#assistantPrefill').value=this.promptPresetDraft.assistantPrefill||'';
+
+    this.renderRegexRules(this.promptPresetDraft.regexRules||[]);
+
     this.state.state.editingPromptPreset=key;
     this.renderPromptPresetList();
     this.updatePromptEditingHint();
@@ -3314,56 +3351,60 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   renderRegexRules(rules){
     const container=Utils.$('#regexRulesContainer');
     if(!container)return;
-    
-    if(!rules||rules.length===0){
+
+    const safeRules=Array.isArray(rules)?rules:[];
+
+    if(safeRules.length===0){
       container.innerHTML='<div style="color:var(--muted);font-size:11px;padding:.5rem">暂无规则。点击下方按钮添加。</div>';
       return;
     }
-    
-    const html=rules.map((rule,idx)=>`<div style="display:flex;flex-direction:column;gap:.7rem;padding:1rem;border:1px solid var(--border);border-radius:.75rem;background:linear-gradient(135deg,rgba(21,25,33,.7),rgba(15,18,25,.8));margin-bottom:.75rem" data-idx="${idx}"><div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.3rem"><span style="cursor:move;color:var(--muted);font-size:16px;padding:.2rem" title="拖动排序">☰</span><input type="text" style="flex:1;border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.3);color:var(--fg);padding:.5rem .7rem;font-family:inherit;font-size:13px;font-weight:600" placeholder="规则名称(可选)" data-field="name" value="${rule.name||''}"/><button class="btn small warn" data-action="remove" data-idx="${idx}" title="删除规则">×</button></div><div style="display:grid;gap:.6rem"><div><div style="color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:.3rem">查找正则表达式</div><textarea placeholder="例如: \\bAI\\b" data-field="pattern" style="width:100%;border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.6rem .75rem;font-family:'Consolas','Monaco','Courier New',monospace;font-size:13px;line-height:1.5;resize:vertical;min-height:60px">${rule.pattern||''}</textarea></div><div><div style="color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:.3rem">替换为</div><textarea placeholder="例如: 人工智能" data-field="replacement" style="width:100%;border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.6rem .75rem;font-family:'Consolas','Monaco','Courier New',monospace;font-size:13px;line-height:1.5;resize:vertical;min-height:60px">${rule.replacement||''}</textarea></div></div></div>`).join('');
-    
+
+    const html=safeRules.map((rule,idx)=>`<div style="display:flex;flex-direction:column;gap:.7rem;padding:1rem;border:1px solid var(--border);border-radius:.75rem;background:linear-gradient(135deg,rgba(21,25,33,.7),rgba(15,18,25,.8));margin-bottom:.75rem" data-idx="${idx}"><div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.3rem"><span style="cursor:move;color:var(--muted);font-size:16px;padding:.2rem" title="拖动排序">☰</span><input type="text" style="flex:1;border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.3);color:var(--fg);padding:.5rem .7rem;font-family:inherit;font-size:13px;font-weight:600" placeholder="规则名称(可选)" data-field="name" value="${rule.name||''}"/><button class="btn small warn" data-action="remove" data-idx="${idx}" title="删除规则">×</button></div><div style="display:grid;gap:.6rem"><div><div style="color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:.3rem">查找正则表达式</div><textarea placeholder="例如: \\bAI\\b" data-field="pattern" style="width:100%;border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.6rem .75rem;font-family:'Consolas','Monaco','Courier New',monospace;font-size:13px;line-height:1.5;resize:vertical;min-height:60px">${rule.pattern||''}</textarea></div><div><div style="color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:.3rem">替换为</div><textarea placeholder="例如: 人工智能" data-field="replacement" style="width:100%;border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.6rem .75rem;font-family:'Consolas','Monaco','Courier New',monospace;font-size:13px;line-height:1.5;resize:vertical;min-height:60px">${rule.replacement||''}</textarea></div></div></div>`).join('');
+
     container.innerHTML=html;
-  
-    }
-  
+
+  }
+
   addRegexRule(){
     const editing=this.state.get('editingPromptPreset');
     if(!editing){
       ErrorHandler.show('请先选择一个提示词预设');
       return;
     }
-    
+
     const presets=this.state.get('promptPresets');
     const preset=presets[editing];
-    if(!preset.regexRules)preset.regexRules=[];
-    preset.regexRules.push({name:'',pattern:'',replacement:''});
-    
-    this.renderRegexRules(preset.regexRules);
+    if(!preset)return;
+
+    if(!this.promptPresetDraft){
+      this.promptPresetDraft=this._clonePromptPreset(preset);
+    }
+
+    if(!Array.isArray(this.promptPresetDraft.regexRules)){
+      this.promptPresetDraft.regexRules=[];
+    }
+
+    this.promptPresetDraft.regexRules.push({name:'',pattern:'',replacement:''});
+
+    this.renderRegexRules(this.promptPresetDraft.regexRules);
   }
-  
+
   removeRegexRule(idx){
     const editing=this.state.get('editingPromptPreset');
     if(!editing)return;
-    
-    const presets=this.state.get('promptPresets');
-    const preset=presets[editing];
-    if(!preset||!preset.regexRules)return;
-    
-    preset.regexRules.splice(idx,1);
-    this.renderRegexRules(preset.regexRules);
+
+    if(!this.promptPresetDraft||!Array.isArray(this.promptPresetDraft.regexRules))return;
+
+    this.promptPresetDraft.regexRules.splice(idx,1);
+    this.renderRegexRules(this.promptPresetDraft.regexRules);
   }
-  
+
   saveRegexRules(){
-    const editing=this.state.get('editingPromptPreset');
-    if(!editing)return;
-    
-    const presets={...this.state.get('promptPresets')};
-    const preset=presets[editing];
-    if(!preset)return;
-    
+    if(!this.promptPresetDraft)return;
+
     const container=Utils.$('#regexRulesContainer');
     if(!container)return;
-    
+
     const items=container.querySelectorAll('[data-idx]');
     const rules=[];
     
@@ -3375,11 +3416,10 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         rules.push({name,pattern,replacement});
       }
     });
-    
-    preset.regexRules=rules;
-    this.state.set('promptPresets',presets);
+
+    this.promptPresetDraft.regexRules=rules;
   }
-  
+
   savePromptPreset(){
     const nameInput=Utils.$('#promptPresetName');
     const name=nameInput?.value.trim();
@@ -3389,14 +3429,22 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
     
     this.saveRegexRules();
-    
+
     const presets={...this.state.get('promptPresets')};
     const key=name.toLowerCase().replace(/\s+/g,'_');
-    
+
     if(presets[key]){
       if(!confirm(`已存在名为"${name}"的预设，是否覆盖？`))return;
     }
-    
+
+    const regexRules=(this.promptPresetDraft&&Array.isArray(this.promptPresetDraft.regexRules))?
+      this.promptPresetDraft.regexRules.map(rule=>({
+        name:rule?.name||'',
+        pattern:rule?.pattern||'',
+        replacement:rule?.replacement||''
+      })):
+      [];
+
     presets[key]={
       name:name,
       sysPrompt:Utils.$('#sysPrompt')?.value.trim()||'',
@@ -3404,16 +3452,17 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       firstAssistant:Utils.$('#firstAssistant')?.value.trim()||'',
       messagePrefix:Utils.$('#messagePrefix')?.value.trim()||'',
       assistantPrefill:Utils.$('#assistantPrefill')?.value.trim()||'',
-      regexRules:this.state.get('promptPresets')[this.state.get('editingPromptPreset')]?.regexRules||[]
+      regexRules:regexRules
     };
-    
+
     this.state.set('promptPresets',presets);
     this.state.state.editingPromptPreset=key;
+    this.promptPresetDraft=this._clonePromptPreset(presets[key]);
     this.renderPromptPresetList();
     this.updatePromptEditingHint();
     ErrorHandler.show('预设已保存',2000);
   }
-  
+
   updatePromptPreset(){
     const editing=this.state.get('editingPromptPreset');
     if(!editing){
@@ -3431,7 +3480,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     
     const nameInput=Utils.$('#promptPresetName');
     const name=nameInput?.value.trim()||presets[editing].name;
-    
+
     presets[editing]={
       name:name,
       sysPrompt:Utils.$('#sysPrompt')?.value.trim()||'',
@@ -3439,14 +3488,22 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       firstAssistant:Utils.$('#firstAssistant')?.value.trim()||'',
       messagePrefix:Utils.$('#messagePrefix')?.value.trim()||'',
       assistantPrefill:Utils.$('#assistantPrefill')?.value.trim()||'',
-      regexRules:presets[editing].regexRules||[]
+      regexRules:(this.promptPresetDraft&&Array.isArray(this.promptPresetDraft.regexRules))?
+        this.promptPresetDraft.regexRules.map(rule=>({
+          name:rule?.name||'',
+          pattern:rule?.pattern||'',
+          replacement:rule?.replacement||''
+        })):
+        []
     };
-    
+
     this.state.set('promptPresets',presets);
+    this.promptPresetDraft=this._clonePromptPreset(presets[editing]);
     this.renderPromptPresetList();
+    this.updatePromptEditingHint();
     ErrorHandler.show('预设已更新',2000);
   }
-  
+
   deletePromptPreset(){
     const editing=this.state.get('editingPromptPreset');
     if(!editing){
@@ -3463,19 +3520,21 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     
     const presets={...this.state.get('promptPresets')};
     delete presets[editing];
-    
+
     this.state.set('promptPresets',presets);
     this.state.state.editingPromptPreset=null;
-    
+    this.promptPresetDraft=null;
+
     Utils.$('#promptPresetName').value='';
     Utils.$('#sysPrompt').value='';
     Utils.$('#firstUser').value='';
     Utils.$('#firstAssistant').value='';
     Utils.$('#messagePrefix').value='';
     Utils.$('#assistantPrefill').value='';
-    
+
     this.renderPromptPresetList();
     this.updatePromptEditingHint();
+    this.renderRegexRules([]);
     ErrorHandler.show('预设已删除',2000);
   }
   
