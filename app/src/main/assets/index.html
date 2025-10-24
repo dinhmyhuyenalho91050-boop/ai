@@ -3456,10 +3456,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     };
 
     this.state.set('promptPresets',presets);
-    this.state.state.editingPromptPreset=key;
-    this.promptPresetDraft=this._clonePromptPreset(presets[key]);
-    this.renderPromptPresetList();
-    this.updatePromptEditingHint();
+    this.promptPresetDraft=null; // 释放旧的草稿副本，避免占用内存
+    this.loadPromptPreset(key);  // 重新按需创建草稿
     ErrorHandler.show('预设已保存',2000);
   }
 
@@ -3498,9 +3496,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     };
 
     this.state.set('promptPresets',presets);
-    this.promptPresetDraft=this._clonePromptPreset(presets[editing]);
-    this.renderPromptPresetList();
-    this.updatePromptEditingHint();
+    this.promptPresetDraft=null; // 清理旧草稿
+    this.loadPromptPreset(editing);
     ErrorHandler.show('预设已更新',2000);
   }
 
