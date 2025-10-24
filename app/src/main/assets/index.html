@@ -1556,7 +1556,11 @@ class StateManager{
       modelPresets:[
         {enabled:true,name:'GPT-4',type:'openai',config:{
           base:'https://api.openai.com/v1',key:'',model:'gpt-4o-mini',
-          temperature:1,top_p:0.95,max_tokens:null,stream:false
+          temperature:1,top_p:0.95,max_tokens:65536,stream:false
+        }},
+        {enabled:true,name:'DeepSeek',type:'openai',config:{
+          base:'https://api.deepseek.com/beta',key:'',model:'deepseek-reasoner',
+          temperature:1,top_p:0.95,max_tokens:65536,stream:false
         }}
       ],
       sessions:{},
@@ -1739,7 +1743,8 @@ class APIManager{
     this.abortController=null;
   }
   
-  buildMessages(session){
+  buildMessages(session,options={}){
+    const{isDeepSeek=false}=options||{};
     const msgs=[];
     const pc=this.state.getSessionPromptConfig(session);
     
@@ -1755,7 +1760,11 @@ class APIManager{
       }
     });
     
-    if(pc.assistantPrefill)msgs.push({role:'assistant',content:pc.assistantPrefill});
+    if(pc.assistantPrefill){
+      const assistantMsg={role:'assistant',content:pc.assistantPrefill};
+      if(isDeepSeek)assistantMsg.prefix=true;
+      msgs.push(assistantMsg);
+    }
     
     return msgs;
   }
@@ -1776,9 +1785,10 @@ class APIManager{
   
   async sendOpenAI(session,cfg,onDelta,signal){
     const url=(cfg.base||'https://api.openai.com/v1').replace(/\/+$/,'')+'/chat/completions';
+    const isDeepSeek=(cfg.base||'').includes('api.deepseek.com')||/^deepseek/i.test(cfg.model||'');
     const body={
       model:cfg.model||'gpt-4o-mini',
-      messages:this.buildMessages(session),
+      messages:this.buildMessages(session,{isDeepSeek}),
       stream:!!cfg.stream
     };
     
@@ -3158,11 +3168,11 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(!container)return;
     
     if(type==='openai'){
-      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://api.openai.com/v1'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="text" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gpt-4o-mini'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_tokens??''}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维链级别</label><select id="m${index}_thinkingEffort"><option value="" ${!config.thinkingEffort?'selected':''}>默认(medium)</option><option value="minimal" ${config.thinkingEffort==='minimal'?'selected':''}>极简</option><option value="low" ${config.thinkingEffort==='low'?'selected':''}>低</option><option value="medium" ${config.thinkingEffort==='medium'?'selected':''}>中</option><option value="high" ${config.thinkingEffort==='high'?'selected':''}>高</option></select></div>`;
+      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://api.openai.com/v1'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="text" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gpt-4o-mini'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维链级别</label><select id="m${index}_thinkingEffort"><option value="" ${!config.thinkingEffort?'selected':''}>默认(medium)</option><option value="minimal" ${config.thinkingEffort==='minimal'?'selected':''}>极简</option><option value="low" ${config.thinkingEffort==='low'?'selected':''}>低</option><option value="medium" ${config.thinkingEffort==='medium'?'selected':''}>中</option><option value="high" ${config.thinkingEffort==='high'?'selected':''}>高</option></select></div>`;
     }else if(type==='gemini'){
-      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://generativelanguage.googleapis.com'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="text" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gemini-2.5-pro'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>Top K</label><input type="number" id="m${index}_topK" min="0" step="1" value="${config.top_k??''}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_output_tokens??''}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="-1" step="1" value="${config.thinkingBudget??''}" placeholder="-1=自动,0=禁用"/></div>`;
+      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://generativelanguage.googleapis.com'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="text" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gemini-2.5-pro'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>Top K</label><input type="number" id="m${index}_topK" min="0" step="1" value="${config.top_k??''}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_output_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="-1" step="1" value="${config.thinkingBudget??''}" placeholder="-1=自动,0=禁用"/></div>`;
     }else{
-      container.innerHTML=`<div class="field"><label>代理URL</label><input id="m${index}_proxyUrl" value="${config.proxyUrl||'http://127.0.0.1:8889'}"/></div><div class="field"><label>代理密码</label><input id="m${index}_proxyPass" type="password" value="${config.proxyPass||''}" placeholder="可选"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gemini-2.5-pro'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>Top K</label><input type="number" id="m${index}_topK" min="0" step="1" value="${config.top_k??''}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_output_tokens??''}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="-1" step="1" value="${config.thinkingBudget??''}" placeholder="-1=自动,0=禁用"/></div>`;
+      container.innerHTML=`<div class="field"><label>代理URL</label><input id="m${index}_proxyUrl" value="${config.proxyUrl||'http://127.0.0.1:8889'}"/></div><div class="field"><label>代理密码</label><input id="m${index}_proxyPass" type="password" value="${config.proxyPass||''}" placeholder="可选"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gemini-2.5-pro'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>Top K</label><input type="number" id="m${index}_topK" min="0" step="1" value="${config.top_k??''}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_output_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="-1" step="1" value="${config.thinkingBudget??''}" placeholder="-1=自动,0=禁用"/></div>`;
     }
   }
   
@@ -3701,11 +3711,18 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(!confirm('⚠️ 警告:此操作将清空所有数据且无法恢复!\n\n确定要继续吗?'))return;
     if(!confirm('最后确认:真的要删除所有对话、预设和配置吗?'))return;
     
-    this.state.set('modelPresets',[{
-      enabled:true,name:'GPT-4',type:'openai',
-      config:{base:'https://api.openai.com/v1',key:'',model:'gpt-4o-mini',
-        temperature:1,top_p:0.95,max_tokens:null,stream:false}
-    }]);
+    this.state.set('modelPresets',[
+      {
+        enabled:true,name:'GPT-4',type:'openai',
+        config:{base:'https://api.openai.com/v1',key:'',model:'gpt-4o-mini',
+          temperature:1,top_p:0.95,max_tokens:65536,stream:false}
+      },
+      {
+        enabled:true,name:'DeepSeek',type:'openai',
+        config:{base:'https://api.deepseek.com/beta',key:'',model:'deepseek-reasoner',
+          temperature:1,top_p:0.95,max_tokens:65536,stream:false}
+      }
+    ]);
     
     this.state.set('promptPresets',{
       'default':{name:'默认预设',sysPrompt:'',firstUser:'',firstAssistant:'',
