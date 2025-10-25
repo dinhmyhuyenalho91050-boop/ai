@@ -60,7 +60,7 @@ class ConnectionService : Service() {
     private var lastStatusEvent: ConnectionEvent.Status? = null
 
     private val _events = MutableSharedFlow<ConnectionEvent>(
-        replay = 1,
+        replay = 0,
         extraBufferCapacity = 64,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
