@@ -701,7 +701,7 @@ class MainActivity : AppCompatActivity() {
                 ConnectionService.stop(applicationContext)
                 isConnectionServiceRunning = false
             }
-            if (!isConnectionServiceEnabled) {
+            if (!isConnectionServiceEnabled && !isNotificationPermissionRequestInFlight) {
                 connectionServiceRequested = false
             }
             return
