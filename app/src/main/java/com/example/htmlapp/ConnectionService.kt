@@ -19,6 +19,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -38,7 +39,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class ConnectionService : Service() {
 
     private val binder = ConnectionBinder()
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var serviceScope = createServiceScope()
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .retryOnConnectionFailure(true)
@@ -50,7 +51,7 @@ class ConnectionService : Service() {
 
     private var currentEndpoint: String = DEFAULT_ENDPOINT
     private var webSocket: WebSocket? = null
-    private val shouldStayConnected = AtomicBoolean(connectionRequested.get())
+    private val shouldStayConnected = AtomicBoolean(false)
     private var reconnectJobActive = AtomicBoolean(false)
     private var reconnectJob: Job? = null
     private var clientVisible = AtomicBoolean(false)
@@ -65,8 +66,23 @@ class ConnectionService : Service() {
 
     val events: SharedFlow<ConnectionEvent> = _events
 
+    private fun createServiceScope(): CoroutineScope {
+        return CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    }
+
+    private fun ensureServiceScope(): CoroutineScope {
+        if (!serviceScope.isActive) {
+            Log.i(TAG, "Recreating ConnectionService scope")
+            serviceScope = createServiceScope()
+        }
+        return serviceScope
+    }
+
     override fun onCreate() {
         super.onCreate()
+        val persistedRequested = getPersistedConnectionRequested(this)
+        connectionRequested.set(persistedRequested)
+        shouldStayConnected.set(persistedRequested)
         createNotificationChannels()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !canPostNotifications()) {
             dispatchEvent(ConnectionEvent.Error("notifications_denied"))
@@ -100,6 +116,7 @@ class ConnectionService : Service() {
             ACTION_CONNECT -> {
                 shouldStayConnected.set(true)
                 connectionRequested.set(true)
+                setPersistedConnectionRequested(this, true)
                 intent.getStringExtra(EXTRA_ENDPOINT)?.let { endpoint ->
                     if (endpoint.isNotBlank()) {
                         currentEndpoint = endpoint
@@ -112,6 +129,7 @@ class ConnectionService : Service() {
             ACTION_SEND -> {
                 shouldStayConnected.set(true)
                 connectionRequested.set(true)
+                setPersistedConnectionRequested(this, true)
                 val payload = intent.getStringExtra(EXTRA_PAYLOAD)
                 if (!payload.isNullOrBlank()) {
                     sendMessage(payload)
@@ -126,6 +144,7 @@ class ConnectionService : Service() {
             ACTION_STOP -> {
                 connectionRequested.set(false)
                 shouldStayConnected.set(false)
+                setPersistedConnectionRequested(this, false)
                 clientVisible.set(false)
                 reconnectJob?.cancel()
                 reconnectJob = null
@@ -134,6 +153,7 @@ class ConnectionService : Service() {
                 webSocket?.close(NORMAL_CLOSE_CODE, null)
                 webSocket = null
                 serviceScope.cancel()
+                serviceScope = createServiceScope()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     stopForeground(Service.STOP_FOREGROUND_REMOVE)
                 } else {
@@ -225,7 +245,8 @@ class ConnectionService : Service() {
         if (reconnectJobActive.getAndSet(true)) {
             return
         }
-        reconnectJob = serviceScope.launch {
+        val scope = ensureServiceScope()
+        reconnectJob = scope.launch {
             try {
                 delay(RECONNECT_DELAY_MS)
                 if (shouldStayConnected.get()) {
@@ -311,7 +332,7 @@ class ConnectionService : Service() {
     fun getCurrentStatus(): ConnectionEvent.Status? = lastStatusEvent
 
     fun sendMessage(payload: String) {
-        serviceScope.launch {
+        ensureServiceScope().launch {
             if (webSocket == null) {
                 withContext(Dispatchers.Main) { connect() }
             }
@@ -459,6 +480,7 @@ class ConnectionService : Service() {
 
         fun startAndConnect(context: Context, endpoint: String? = null): Boolean {
             val previous = connectionRequested.getAndSet(true)
+            setPersistedConnectionRequested(context, true)
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_CONNECT
                 endpoint?.let { putExtra(EXTRA_ENDPOINT, it) }
@@ -467,12 +489,14 @@ class ConnectionService : Service() {
                 true
             } else {
                 connectionRequested.set(previous)
+                setPersistedConnectionRequested(context, previous)
                 false
             }
         }
 
         fun enqueueSend(context: Context, payload: String): Boolean {
             val previous = connectionRequested.getAndSet(true)
+            setPersistedConnectionRequested(context, true)
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_SEND
                 putExtra(EXTRA_PAYLOAD, payload)
@@ -481,6 +505,7 @@ class ConnectionService : Service() {
                 true
             } else {
                 connectionRequested.set(previous)
+                setPersistedConnectionRequested(context, previous)
                 false
             }
         }
@@ -495,6 +520,7 @@ class ConnectionService : Service() {
 
         fun stop(context: Context) {
             connectionRequested.set(false)
+            setPersistedConnectionRequested(context, false)
             val intent = Intent(context, ConnectionService::class.java).apply {
                 action = ACTION_STOP
             }
@@ -556,5 +582,21 @@ class ConnectionService : Service() {
             }
             return true
         }
+
     }
+}
+
+private const val CONNECTION_PREFS_NAME = "connection_service"
+private const val CONNECTION_PREF_KEY_REQUESTED = "connection_requested"
+
+private fun getPersistedConnectionRequested(context: Context): Boolean {
+    return context.getSharedPreferences(CONNECTION_PREFS_NAME, Context.MODE_PRIVATE)
+        .getBoolean(CONNECTION_PREF_KEY_REQUESTED, false)
+}
+
+private fun setPersistedConnectionRequested(context: Context, requested: Boolean) {
+    context.getSharedPreferences(CONNECTION_PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putBoolean(CONNECTION_PREF_KEY_REQUESTED, requested)
+        .apply()
 }
