@@ -643,7 +643,9 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) return
         if (isStreaming == active) return
         isStreaming = active
-        if (!active) {
+        if (active) {
+            requestConnectionService()
+        } else {
             if (connectionServiceRequested) {
                 connectionServiceRequested = false
                 pendingConnectionEvents.clear()
