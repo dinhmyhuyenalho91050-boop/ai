@@ -28,6 +28,7 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
@@ -41,13 +42,14 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewFeature
 import androidx.lifecycle.lifecycleScope
-import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import kotlin.math.max
 import java.io.File
 import java.io.FileOutputStream
@@ -68,6 +70,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var downloadBridge: DownloadBridge
+    private lateinit var assetLoader: WebViewAssetLoader
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
     private var notificationPermissionLauncher: ActivityResultLauncher<String>? = null
@@ -144,6 +147,7 @@ class MainActivity : AppCompatActivity() {
             deliverConnectionEvent(type, payload)
         }
     }
+    private var isConnectionEventReceiverRegistered = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -202,8 +206,25 @@ class MainActivity : AppCompatActivity() {
         configureWebView()
         setupWindowInsets(root)
         setupBackNavigation()
-        LocalBroadcastManager.getInstance(this)
-            .registerReceiver(connectionEventReceiver, IntentFilter(ConnectionService.ACTION_EVENT))
+        val connectionEventFilter = IntentFilter(ConnectionService.ACTION_EVENT)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(
+                connectionEventReceiver,
+                connectionEventFilter,
+                ConnectionService.PERMISSION_CONNECTION_EVENT,
+                null,
+                Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(
+                connectionEventReceiver,
+                connectionEventFilter,
+                ConnectionService.PERMISSION_CONNECTION_EVENT,
+                null
+            )
+        }
+        isConnectionEventReceiverRegistered = true
         handleAppVisibility(true)
         notifyWebVisibility("foreground")
         ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver)
@@ -211,20 +232,24 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
         } else {
-            webView.loadUrl("file:///android_asset/index.html")
+            webView.loadUrl(ASSET_ENTRY_URL)
         }
     }
 
     private fun configureWebView() {
         webView.setBackgroundColor(Color.TRANSPARENT)
-        with(webView.settings) {
+        assetLoader = WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .addPathHandler("/res/", WebViewAssetLoader.ResourcesPathHandler(this))
+            .build()
+
+        val settings = webView.settings
+        with(settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
             databaseEnabled = true
             allowFileAccess = true
             allowContentAccess = true
-            allowFileAccessFromFileURLs = true
-            allowUniversalAccessFromFileURLs = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             useWideViewPort = true
             loadWithOverviewMode = true
@@ -245,12 +270,11 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Throwable) {
             }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            WebSettingsCompat.setForceDark(webView.settings, WebSettingsCompat.FORCE_DARK_ON)
-            try {
-                WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, true)
-            } catch (_: Throwable) {
-            }
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+            WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, true)
+        } else if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            @Suppress("DEPRECATION")
+            WebSettingsCompat.setForceDark(settings, WebSettingsCompat.FORCE_DARK_ON)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
@@ -294,6 +318,13 @@ class MainActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 isPageReady = false
                 lastVisibilityState = null
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView,
+                request: WebResourceRequest
+            ): WebResourceResponse? {
+                return assetLoader.shouldInterceptRequest(request.url)
             }
 
             override fun shouldOverrideUrlLoading(
@@ -394,9 +425,13 @@ class MainActivity : AppCompatActivity() {
         if (this::downloadBridge.isInitialized) {
             downloadBridge.dispose()
         }
-        try {
-            LocalBroadcastManager.getInstance(this).unregisterReceiver(connectionEventReceiver)
-        } catch (_: IllegalArgumentException) {
+        if (isConnectionEventReceiverRegistered) {
+            try {
+                unregisterReceiver(connectionEventReceiver)
+            } catch (_: IllegalArgumentException) {
+            } finally {
+                isConnectionEventReceiverRegistered = false
+            }
         }
         connectionServiceRequested = false
         pendingConnectionEvents.clear()
@@ -771,6 +806,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 }
+
+private const val ASSET_ENTRY_URL = "https://appassets.androidplatform.net/assets/index.html"
 
 private class DownloadBridge(activity: MainActivity) {
     private val activityRef = WeakReference(activity)
