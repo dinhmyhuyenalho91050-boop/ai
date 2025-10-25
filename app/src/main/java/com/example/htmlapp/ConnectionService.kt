@@ -444,6 +444,7 @@ class ConnectionService : Service() {
         private const val MESSAGE_NOTIFICATION_ID = 2001
         private const val NORMAL_CLOSE_CODE = 1000
         private const val RECONNECT_DELAY_MS = 3_000L
+        const val PERMISSION_CONNECTION_EVENT = "com.example.htmlapp.permission.CONNECTION_EVENT"
         private const val ACTION_CONNECT = "com.example.htmlapp.action.CONNECT"
         private const val ACTION_SEND = "com.example.htmlapp.action.SEND"
         private const val ACTION_VISIBILITY = "com.example.htmlapp.action.VISIBILITY"

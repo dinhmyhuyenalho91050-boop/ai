@@ -210,7 +210,12 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(connectionEventReceiver, connectionEventFilter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("DEPRECATION")
-            registerReceiver(connectionEventReceiver, connectionEventFilter)
+            registerReceiver(
+                connectionEventReceiver,
+                connectionEventFilter,
+                ConnectionService.PERMISSION_CONNECTION_EVENT,
+                null
+            )
         }
         handleAppVisibility(true)
         notifyWebVisibility("foreground")
