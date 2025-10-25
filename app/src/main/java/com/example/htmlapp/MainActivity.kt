@@ -27,6 +27,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -45,9 +46,10 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
-import androidx.webkit.WebSettingsCompat
 import androidx.lifecycle.lifecycleScope
-import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewFeature
 import kotlin.math.max
 import java.io.File
 import java.io.FileOutputStream
@@ -67,6 +69,7 @@ import org.json.JSONObject
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var assetLoader: WebViewAssetLoader
     private lateinit var downloadBridge: DownloadBridge
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
@@ -202,8 +205,13 @@ class MainActivity : AppCompatActivity() {
         configureWebView()
         setupWindowInsets(root)
         setupBackNavigation()
-        LocalBroadcastManager.getInstance(this)
-            .registerReceiver(connectionEventReceiver, IntentFilter(ConnectionService.ACTION_EVENT))
+        val connectionEventFilter = IntentFilter(ConnectionService.ACTION_EVENT)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(connectionEventReceiver, connectionEventFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(connectionEventReceiver, connectionEventFilter)
+        }
         handleAppVisibility(true)
         notifyWebVisibility("foreground")
         ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver)
@@ -211,20 +219,24 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
         } else {
-            webView.loadUrl("file:///android_asset/index.html")
+            webView.loadUrl("https://appassets.androidplatform.net/assets/index.html")
         }
     }
 
     private fun configureWebView() {
         webView.setBackgroundColor(Color.TRANSPARENT)
-        with(webView.settings) {
+        assetLoader = WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .addPathHandler("/res/", WebViewAssetLoader.ResourcesPathHandler(this))
+            .build()
+
+        val settings = webView.settings
+        with(settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
             databaseEnabled = true
             allowFileAccess = true
             allowContentAccess = true
-            allowFileAccessFromFileURLs = true
-            allowUniversalAccessFromFileURLs = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             useWideViewPort = true
             loadWithOverviewMode = true
@@ -232,6 +244,13 @@ class MainActivity : AppCompatActivity() {
             builtInZoomControls = false
             displayZoomControls = false
             offscreenPreRaster = false
+        }
+
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+            WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, true)
+        } else if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            @Suppress("DEPRECATION")
+            WebSettingsCompat.setForceDark(settings, WebSettingsCompat.FORCE_DARK_ON)
         }
 
         webView.isVerticalScrollBarEnabled = false
@@ -242,13 +261,6 @@ class MainActivity : AppCompatActivity() {
                     Boolean::class.javaPrimitiveType
                 )
                 method.invoke(null, false)
-            } catch (_: Throwable) {
-            }
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            WebSettingsCompat.setForceDark(webView.settings, WebSettingsCompat.FORCE_DARK_ON)
-            try {
-                WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, true)
             } catch (_: Throwable) {
             }
         }
@@ -319,6 +331,13 @@ class MainActivity : AppCompatActivity() {
                     "background"
                 }
                 notifyWebVisibility(state)
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView,
+                request: WebResourceRequest
+            ): WebResourceResponse? {
+                return assetLoader.shouldInterceptRequest(request.url)
             }
         }
     }
@@ -395,7 +414,7 @@ class MainActivity : AppCompatActivity() {
             downloadBridge.dispose()
         }
         try {
-            LocalBroadcastManager.getInstance(this).unregisterReceiver(connectionEventReceiver)
+            unregisterReceiver(connectionEventReceiver)
         } catch (_: IllegalArgumentException) {
         }
         connectionServiceRequested = false
