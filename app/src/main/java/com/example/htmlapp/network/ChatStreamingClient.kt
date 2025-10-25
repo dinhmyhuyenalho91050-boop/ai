@@ -10,12 +10,17 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -60,32 +65,25 @@ class OpenAiStreamingClient(
     private val json = Json { ignoreUnknownKeys = true }
 
     override fun streamCompletion(request: ChatCompletionRequest): Flow<StreamingEvent> = callbackFlow {
-        val payload = buildString {
-            append('{')
-            append("\"model\":\"").append(request.model).append('\"')
-            append(',')
-            append("\"temperature\":").append(request.temperature)
-            append(',')
-            append("\"stream\":true")
+        val payloadElement = buildJsonObject {
+            put("model", request.model)
+            put("temperature", request.temperature)
+            put("stream", true)
             request.reasoningEffort?.let { effort ->
-                append(',')
-                append("\"reasoning_effort\":\"").append(effort).append('\"')
+                put("reasoning_effort", effort)
             }
-            append(',')
-            append("\"messages\":[")
-            request.messages.forEachIndexed { index, message ->
-                if (index > 0) append(',')
-                append('{')
-                append("\"role\":\"").append(message.role).append('\"')
-                append(',')
-                append("\"content\":\"")
-                append(message.content.replace("\\", "\\\\").replace("\"", "\\\""))
-                append('\"')
-                append('}')
+            putJsonArray("messages") {
+                request.messages.forEach { message ->
+                    add(
+                        buildJsonObject {
+                            put("role", message.role)
+                            put("content", message.content)
+                        },
+                    )
+                }
             }
-            append(']')
-            append('}')
         }
+        val payload = json.encodeToString(JsonElement.serializer(), payloadElement)
 
         val httpRequest = Request.Builder()
             .url("${request.baseUrl.trimEnd('/')}/chat/completions")

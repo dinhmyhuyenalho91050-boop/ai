@@ -193,6 +193,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             content = prompt,
             modelId = modelId,
         )
+        val historyForRequest = repository.messagesForSession(sessionId)
         val assistantMessage = repository.appendMessage(
             sessionId = sessionId,
             role = MessageRole.ASSISTANT,
@@ -204,7 +205,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         observeMessages(sessionId)
         streamingJob?.cancel()
         streamingJob = viewModelScope.launch {
-            val history = repository.messagesForSession(sessionId)
             val client = if (apiKey.isBlank()) fallbackClient else streamingClient
             val contentBuilder = StringBuilder()
             val thinkingBuilder = StringBuilder()
@@ -212,7 +212,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 client.streamCompletion(
                     ChatCompletionRequest(
                         model = modelId,
-                        messages = history.map { it.toPayload() },
+                        messages = historyForRequest.map { it.toPayload() },
                         apiKey = apiKey,
                     ),
                 ).collect { event ->
