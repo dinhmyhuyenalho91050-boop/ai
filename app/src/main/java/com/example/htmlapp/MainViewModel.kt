@@ -245,7 +245,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 content = event.throwable.message ?: "网络错误",
                                 streaming = false,
                             )
-                            _uiState.update { it.copy(isSending = false, statusMessage = "生成失败：${event.throwable.message}") }
+                            _uiState.update {
+                                it.copy(
+                                    isSending = false,
+                                    statusMessage = "生成失败：${event.throwable.message}",
+                                )
+                            }
                             activeAssistantMessageId = null
                         }
                     }

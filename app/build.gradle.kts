@@ -67,6 +67,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.datastore:datastore:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    implementation("com.google.android.material:material:1.12.0")
 
     implementation(platform("androidx.compose:compose-bom:2024.05.00"))
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.05.00"))
