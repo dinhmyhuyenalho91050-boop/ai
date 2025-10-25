@@ -54,6 +54,7 @@ import kotlin.math.max
 import java.io.File
 import java.io.FileOutputStream
 import java.lang.ref.WeakReference
+import java.util.Locale
 import java.util.UUID
 import android.util.Base64
 import java.util.concurrent.ExecutorService
@@ -89,6 +90,7 @@ class MainActivity : AppCompatActivity() {
     private var connectionJob: Job? = null
     private var connectionCallbackName: String? = null
     private val pendingConnectionEvents = ArrayDeque<String>()
+    private val pendingOutgoingMessages = ArrayDeque<String>()
     private var isConnectionBinding = false
     private var isNotificationPermissionRequestInFlight = false
     private var hasShownNotificationPermissionWarning = false
@@ -123,6 +125,7 @@ class MainActivity : AppCompatActivity() {
             connection.getCurrentStatus()?.let { status ->
                 handleConnectionEvent(status)
             }
+            flushPendingOutgoingMessages()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -160,11 +163,21 @@ class MainActivity : AppCompatActivity() {
                 isNotificationPermissionRequestInFlight = false
                 if (granted) {
                     enableConnectionService()
+                    flushPendingOutgoingMessages()
                 } else {
                     isConnectionServiceEnabled = false
                     lastKnownConnectionVisibility = null
                     connectionServiceRequested = false
                     pendingConnectionEvents.clear()
+                    if (pendingOutgoingMessages.isNotEmpty()) {
+                        Log.w("MainActivity", "Clearing ${pendingOutgoingMessages.size} pending messages after permission denial")
+                        pendingOutgoingMessages.clear()
+                        Toast.makeText(
+                            this,
+                            getString(R.string.connection_permission_denied_message_discarded),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                     isConnectionServiceRunning = false
                     refreshConnectionServiceState()
                     showConnectionPermissionWarning(false)
@@ -317,10 +330,19 @@ class MainActivity : AppCompatActivity() {
                 view: WebView,
                 request: WebResourceRequest
             ): Boolean {
-                return if (request.isForMainFrame) {
-                    view.loadUrl(request.url.toString())
+                if (!request.isForMainFrame) {
+                    return false
+                }
+                val url = request.url
+                val scheme = url.scheme?.lowercase(Locale.ROOT)
+                if (scheme == "http" || scheme == "https") {
+                    return false
+                }
+                return try {
+                    startActivity(Intent(Intent.ACTION_VIEW, url))
                     true
-                } else {
+                } catch (e: ActivityNotFoundException) {
+                    Log.w("MainActivity", "No activity found to handle $url", e)
                     false
                 }
             }
@@ -525,6 +547,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun flushPendingOutgoingMessages() {
+        if (!isConnectionServiceEnabled || pendingOutgoingMessages.isEmpty()) {
+            return
+        }
+        while (pendingOutgoingMessages.isNotEmpty()) {
+            val next = pendingOutgoingMessages.first()
+            val delivered = if (connectionService != null && connectionServiceBound) {
+                connectionService?.sendMessage(next)
+                true
+            } else {
+                ConnectionService.enqueueSend(applicationContext, next)
+            }
+            if (delivered) {
+                pendingOutgoingMessages.removeFirst()
+            } else {
+                Log.w("MainActivity", "Unable to flush pending message; will retry later")
+                break
+            }
+        }
+    }
+
     fun registerConnectionHandler(handlerName: String?) {
         connectionCallbackName = handlerName?.takeIf { it.isNotBlank() }
         flushPendingConnectionEvents()
@@ -534,6 +577,11 @@ class MainActivity : AppCompatActivity() {
         val message = payload.ifBlank { return }
         requestConnectionService()
         if (!isConnectionServiceEnabled) {
+            if (isNotificationPermissionRequestInFlight) {
+                pendingOutgoingMessages.addLast(message)
+                Log.i("MainActivity", "Queued message while waiting for notification permission")
+                return
+            }
             if (!isNotificationPermissionRequestInFlight) {
                 showConnectionPermissionWarning(true)
             }
@@ -547,6 +595,7 @@ class MainActivity : AppCompatActivity() {
                 handleConnectionServiceStartFailure()
             }
         }
+        flushPendingOutgoingMessages()
     }
 
     private fun bindConnectionService() {
@@ -665,6 +714,7 @@ class MainActivity : AppCompatActivity() {
             if (ConnectionService.startAndConnect(applicationContext)) {
                 isConnectionServiceRunning = true
                 hasShownConnectionStartError = false
+                flushPendingOutgoingMessages()
             } else {
                 handleConnectionServiceStartFailure()
             }
@@ -692,6 +742,7 @@ class MainActivity : AppCompatActivity() {
             if (ConnectionService.startAndConnect(applicationContext)) {
                 isConnectionServiceRunning = true
                 hasShownConnectionStartError = false
+                flushPendingOutgoingMessages()
             } else {
                 handleConnectionServiceStartFailure()
             }
@@ -703,6 +754,7 @@ class MainActivity : AppCompatActivity() {
             hasShownConnectionStartError = false
             lastKnownConnectionVisibility = null
             refreshConnectionServiceState()
+            flushPendingOutgoingMessages()
         } else {
             Log.w("MainActivity", "Unable to start ConnectionService")
             isConnectionServiceEnabled = false
@@ -733,6 +785,7 @@ class MainActivity : AppCompatActivity() {
             if (ConnectionService.startAndConnect(applicationContext)) {
                 isConnectionServiceRunning = true
                 hasShownConnectionStartError = false
+                flushPendingOutgoingMessages()
             } else {
                 handleConnectionServiceStartFailure()
                 return
