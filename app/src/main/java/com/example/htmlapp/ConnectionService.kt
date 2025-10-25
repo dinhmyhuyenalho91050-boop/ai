@@ -14,7 +14,6 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,7 +39,6 @@ class ConnectionService : Service() {
 
     private val binder = ConnectionBinder()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val localBroadcast by lazy { LocalBroadcastManager.getInstance(this) }
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .retryOnConnectionFailure(true)
@@ -136,7 +134,12 @@ class ConnectionService : Service() {
                 webSocket?.close(NORMAL_CLOSE_CODE, null)
                 webSocket = null
                 serviceScope.cancel()
-                stopForeground(true)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    stopForeground(Service.STOP_FOREGROUND_REMOVE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(true)
+                }
                 stopSelfResult(startId)
                 return START_NOT_STICKY
             }
@@ -290,7 +293,8 @@ class ConnectionService : Service() {
 
     private fun dispatchEvent(event: ConnectionEvent) {
         _events.tryEmit(event)
-        localBroadcast.sendBroadcast(Intent(ACTION_EVENT).apply {
+        sendBroadcast(Intent(ACTION_EVENT).apply {
+            setPackage(packageName)
             putExtra(EXTRA_EVENT_TYPE, event.type)
             event.payload?.let { putExtra(EXTRA_PAYLOAD, it) }
         })
