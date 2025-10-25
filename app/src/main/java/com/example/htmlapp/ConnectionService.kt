@@ -14,7 +14,6 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,7 +39,6 @@ class ConnectionService : Service() {
 
     private val binder = ConnectionBinder()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val localBroadcast by lazy { LocalBroadcastManager.getInstance(this) }
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .retryOnConnectionFailure(true)
@@ -136,7 +134,12 @@ class ConnectionService : Service() {
                 webSocket?.close(NORMAL_CLOSE_CODE, null)
                 webSocket = null
                 serviceScope.cancel()
-                stopForeground(true)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    stopForeground(Service.STOP_FOREGROUND_REMOVE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(true)
+                }
                 stopSelfResult(startId)
                 return START_NOT_STICKY
             }
@@ -290,10 +293,12 @@ class ConnectionService : Service() {
 
     private fun dispatchEvent(event: ConnectionEvent) {
         _events.tryEmit(event)
-        localBroadcast.sendBroadcast(Intent(ACTION_EVENT).apply {
+        val intent = Intent(ACTION_EVENT).apply {
             putExtra(EXTRA_EVENT_TYPE, event.type)
             event.payload?.let { putExtra(EXTRA_PAYLOAD, it) }
-        })
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
     }
 
     fun setClientVisibility(visible: Boolean) {
@@ -439,6 +444,7 @@ class ConnectionService : Service() {
         private const val MESSAGE_NOTIFICATION_ID = 2001
         private const val NORMAL_CLOSE_CODE = 1000
         private const val RECONNECT_DELAY_MS = 3_000L
+        const val PERMISSION_CONNECTION_EVENT = "com.example.htmlapp.permission.CONNECTION_EVENT"
         private const val ACTION_CONNECT = "com.example.htmlapp.action.CONNECT"
         private const val ACTION_SEND = "com.example.htmlapp.action.SEND"
         private const val ACTION_VISIBILITY = "com.example.htmlapp.action.VISIBILITY"
