@@ -4,6 +4,7 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.htmlapp.BuildConfig
 import com.example.htmlapp.data.backup.BackupManager
 import com.example.htmlapp.data.db.HtmlAppDatabase
 import com.example.htmlapp.data.model.ChatEvent
@@ -16,6 +17,7 @@ import com.example.htmlapp.data.repository.ModelRepository
 import com.example.htmlapp.ui.HtmlAppUiState.Companion.DEFAULT_WINDOW_LIMIT
 import com.example.htmlapp.ui.HtmlAppUiState.Companion.WINDOW_INCREMENT
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +29,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 
@@ -42,6 +45,9 @@ class HtmlAppViewModel(application: Application) : AndroidViewModel(application)
         .build()
     private val streamingClient = AiStreamingClient(httpClient)
     private val backupManager = BackupManager(application)
+    private val openAiAuthorization = BuildConfig.OPENAI_API_KEY
+        .takeIf { it.isNotBlank() }
+        ?.let { "Bearer $it" }
 
     private val selectedSessionId = MutableStateFlow<String?>(null)
     private val messageWindowLimit = MutableStateFlow(DEFAULT_WINDOW_LIMIT)
@@ -210,47 +216,88 @@ class HtmlAppViewModel(application: Application) : AndroidViewModel(application)
             val messages = chatRepository.getAllMessages(targetSessionId)
             streamingJob?.cancel()
             streamingJob = viewModelScope.launch {
+                val authorization = openAiAuthorization
+                if (authorization == null) {
+                    chatRepository.updateMessageContent(
+                        assistantId,
+                        content = "Missing OpenAI API key. Set openai.apiKey in local.properties.",
+                        thinking = null,
+                        isStreaming = false,
+                    )
+                    isSending.value = false
+                    return@launch
+                }
                 var contentBuffer = ""
                 var thinkingBuffer = ""
-                streamingClient.streamChat(
-                    endpoint = AiStreamingClient.StreamingEndpoint(
-                        url = "https://api.openai.com/v1/chat/completions",
-                        apiKey = null,
-                    ),
-                    payload = AiStreamingClient.ChatCompletionRequest(
-                        model = selectedModel,
-                        messages = messages.map { message ->
-                            AiStreamingClient.ChatCompletionRequest.Message(
-                                role = message.role.name.lowercase(),
-                                content = message.content,
-                            )
-                        },
-                    ),
-                ).collect { event ->
-                    when (event) {
-                        is ChatEvent.StreamDelta -> {
-                            contentBuffer += event.contentDelta.orEmpty()
-                            thinkingBuffer += event.thinkingDelta.orEmpty()
-                            chatRepository.updateMessageContent(
-                                assistantId,
-                                content = contentBuffer,
-                                thinking = thinkingBuffer.ifBlank { null },
-                                isStreaming = true,
-                            )
-                        }
+                var finished = false
+                try {
+                    streamingClient.streamChat(
+                        endpoint = AiStreamingClient.StreamingEndpoint(
+                            url = "https://api.openai.com/v1/chat/completions",
+                            apiKey = authorization,
+                        ),
+                        payload = AiStreamingClient.ChatCompletionRequest(
+                            model = selectedModel,
+                            messages = messages.map { message ->
+                                AiStreamingClient.ChatCompletionRequest.Message(
+                                    role = message.role.name.lowercase(),
+                                    content = message.content,
+                                )
+                            },
+                        ),
+                    ).collect { event ->
+                        when (event) {
+                            is ChatEvent.StreamDelta -> {
+                                contentBuffer += event.contentDelta.orEmpty()
+                                thinkingBuffer += event.thinkingDelta.orEmpty()
+                                chatRepository.updateMessageContent(
+                                    assistantId,
+                                    content = contentBuffer,
+                                    thinking = thinkingBuffer.ifBlank { null },
+                                    isStreaming = true,
+                                )
+                            }
 
-                        is ChatEvent.Completed -> {
-                            chatRepository.updateMessageContent(
-                                assistantId,
-                                content = contentBuffer,
-                                thinking = thinkingBuffer.ifBlank { null },
-                                isStreaming = false,
-                            )
-                            isSending.value = false
+                            is ChatEvent.Completed -> {
+                                chatRepository.updateMessageContent(
+                                    assistantId,
+                                    content = contentBuffer,
+                                    thinking = thinkingBuffer.ifBlank { null },
+                                    isStreaming = false,
+                                )
+                                finished = true
+                            }
                         }
                     }
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (t: Throwable) {
+                    val errorText = buildString {
+                        if (contentBuffer.isNotBlank()) {
+                            append(contentBuffer.trimEnd())
+                            append("\n\n")
+                        }
+                        append("Failed to load response: ")
+                        append(t.message ?: "Unknown error")
+                    }
+                    chatRepository.updateMessageContent(
+                        assistantId,
+                        content = errorText,
+                        thinking = null,
+                        isStreaming = false,
+                    )
+                    finished = true
+                } finally {
+                    if (!finished && isActive) {
+                        chatRepository.updateMessageContent(
+                            assistantId,
+                            content = contentBuffer,
+                            thinking = thinkingBuffer.ifBlank { null },
+                            isStreaming = false,
+                        )
+                    }
+                    isSending.value = false
                 }
-                isSending.value = false
             }
         }
     }

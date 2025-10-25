@@ -4,6 +4,12 @@ plugins {
     kotlin("kapt")
 }
 
+import com.android.build.gradle.internal.cxx.configure.gradleLocalProperties
+
+val localProperties = gradleLocalProperties(rootDir)
+val openAiApiKey = localProperties.getProperty("openai.apiKey") ?: ""
+val escapedOpenAiApiKey = openAiApiKey.replace("\"", "\\\"")
+
 android {
     namespace = "com.example.htmlapp"
     compileSdk = 34
@@ -15,6 +21,7 @@ android {
         versionCode = 1
         versionName = "1.0.0"
         resourceConfigurations += listOf("en", "zh")
+        buildConfigField("String", "OPENAI_API_KEY", "\"$escapedOpenAiApiKey\"")
     }
 
     buildTypes {
@@ -41,7 +48,7 @@ android {
 
     buildFeatures {
         compose = true
-        buildConfig = false
+        buildConfig = true
     }
 
     composeOptions {
