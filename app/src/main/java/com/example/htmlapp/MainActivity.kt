@@ -92,6 +92,7 @@ class MainActivity : AppCompatActivity() {
     private var hasShownConnectionStartError = false
     private var lastKnownConnectionVisibility: Boolean? = null
     private var connectionServiceRequested = false
+    private var hasShownConnectionRetry = false
     private var isConnectionServiceRunning = false
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
@@ -441,16 +442,29 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleConnectionEvent(event: ConnectionService.ConnectionEvent) {
         deliverConnectionEvent(event.type, event.payload)
-        if (
-            event is ConnectionService.ConnectionEvent.Error &&
-            isAppInForeground &&
-            connectionServiceRequested
-        ) {
-            Toast.makeText(
-                this,
-                getString(R.string.service_retrying) + " (" + (event.payload ?: "") + ")",
-                Toast.LENGTH_SHORT
-            ).show()
+        when (event) {
+            is ConnectionService.ConnectionEvent.Status -> {
+                if (event.payload == ConnectionService.ConnectionState.CONNECTED.label) {
+                    hasShownConnectionRetry = false
+                }
+            }
+
+            is ConnectionService.ConnectionEvent.Error -> {
+                if (
+                    !hasShownConnectionRetry &&
+                    isAppInForeground &&
+                    connectionServiceRequested
+                ) {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.service_retrying) + " (" + (event.payload ?: "") + ")",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    hasShownConnectionRetry = true
+                }
+            }
+
+            else -> Unit
         }
     }
 
@@ -576,6 +590,7 @@ class MainActivity : AppCompatActivity() {
             if (connectionServiceRequested) {
                 connectionServiceRequested = false
                 pendingConnectionEvents.clear()
+                hasShownConnectionRetry = false
             }
         }
         refreshConnectionServiceState()
@@ -628,6 +643,7 @@ class MainActivity : AppCompatActivity() {
     private fun requestConnectionService() {
         if (!connectionServiceRequested) {
             connectionServiceRequested = true
+            hasShownConnectionRetry = false
         }
         maybeStartConnectionService()
     }
@@ -704,6 +720,7 @@ class MainActivity : AppCompatActivity() {
             if (!isConnectionServiceEnabled) {
                 connectionServiceRequested = false
             }
+            hasShownConnectionRetry = false
             return
         }
 
@@ -755,6 +772,7 @@ class MainActivity : AppCompatActivity() {
         isConnectionServiceRunning = false
         isConnectionServiceEnabled = false
         connectionServiceRequested = false
+        hasShownConnectionRetry = false
         pendingConnectionEvents.clear()
         if (!hasShownConnectionStartError && isAppInForeground && !(isFinishing || isDestroyed)) {
             Toast.makeText(this, getString(R.string.service_start_failed), Toast.LENGTH_LONG).show()
