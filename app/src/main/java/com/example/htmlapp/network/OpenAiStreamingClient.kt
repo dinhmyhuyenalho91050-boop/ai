@@ -69,7 +69,18 @@ class OpenAiStreamingClient(
 
         httpClient.newCall(httpRequest).execute().use { response ->
             val source = response.body?.source() ?: return@use
-            readSseStream(source, onEvent)
+            val terminated = readSseStream(source) { payload ->
+                if (payload == "[DONE]") {
+                    onEvent(ChatStreamDelta(isComplete = true))
+                    return@readSseStream false
+                }
+                val element = ChatJsonFormat.parseToJsonElement(payload)
+                dispatchOpenAiDelta(element, onEvent)
+                true
+            }
+            if (!terminated) {
+                onEvent(ChatStreamDelta(isComplete = true))
+            }
         }
     }
 
@@ -114,14 +125,21 @@ class OpenAiStreamingClient(
 
         httpClient.newCall(httpRequest).execute().use { response ->
             val source = response.body?.source() ?: return@use
-            readSseStream(source, onEvent)
+            val terminated = readSseStream(source) { payload ->
+                val element = ChatJsonFormat.parseToJsonElement(payload)
+                return@readSseStream dispatchGeminiDelta(element, onEvent)
+            }
+            if (!terminated) {
+                onEvent(ChatStreamDelta(isComplete = true))
+            }
         }
     }
 
     private suspend fun readSseStream(
         source: BufferedSource,
-        onEvent: suspend (ChatStreamDelta) -> Unit,
-    ) {
+        handlePayload: suspend (String) -> Boolean,
+    ): Boolean {
+        var terminatedEarly = false
         while (!source.exhausted()) {
             val line = source.readUtf8Line() ?: continue
             if (line.isBlank()) continue
@@ -130,17 +148,17 @@ class OpenAiStreamingClient(
             } else {
                 line.trim()
             }
-            if (payload == "[DONE]") {
-                onEvent(ChatStreamDelta(isComplete = true))
+            if (payload.isEmpty()) continue
+            val shouldContinue = handlePayload(payload)
+            if (!shouldContinue) {
+                terminatedEarly = true
                 break
             }
-            if (payload.isEmpty()) continue
-            val element = ChatJsonFormat.parseToJsonElement(payload)
-            dispatchDelta(element, onEvent)
         }
+        return terminatedEarly
     }
 
-    private suspend fun dispatchDelta(
+    private suspend fun dispatchOpenAiDelta(
         element: JsonElement,
         onEvent: suspend (ChatStreamDelta) -> Unit,
     ) {
@@ -173,6 +191,61 @@ class OpenAiStreamingClient(
         if (finishReason != null) {
             onEvent(ChatStreamDelta(isComplete = true))
         }
+    }
+
+    private suspend fun dispatchGeminiDelta(
+        element: JsonElement,
+        onEvent: suspend (ChatStreamDelta) -> Unit,
+    ): Boolean {
+        val obj = element as? JsonObject ?: return true
+        val candidates = obj["candidates"]?.jsonArray
+
+        val contentBuilder = StringBuilder()
+        var hasContent = false
+        var shouldTerminate = false
+
+        candidates?.forEach { candidateElement ->
+            val candidate = candidateElement.jsonObject
+            val parts = candidate["content"]?.jsonObject?.get("parts")?.jsonArray.orEmpty()
+            parts.forEach { part ->
+                val partObj = part as? JsonObject ?: return@forEach
+                val text = partObj["text"]?.stringValue().orEmpty()
+                if (text.isNotEmpty()) {
+                    hasContent = true
+                    contentBuilder.append(text)
+                }
+            }
+
+            val finishReason = candidate["finishReason"]?.stringValue()
+                ?: candidate["finish_reason"]?.stringValue()
+            if (!finishReason.isNullOrBlank()) {
+                shouldTerminate = true
+            }
+        }
+
+        val usage = obj["usageMetadata"]?.jsonObject?.let { usageObj ->
+            Usage(
+                promptTokens = usageObj["promptTokenCount"]?.intValue(),
+                completionTokens = usageObj["candidatesTokenCount"]?.intValue(),
+                totalTokens = usageObj["totalTokenCount"]?.intValue(),
+            )
+        }
+
+        if (hasContent || usage != null) {
+            onEvent(
+                ChatStreamDelta(
+                    contentDelta = if (hasContent) contentBuilder.toString() else null,
+                    usage = usage,
+                )
+            )
+        }
+
+        if (shouldTerminate || obj.containsKey("promptFeedback")) {
+            onEvent(ChatStreamDelta(isComplete = true))
+            return false
+        }
+
+        return true
     }
 
     private fun JsonPrimitive.stringContentOrNull(): String? =

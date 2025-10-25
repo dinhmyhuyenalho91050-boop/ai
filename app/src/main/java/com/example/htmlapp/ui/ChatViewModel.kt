@@ -160,6 +160,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             isSending.value = true
             val userMessage = repository.appendUserMessage(sessionId, text, modelId)
             composer.value = ""
+            val requestMessages = repository
+                .messagesForSession(sessionId)
+                .map { payloadForMessage(it) }
             val assistantId = UUID.randomUUID().toString()
             var assistantMessage = ChatMessage(
                 id = assistantId,
@@ -175,13 +178,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             streamingJob?.cancel()
             streamingJob = viewModelScope.launch {
-                val history = repository.messagesForSession(sessionId)
                 val request = ChatRequest(
                     modelId = modelId,
                     provider = modelPreset.provider,
                     apiKey = providerSettings.apiKey,
                     baseUrl = providerSettings.baseUrl.ifBlank { defaultBaseUrl(modelPreset.provider) },
-                    messages = history.map { payloadForMessage(it) },
+                    messages = requestMessages,
                     reasoningEffort = settings.reasoningEffort,
                 )
                 try {
