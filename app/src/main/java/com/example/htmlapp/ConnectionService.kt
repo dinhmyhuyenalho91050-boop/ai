@@ -297,7 +297,7 @@ class ConnectionService : Service() {
             setPackage(packageName)
             putExtra(EXTRA_EVENT_TYPE, event.type)
             event.payload?.let { putExtra(EXTRA_PAYLOAD, it) }
-        })
+        }, PERMISSION_CONNECTION_EVENT)
     }
 
     fun setClientVisibility(visible: Boolean) {
@@ -448,6 +448,7 @@ class ConnectionService : Service() {
         private const val ACTION_VISIBILITY = "com.example.htmlapp.action.VISIBILITY"
         private const val ACTION_STOP = "com.example.htmlapp.action.STOP"
         const val ACTION_EVENT = "com.example.htmlapp.action.EVENT"
+        const val PERMISSION_CONNECTION_EVENT = "com.example.htmlapp.permission.CONNECTION_EVENT"
         const val EXTRA_EVENT_TYPE = "extra_event_type"
         const val EXTRA_ENDPOINT = "extra_endpoint"
         const val EXTRA_PAYLOAD = "extra_payload"

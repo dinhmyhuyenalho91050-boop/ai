@@ -208,10 +208,21 @@ class MainActivity : AppCompatActivity() {
         setupBackNavigation()
         val connectionEventFilter = IntentFilter(ConnectionService.ACTION_EVENT)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(connectionEventReceiver, connectionEventFilter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(
+                connectionEventReceiver,
+                connectionEventFilter,
+                ConnectionService.PERMISSION_CONNECTION_EVENT,
+                null,
+                Context.RECEIVER_NOT_EXPORTED
+            )
         } else {
             @Suppress("DEPRECATION")
-            registerReceiver(connectionEventReceiver, connectionEventFilter)
+            registerReceiver(
+                connectionEventReceiver,
+                connectionEventFilter,
+                ConnectionService.PERMISSION_CONNECTION_EVENT,
+                null
+            )
         }
         isConnectionEventReceiverRegistered = true
         handleAppVisibility(true)
