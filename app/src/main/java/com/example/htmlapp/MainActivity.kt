@@ -293,6 +293,7 @@ class MainActivity : AppCompatActivity() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 isPageReady = false
+                lastVisibilityState = null
             }
 
             override fun shouldOverrideUrlLoading(
