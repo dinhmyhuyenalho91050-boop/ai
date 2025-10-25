@@ -16,7 +16,6 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
-import android.util.Base64
 import android.util.Log
 import android.view.View
 import android.webkit.JavascriptInterface
@@ -53,6 +52,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import kotlin.math.max
+import kotlin.text.Charsets
 
 class MainActivity : AppCompatActivity() {
 
@@ -438,16 +438,16 @@ private class DownloadBridge(activity: MainActivity) {
     }
 
     @JavascriptInterface
-    fun saveFile(filename: String, base64Data: String): String {
+    fun saveFile(filename: String, jsonText: String): String {
         val safeName = filename.ifBlank { "backup-${UUID.randomUUID()}.json" }
         return try {
             ioExecutor.execute {
-                val (success, location) = performSave(safeName, base64Data)
+                val (success, location) = performSave(safeName, jsonText)
                 notify(success, location)
             }
             SAVE_PENDING
         } catch (e: RejectedExecutionException) {
-            val (success, location) = performSave(safeName, base64Data)
+            val (success, location) = performSave(safeName, jsonText)
             notify(success, location)
             location ?: ""
         }
@@ -462,9 +462,9 @@ private class DownloadBridge(activity: MainActivity) {
         }
     }
 
-    private fun performSave(filename: String, base64Data: String): Pair<Boolean, String?> {
+    private fun performSave(filename: String, jsonText: String): Pair<Boolean, String?> {
         return try {
-            val data = Base64.decode(base64Data, Base64.DEFAULT)
+            val data = jsonText.toByteArray(Charsets.UTF_8)
             val location = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 saveToMediaStore(filename, data)
             } else {

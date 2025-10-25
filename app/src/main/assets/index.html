@@ -961,6 +961,7 @@ class StorageManager{
   static _messagesObserverTarget=null;
   static _messagesObserverHandler=null;
   static _sessionCache=null;
+  static _legacySnapshot=null;
 
   static registerMessagesObserverHandler(handler){
     this._messagesObserverHandler=typeof handler==='function'?handler:null;
@@ -1223,9 +1224,12 @@ class StorageManager{
 
   static seedSessionsCache(sessions){
     this._sessionCache=new Map();
+    this._legacySnapshot={};
     const source=sessions||{};
     Object.keys(source).forEach(id=>{
-      this._sessionCache.set(id,this._createCacheEntry(source[id]));
+      const entry=this._createCacheEntry(source[id]);
+      this._sessionCache.set(id,entry);
+      this._legacySnapshot[id]=entry.data;
     });
   }
 
@@ -1278,10 +1282,12 @@ class StorageManager{
     const ids=Object.keys(allSessions||{});
     const indexKey=this._sessionIndexKey();
     const nextCache=new Map();
+    const legacySnapshot={};
 
     const writePromises=ids.map(id=>{
       const entry=this._createCacheEntry(allSessions[id]);
       nextCache.set(id,entry);
+      legacySnapshot[id]=entry.data;
       previousIds.delete(id);
       return this.save(this._sessionKey(id),entry.data);
     });
@@ -1292,9 +1298,10 @@ class StorageManager{
     });
 
     this._sessionCache=nextCache;
+    this._legacySnapshot=legacySnapshot;
 
     writePromises.push(this.save(indexKey,ids));
-    writePromises.push(this.save(CONFIG.STORAGE_KEYS.sessions,this._materializeLegacySessions()));
+    writePromises.push(this.save(CONFIG.STORAGE_KEYS.sessions,this._legacySnapshot));
 
     return Promise.all([...writePromises,...deletePromises]);
   }
@@ -1307,6 +1314,8 @@ class StorageManager{
 
     const writes=[];
     let changed=false;
+    if(!this._legacySnapshot)this._legacySnapshot={};
+    const legacySnapshot=this._legacySnapshot;
 
     dirtyIds.forEach(id=>{
       if(id==null)return;
@@ -1316,6 +1325,7 @@ class StorageManager{
       if(!entry){
         entry=this._createCacheEntry(session);
         this._sessionCache.set(id,entry);
+        legacySnapshot[id]=entry.data;
         writes.push(this.save(this._sessionKey(id),entry.data));
         changed=true;
         return;
@@ -1334,12 +1344,14 @@ class StorageManager{
         writes.push(this.save(this._sessionKey(id),entry.data));
         changed=true;
       }
+      legacySnapshot[id]=entry.data;
     });
 
     removedIds.forEach(id=>{
       if(id==null)return;
       if(this._sessionCache&&this._sessionCache.has(id)){
         this._sessionCache.delete(id);
+        delete legacySnapshot[id];
         writes.push(this._executeDelete(this._sessionKey(id)));
         changed=true;
       }
@@ -1347,7 +1359,7 @@ class StorageManager{
 
     if(!changed)return Promise.resolve();
     writes.push(this.save(this._sessionIndexKey(),Array.from(this._sessionCache.keys())));
-    writes.push(this.save(CONFIG.STORAGE_KEYS.sessions,this._materializeLegacySessions()));
+    writes.push(this.save(CONFIG.STORAGE_KEYS.sessions,legacySnapshot));
     return Promise.all(writes);
   }
 
@@ -3609,8 +3621,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const pendingToken='__NATIVE_PENDING__';
     if(window.HtmlAppNative && typeof window.HtmlAppNative.saveFile === 'function'){
       try{
-        const base64 = btoa(unescape(encodeURIComponent(text)));
-        const response = window.HtmlAppNative.saveFile(filename, base64);
+        const response = window.HtmlAppNative.saveFile(filename, text);
         if(typeof response === 'string'){
           const trimmed=response.trim();
           if(trimmed===pendingToken){
