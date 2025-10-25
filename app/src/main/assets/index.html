@@ -1820,34 +1820,45 @@ class APIManager{
     if(cfg.stream){
       const reader=res.body.getReader();
       const decoder=new TextDecoder();
-      let buffer='',full='',thinking='';
-      
-      while(true){
-        const{done,value}=await reader.read();
-        if(done)break;
-        buffer+=decoder.decode(value,{stream:true});
-        const lines=buffer.split('\n');
-        buffer=lines.pop()||'';
-        
-        for(const raw of lines){
-          const line=raw.trim();
-          if(!line.startsWith('data:'))continue;
-          const data=line.slice(5).trim();
-          if(data==='[DONE]')continue;
-          
-          try{
-            const json=JSON.parse(data);
-            const delta=json?.choices?.[0]?.delta?.content||'';
-            const thinkDelta=json?.choices?.[0]?.delta?.reasoning_content||'';
-            if(thinkDelta)thinking+=thinkDelta;
-            if(delta){
-              full+=delta;
-              onDelta&&onDelta(full,thinking);
-            }
-          }catch{}
+      let buffer='',full='',thinking='',aborted=false;
+      const onAbort=()=>{
+        aborted=true;
+        try{reader.cancel();}catch{}
+      };
+      signal?.addEventListener?.('abort',onAbort);
+      try{
+        while(true){
+          if(aborted)break;
+          const{done,value}=await reader.read();
+          if(aborted)break;
+          if(done)break;
+          buffer+=decoder.decode(value,{stream:true});
+          const lines=buffer.split('\n');
+          buffer=lines.pop()||'';
+
+          for(const raw of lines){
+            const line=raw.trim();
+            if(!line.startsWith('data:'))continue;
+            const data=line.slice(5).trim();
+            if(data==='[DONE]')continue;
+
+            try{
+              const json=JSON.parse(data);
+              const delta=json?.choices?.[0]?.delta?.content||'';
+              const thinkDelta=json?.choices?.[0]?.delta?.reasoning_content||'';
+              if(thinkDelta)thinking+=thinkDelta;
+              if(delta){
+                full+=delta;
+                onDelta&&onDelta(full,thinking);
+              }
+            }catch{}
+          }
         }
+        if(aborted)throw new DOMException('Aborted','AbortError');
+        return{content:full||'(空响应)',thinking};
+      }finally{
+        signal?.removeEventListener?.('abort',onAbort);
       }
-      return{content:full||'(空响应)',thinking};
     }else{
       const data=await res.json();
       const content=data?.choices?.[0]?.message?.content||'(空响应)';
@@ -1937,34 +1948,46 @@ if (isProxy && cfg.proxyPass) headers.Authorization = `Bearer ${cfg.proxyPass}`;
     if(cfg.stream){
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let pending = '', eventData = '', full = '', thinking = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        pending += decoder.decode(value, { stream: true });
-        let idx;
-        while ((idx = pending.indexOf('\n')) !== -1) {
-          const line = pending.slice(0, idx).trimEnd();
-          pending = pending.slice(idx + 1);
-          if (line === '') {
-            if (eventData) {
-              try {
-                const obj = JSON.parse(eventData);
-                const parts = obj?.candidates?.[0]?.content?.parts || [];
-                for (const p of parts) {
-                  if (p.thought) thinking += p.text || '';
-                  else if (p.text) full += p.text;
-                }
-                if (onDelta) onDelta(full, thinking, obj.usageMetadata);
-              } catch {}
-              eventData = '';
+      let pending = '', eventData = '', full = '', thinking = '', aborted=false;
+      const onAbort=()=>{
+        aborted=true;
+        try{reader.cancel();}catch{}
+      };
+      signal?.addEventListener?.('abort',onAbort);
+      try {
+        while (true) {
+          if (aborted) break;
+          const { done, value } = await reader.read();
+          if (aborted) break;
+          if (done) break;
+          pending += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = pending.indexOf('\n')) !== -1) {
+            const line = pending.slice(0, idx).trimEnd();
+            pending = pending.slice(idx + 1);
+            if (line === '') {
+              if (eventData) {
+                try {
+                  const obj = JSON.parse(eventData);
+                  const parts = obj?.candidates?.[0]?.content?.parts || [];
+                  for (const p of parts) {
+                    if (p.thought) thinking += p.text || '';
+                    else if (p.text) full += p.text;
+                  }
+                  if (onDelta) onDelta(full, thinking, obj.usageMetadata);
+                } catch {}
+                eventData = '';
+              }
+              continue;
             }
-            continue;
+            if (line.startsWith('data:')) eventData += line.slice(5).trim() + '\n';
           }
-          if (line.startsWith('data:')) eventData += line.slice(5).trim() + '\n';
         }
+        if (aborted) throw new DOMException('Aborted','AbortError');
+        return { content: full || '(空响应)', thinking };
+      } finally {
+        signal?.removeEventListener?.('abort',onAbort);
       }
-      return { content: full || '(空响应)', thinking };
     }else{
       const data=await res.json();
       const parts=data?.candidates?.[0]?.content?.parts||[];
