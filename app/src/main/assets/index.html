@@ -2985,6 +2985,19 @@ this.appendMessage({
     el.innerHTML=isStreaming?
       '<header><div class="role">ASSISTANT</div><div class="pill">回复中...</div></header><div class="body"><span class="typing-cursor"></span></div><footer style="display:none"></footer>':
       '<header><div class="role">ASSISTANT</div><div class="pill">思考中</div></header><div class="body"><span data-stream-prefix></span><span data-stream-tail></span></div><footer style="display:none"></footer>';
+
+    if(typeof window!=='undefined'){
+      try{
+        const bodyEl=el.querySelector('.body');
+        if(typeof window.__resetStreamState==='function'){
+          window.__resetStreamState(el);
+          if(bodyEl)window.__resetStreamState(bodyEl);
+        }else if(window.__streamState&&typeof window.__streamState.delete==='function'){
+          window.__streamState.delete(el);
+          if(bodyEl)window.__streamState.delete(bodyEl);
+        }
+      }catch(_){/* ignore */}
+    }
     
     requestAnimationFrame(()=>{
   this.dom.batchUpdate(()=>{
@@ -4866,6 +4879,14 @@ if(document.readyState==='loading'){
       window.__streamState.set(el, st);
     }
     return st;
+  };
+  window.__resetStreamState = function(el){
+    if(!el||!window.__streamState)return;
+    try{
+      if(window.__streamState.delete){
+        window.__streamState.delete(el);
+      }
+    }catch(_){/* ignore */}
   };
 })();
 // === End StreamB ===
