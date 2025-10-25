@@ -6,7 +6,7 @@ plugins {
 
 import com.android.build.gradle.internal.cxx.configure.gradleLocalProperties
 
-val localProperties = gradleLocalProperties(rootDir)
+val localProperties = gradleLocalProperties(rootDir, providers)
 val openAiApiKey = localProperties.getProperty("openai.apiKey") ?: ""
 val escapedOpenAiApiKey = openAiApiKey.replace("\"", "\\\"")
 
