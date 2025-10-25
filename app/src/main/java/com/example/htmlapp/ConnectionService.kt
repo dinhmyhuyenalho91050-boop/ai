@@ -59,7 +59,7 @@ class ConnectionService : Service() {
     private var lastStatusEvent: ConnectionEvent.Status? = null
 
     private val _events = MutableSharedFlow<ConnectionEvent>(
-        replay = 1,
+        replay = 0,
         extraBufferCapacity = 64,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
@@ -233,9 +233,14 @@ class ConnectionService : Service() {
         if (!shouldStayConnected.get()) {
             return
         }
-        webSocket?.cancel()
+        val previousSocket = webSocket
         webSocket = null
+        previousSocket?.cancel()
         connect()
+    }
+
+    private fun isCurrentSocket(socket: WebSocket): Boolean {
+        return socket === webSocket
     }
 
     private fun scheduleReconnect() {
@@ -262,26 +267,42 @@ class ConnectionService : Service() {
     private fun createListener(): WebSocketListener {
         return object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (!isCurrentSocket(webSocket)) {
+                    return
+                }
                 currentState = ConnectionState.CONNECTED
                 updateForegroundNotification(getString(R.string.service_connected))
                 dispatchStatus(ConnectionState.CONNECTED)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (!isCurrentSocket(webSocket)) {
+                    return
+                }
                 handleIncomingPayload(text)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (!isCurrentSocket(webSocket)) {
+                    return
+                }
                 handleIncomingPayload(bytes.utf8())
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                if (!isCurrentSocket(webSocket)) {
+                    return
+                }
                 currentState = ConnectionState.DISCONNECTED
                 dispatchStatus(ConnectionState.DISCONNECTED)
                 updateForegroundNotification(getString(R.string.service_disconnected))
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (!isCurrentSocket(webSocket)) {
+                    return
+                }
+                this@ConnectionService.webSocket = null
                 currentState = ConnectionState.DISCONNECTED
                 dispatchStatus(ConnectionState.DISCONNECTED)
                 updateForegroundNotification(getString(R.string.service_disconnected))
@@ -289,6 +310,10 @@ class ConnectionService : Service() {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (!isCurrentSocket(webSocket)) {
+                    return
+                }
+                this@ConnectionService.webSocket = null
                 currentState = ConnectionState.DISCONNECTED
                 dispatchStatus(ConnectionState.DISCONNECTED)
                 updateForegroundNotification(getString(R.string.service_retrying))
