@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.material.card.MaterialCardView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="12dp"
+    app:cardCornerRadius="12dp"
+    app:cardElevation="2dp"
+    app:strokeColor="@color/border"
+    app:strokeWidth="1dp"
+    app:cardBackgroundColor="@color/panel_dark">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="☰"
+                android:textSize="16sp"
+                android:textColor="@color/muted"
+                android:paddingHorizontal="8dp"/>
+
+            <EditText
+                android:id="@+id/ruleName"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="规则名称(可选)"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:background="@drawable/bg_input_field"
+                android:padding="10dp"/>
+
+            <ImageButton
+                android:id="@+id/btnRemoveRule"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:src="@drawable/ic_close"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:tint="@color/danger"
+                android:layout_marginStart="8dp"/>
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="查找正则表达式"
+            android:textSize="11sp"
+            android:textColor="@color/muted"
+            android:textStyle="bold"
+            android:textAllCaps="true"
+            android:letterSpacing="0.05"
+            android:layout_marginBottom="6dp"/>
+
+        <EditText
+            android:id="@+id/rulePattern"
+            android:layout_width="match_parent"
+            android:layout_height="80dp"
+            android:hint="例如: \\bAI\\b"
+            android:textSize="13sp"
+            android:textColor="@color/fg"
+            android:textColorHint="@color/muted"
+            android:fontFamily="monospace"
+            android:background="@drawable/bg_input_field"
+            android:padding="10dp"
+            android:gravity="top"
+            android:inputType="textMultiLine"
+            android:layout_marginBottom="12dp"/>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="替换为"
+            android:textSize="11sp"
+            android:textColor="@color/muted"
+            android:textStyle="bold"
+            android:textAllCaps="true"
+            android:letterSpacing="0.05"
+            android:layout_marginBottom="6dp"/>
+
+        <EditText
+            android:id="@+id/ruleReplacement"
+            android:layout_width="match_parent"
+            android:layout_height="80dp"
+            android:hint="例如: 人工智能"
+            android:textSize="13sp"
+            android:textColor="@color/fg"
+            android:textColorHint="@color/muted"
+            android:fontFamily="monospace"
+            android:background="@drawable/bg_input_field"
+            android:padding="10dp"
+            android:gravity="top"
+            android:inputType="textMultiLine"/>
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

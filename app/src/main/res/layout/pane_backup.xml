@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="20dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="数据备份与恢复"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="@color/fg"
+            android:layout_marginBottom="16dp"/>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="2dp"
+            app:strokeColor="@color/accent2"
+            app:strokeWidth="1dp"
+            app:cardBackgroundColor="@color/accent2_light">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="ℹ 存储说明"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/accent2"
+                    android:layout_marginBottom="8dp"/>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="使用 IndexedDB 存储，容量更大（几百MB），性能更好\n• 浏览器存储限制：通常为可用磁盘的 50%\n• 清除浏览器数据会导致数据丢失\n建议定期导出备份重要对话！"
+                    android:textSize="13sp"
+                    android:textColor="@color/fg"
+                    android:lineSpacingMultiplier="1.6"/>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="2dp"
+            app:strokeColor="@color/border"
+            app:strokeWidth="1dp"
+            app:cardBackgroundColor="@color/panel_gradient">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="导出数据"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/accent2"
+                    android:layout_marginBottom="8dp"/>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="导出所有模型预设、提示词预设和对话记录为JSON文件"
+                    android:textSize="13sp"
+                    android:textColor="@color/muted"
+                    android:layout_marginBottom="16dp"/>
+
+                <Button
+                    android:id="@+id/btnExportAll"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="📦 导出所有数据"
+                    style="@style/ButtonPrimary"
+                    android:layout_marginBottom="8dp"/>
+
+                <Button
+                    android:id="@+id/btnExportSessions"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="💬 仅导出对话记录"
+                    style="@style/ButtonNormal"
+                    android:layout_marginBottom="8dp"/>
+
+                <Button
+                    android:id="@+id/btnExportPresets"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="⚙️ 仅导出配置预设"
+                    style="@style/ButtonNormal"/>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="2dp"
+            app:strokeColor="@color/border"
+            app:strokeWidth="1dp"
+            app:cardBackgroundColor="@color/panel_gradient">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="导入数据"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/accent2"
+                    android:layout_marginBottom="8dp"/>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="从JSON备份文件恢复数据"
+                    android:textSize="13sp"
+                    android:textColor="@color/muted"
+                    android:layout_marginBottom="16dp"/>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="导入模式"
+                    android:textSize="13sp"
+                    android:textColor="@color/muted"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="8dp"/>
+
+                <Spinner
+                    android:id="@+id/importMode"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:background="@drawable/bg_input_field"
+                    android:paddingHorizontal="12dp"
+                    android:layout_marginBottom="16dp"/>
+
+                <Button
+                    android:id="@+id/btnImport"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="📥 选择文件导入"
+                    style="@style/ButtonPrimary"/>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="2dp"
+            app:strokeColor="@color/border"
+            app:strokeWidth="1dp"
+            app:cardBackgroundColor="@color/panel_gradient">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="存储信息"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/accent2"
+                    android:layout_marginBottom="16dp"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:layout_marginBottom="8dp">
+
+                        <TextView
+                            android:layout_width="120dp"
+                            android:layout_height="wrap_content"
+                            android:text="对话数量:"
+                            android:textSize="13sp"
+                            android:textColor="@color/muted"/>
+
+                        <TextView
+                            android:id="@+id/sessionCount"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="-"
+                            android:textSize="13sp"
+                            android:textColor="@color/fg"/>
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:layout_marginBottom="8dp">
+
+                        <TextView
+                            android:layout_width="120dp"
+                            android:layout_height="wrap_content"
+                            android:text="消息总数:"
+                            android:textSize="13sp"
+                            android:textColor="@color/muted"/>
+
+                        <TextView
+                            android:id="@+id/messageCount"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="-"
+                            android:textSize="13sp"
+                            android:textColor="@color/fg"/>
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:layout_marginBottom="8dp">
+
+                        <TextView
+                            android:layout_width="120dp"
+                            android:layout_height="wrap_content"
+                            android:text="模型预设:"
+                            android:textSize="13sp"
+                            android:textColor="@color/muted"/>
+
+                        <TextView
+                            android:id="@+id/modelPresetCount"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="-"
+                            android:textSize="13sp"
+                            android:textColor="@color/fg"/>
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:layout_marginBottom="8dp">
+
+                        <TextView
+                            android:layout_width="120dp"
+                            android:layout_height="wrap_content"
+                            android:text="提示词预设:"
+                            android:textSize="13sp"
+                            android:textColor="@color/muted"/>
+
+                        <TextView
+                            android:id="@+id/promptPresetCount"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="-"
+                            android:textSize="13sp"
+                            android:textColor="@color/fg"/>
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:layout_width="120dp"
+                            android:layout_height="wrap_content"
+                            android:text="预估大小:"
+                            android:textSize="13sp"
+                            android:textColor="@color/muted"/>
+
+                        <TextView
+                            android:id="@+id/dataSize"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="-"
+                            android:textSize="13sp"
+                            android:textColor="@color/fg"/>
+                    </LinearLayout>
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="2dp"
+            app:strokeColor="@color/danger"
+            app:strokeWidth="1dp"
+            app:cardBackgroundColor="@color/danger_light">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="🗑️ 危险操作"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/danger"
+                    android:layout_marginBottom="8dp"/>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="清空所有数据将无法恢复,请确保已导出备份"
+                    android:textSize="13sp"
+                    android:textColor="@color/muted"
+                    android:layout_marginBottom="12dp"/>
+
+                <Button
+                    android:id="@+id/btnClearAll"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="清空所有数据"
+                    style="@style/ButtonWarn"/>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+    </LinearLayout>
+</ScrollView>

@@ -1,541 +1,439 @@
 package com.example.htmlapp
 
-import android.annotation.SuppressLint
-import android.app.Activity
-import android.content.ActivityNotFoundException
-import android.content.ContentValues
-import android.content.Context
-import android.content.Intent
-import android.content.res.Configuration
-import android.graphics.Bitmap
-import android.graphics.Color
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.os.Handler
-import android.os.Looper
-import android.provider.MediaStore
-import android.util.Log
+import android.view.LayoutInflater
 import android.view.View
-import android.webkit.JavascriptInterface
-import android.webkit.ValueCallback
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.EditText
+import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.Spinner
+import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.addCallback
-import androidx.activity.result.ActivityResultLauncher
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.RequiresApi
+import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
-import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.core.view.isVisible
+import androidx.core.widget.addTextChangedListener
+import androidx.activity.viewModels
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
-import androidx.webkit.WebSettingsCompat
-import androidx.webkit.WebViewAssetLoader
-import androidx.webkit.WebViewFeature
-import java.io.File
-import java.io.FileOutputStream
-import java.lang.ref.WeakReference
-import java.util.Locale
-import java.util.UUID
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import java.util.concurrent.RejectedExecutionException
-import kotlin.math.max
-import kotlin.text.Charsets
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.recyclerview.widget.LinearLayoutManager
+import com.example.htmlapp.databinding.ActivityMainBinding
+import com.example.htmlapp.ui.HtmlAppUiState
+import com.example.htmlapp.ui.HtmlAppViewModel
+import com.example.htmlapp.ui.HtmlAppViewModelFactory
+import com.example.htmlapp.ui.adapter.ChatMessageAdapter
+import com.example.htmlapp.ui.adapter.SessionListAdapter
+import com.example.htmlapp.ui.widget.updateModelChips
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.bottomsheet.BottomSheetDialog
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import android.view.WindowManager
+import androidx.recyclerview.widget.RecyclerView
 
 class MainActivity : AppCompatActivity() {
-
-    private lateinit var webView: WebView
-    private lateinit var assetLoader: WebViewAssetLoader
-    private lateinit var downloadBridge: DownloadBridge
-    private var filePathCallback: ValueCallback<Array<Uri>>? = null
-    private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
-    private var isAppInForeground = true
-    private var isStreaming = false
-    private var areTimersPaused = false
-    private var areImagesBlocked = false
-    private var lastVisibilityState: String? = null
-    private var lastRendererPriority: Int? = null
-    private var lastRendererWaived: Boolean? = null
-    private var isPageReady = false
-    private var pendingVisibilityState: String? = null
-    private val appVisibilityObserver = object : DefaultLifecycleObserver {
-        override fun onStart(owner: LifecycleOwner) {
-            handleAppVisibility(true)
-        }
-
-        override fun onStop(owner: LifecycleOwner) {
-            handleAppVisibility(false)
-        }
+    private val appContainer: AppContainer by lazy { AppContainer(applicationContext) }
+    private val viewModel: HtmlAppViewModel by viewModels {
+        HtmlAppViewModelFactory(
+            chatRepository = appContainer.chatRepository,
+            settingsRepository = appContainer.settingsRepository,
+            backupManager = appContainer.backupManager,
+            streamingClient = appContainer.streamingClient,
+            messageWindowManager = appContainer.messageWindowManager,
+            modelPresets = appContainer.modelPresets,
+        )
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
+    private lateinit var binding: ActivityMainBinding
+    private val sessionAdapter = SessionListAdapter(
+        onOpen = { sessionId ->
+            viewModel.onSelectSession(sessionId)
+            sessionsDialog?.dismiss()
+        },
+        onDelete = { sessionId -> viewModel.onDeleteSession(sessionId) },
+    )
+
+    private var isLoadingMore = false
+
+    private val messageAdapter = ChatMessageAdapter(
+        onLoadMore = {
+            isLoadingMore = true
+            viewModel.onLoadMore()
+        },
+        onDelete = { messageId -> viewModel.onDeleteMessage(messageId) },
+        onStopStreaming = { viewModel.onStopStreaming() },
+        onRegenerate = { viewModel.onRegenerateMessage(it) },
+    )
+
+    private var settingsDialog: android.app.Dialog? = null
+    private var settingsDialogView: View? = null
+    private var sessionsDialog: BottomSheetDialog? = null
+    private var sessionsDialogView: View? = null
+    private var isUpdatingComposer = false
+    private var lastRenderedMessageCount = 0
+    private var currentSettingsTab = SettingsTab.MODELS
+    private val promptPresetAdapter = PromptPresetAdapter()
+    private var latestUiState: HtmlAppUiState? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-
+        enableEdgeToEdge()
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
-        val root = findViewById<View>(R.id.root_container)
-        webView = findViewById(R.id.webview)
-        isPageReady = false
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
 
-        fileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            val callback = filePathCallback
-            if (callback == null) {
-                return@registerForActivityResult
+        setupMessageList()
+        setupComposer()
+        setupActions()
+        collectState()
+    }
+
+    private fun setupMessageList() {
+        binding.messagesRecyclerView.apply {
+            adapter = messageAdapter
+            layoutManager = LinearLayoutManager(this@MainActivity).apply {
+                stackFromEnd = true
             }
+        }
+    }
 
-            val data = result.data
-            if (result.resultCode == Activity.RESULT_OK && data != null) {
-                val uris = mutableListOf<Uri>()
-                val clipData = data.clipData
-                if (clipData != null) {
-                    for (i in 0 until clipData.itemCount) {
-                        clipData.getItemAt(i)?.uri?.let { uris.add(it) }
-                    }
-                } else {
-                    data.data?.let { uris.add(it) }
-                }
-                callback.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray())
-            } else {
-                callback.onReceiveValue(null)
-            }
-            filePathCallback = null
+    private fun setupComposer() {
+        binding.btnSend.setOnClickListener {
+            viewModel.onSendMessage()
         }
 
-        configureWebView()
-        setupWindowInsets(root)
-        setupBackNavigation()
-        handleAppVisibility(true)
-        notifyWebVisibility("foreground")
-        ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver)
+        binding.inputMessage.addTextChangedListener { text ->
+            if (isUpdatingComposer) return@addTextChangedListener
+            viewModel.onComposerChange(text?.toString().orEmpty())
+        }
+    }
 
-        if (savedInstanceState != null) {
-            webView.restoreState(savedInstanceState)
+    private fun setupActions() {
+        binding.btnSessions.setOnClickListener {
+            showSessionsDialog(latestUiState ?: viewModel.uiState.value)
+        }
+        binding.btnSettings.setOnClickListener {
+            viewModel.onOpenSettings()
+        }
+    }
+
+    private fun collectState() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.uiState.collectLatest { state ->
+                    renderState(state)
+                }
+            }
+        }
+    }
+
+    private fun renderState(state: HtmlAppUiState) {
+        latestUiState = state
+        updateSessions(state)
+        updateModels(state)
+        updateMessages(state)
+        updateComposer(state)
+        updateControls(state)
+        handleToast(state)
+        updateSettingsDialog(state)
+        updateSessionsDialog(state)
+        if (state.isSettingsVisible) {
+            showSettingsDialog(state)
         } else {
-            webView.loadUrl("https://appassets.androidplatform.net/assets/index.html")
+            settingsDialog?.dismiss()
         }
     }
 
-    private fun configureWebView() {
-        webView.setBackgroundColor(Color.TRANSPARENT)
-        assetLoader = WebViewAssetLoader.Builder()
-            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
-            .addPathHandler("/res/", WebViewAssetLoader.ResourcesPathHandler(this))
-            .build()
+    private fun updateSessions(state: HtmlAppUiState) {
+        sessionAdapter.submitList(state.sessions)
+    }
 
-        val settings = webView.settings
-        with(settings) {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            allowFileAccess = true
-            allowContentAccess = true
-            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            useWideViewPort = true
-            loadWithOverviewMode = true
-            setSupportZoom(false)
-            builtInZoomControls = false
-            displayZoomControls = false
-            offscreenPreRaster = false
-        }
+    private fun updateModels(state: HtmlAppUiState) {
+        binding.modelSelector.updateModelChips(
+            models = state.availableModels,
+            selectedModelId = state.selectedModelId,
+            onSelect = viewModel::onSelectModel,
+        )
+    }
 
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-            WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, true)
-        } else if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
-            @Suppress("DEPRECATION")
-            WebSettingsCompat.setForceDark(settings, WebSettingsCompat.FORCE_DARK_ON)
-        }
-
-        webView.isVerticalScrollBarEnabled = false
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
-                val method = WebView::class.java.getMethod(
-                    "setSafeBrowsingEnabled",
-                    Boolean::class.javaPrimitiveType
-                )
-                method.invoke(null, false)
-            } catch (_: Throwable) {
+    private fun updateMessages(state: HtmlAppUiState) {
+        val items = messageAdapter.buildItems(state.messages, state.canLoadMore)
+        val shouldScroll = !isLoadingMore && state.messages.size >= lastRenderedMessageCount
+        messageAdapter.submitList(items) {
+            if (shouldScroll && messageAdapter.itemCount > 0) {
+                binding.messagesRecyclerView.scrollToPosition(messageAdapter.itemCount - 1)
             }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
-        }
-        downloadBridge = DownloadBridge(this)
-        webView.addJavascriptInterface(downloadBridge, "HtmlAppNative")
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onShowFileChooser(
-                webView: WebView?,
-                filePathCallback: ValueCallback<Array<Uri>>?,
-                fileChooserParams: FileChooserParams?
-            ): Boolean {
-                this@MainActivity.filePathCallback?.onReceiveValue(null)
-                this@MainActivity.filePathCallback = filePathCallback
+        lastRenderedMessageCount = state.messages.size
+        isLoadingMore = false
+        binding.emptyState.isVisible = state.messages.isEmpty()
+    }
 
-                val intent = try {
-                    fileChooserParams?.createIntent()
-                        ?: Intent(Intent.ACTION_GET_CONTENT).apply {
-                            type = "*/*"
-                            addCategory(Intent.CATEGORY_OPENABLE)
-                        }
-                } catch (e: Exception) {
-                    Intent(Intent.ACTION_GET_CONTENT).apply {
-                        type = "*/*"
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                    }
-                }
-
-                return try {
-                    fileChooserLauncher.launch(intent)
-                    true
-                } catch (e: ActivityNotFoundException) {
-                    this@MainActivity.filePathCallback?.onReceiveValue(null)
-                    this@MainActivity.filePathCallback = null
-                    false
-                }
-            }
-        }
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                isPageReady = false
-                lastVisibilityState = null
-            }
-
-            override fun shouldOverrideUrlLoading(
-                view: WebView,
-                request: WebResourceRequest
-            ): Boolean {
-                if (!request.isForMainFrame) {
-                    return false
-                }
-                val url = request.url
-                val scheme = url.scheme?.lowercase(Locale.ROOT)
-                if (scheme == "http" || scheme == "https") {
-                    return false
-                }
-                return try {
-                    startActivity(Intent(Intent.ACTION_VIEW, url))
-                    true
-                } catch (e: ActivityNotFoundException) {
-                    Log.w("MainActivity", "No activity found to handle $url", e)
-                    false
-                }
-            }
-
-            override fun onPageFinished(view: WebView, url: String?) {
-                super.onPageFinished(view, url)
-                isPageReady = true
-                dispatchPendingVisibility()
-                val lifecycle = ProcessLifecycleOwner.get().lifecycle
-                val state = if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                    "foreground"
-                } else {
-                    "background"
-                }
-                notifyWebVisibility(state)
-            }
-
-            override fun shouldInterceptRequest(
-                view: WebView,
-                request: WebResourceRequest
-            ): WebResourceResponse? {
-                return assetLoader.shouldInterceptRequest(request.url)
-            }
+    private fun updateComposer(state: HtmlAppUiState) {
+        val current = binding.inputMessage.text?.toString().orEmpty()
+        if (current != state.composerText) {
+            isUpdatingComposer = true
+            binding.inputMessage.setText(state.composerText)
+            binding.inputMessage.setSelection(binding.inputMessage.text?.length ?: 0)
+            isUpdatingComposer = false
         }
     }
 
-    private fun setupWindowInsets(root: View) {
-        val controller = WindowInsetsControllerCompat(window, root)
-        controller.systemBarsBehavior =
-            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller.hide(WindowInsetsCompat.Type.systemBars())
-
-        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
-            v.setPadding(
-                systemBars.left,
-                systemBars.top,
-                systemBars.right,
-                max(systemBars.bottom, imeInsets.bottom)
-            )
-            insets
+    private fun updateControls(state: HtmlAppUiState) {
+        binding.btnSend.isEnabled = state.composerText.isNotBlank() && !state.isSending
+        binding.btnSend.text = if (state.isSending) {
+            getString(R.string.send_in_progress)
+        } else {
+            getString(R.string.action_send)
         }
+        binding.progressSending.isVisible = state.isSending
     }
 
-    private fun setupBackNavigation() {
-        onBackPressedDispatcher.addCallback(this) {
-            if (this@MainActivity::webView.isInitialized && webView.canGoBack()) {
-                webView.goBack()
-            } else {
-                isEnabled = false
-                onBackPressedDispatcher.onBackPressed()
-            }
-        }
+    private fun handleToast(state: HtmlAppUiState) {
+        val message = state.toastMessage ?: return
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        viewModel.onDismissToast()
     }
 
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        val root = findViewById<View>(R.id.root_container)
-        setupWindowInsets(root)
-        if (this::webView.isInitialized) {
-            webView.postInvalidate()
-        }
-    }
+    private fun showSettingsDialog(state: HtmlAppUiState) {
+        if (settingsDialog?.isShowing == true) return
+        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_settings, null)
+        settingsDialogView = dialogView
 
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            val root = findViewById<View>(R.id.root_container)
-            WindowInsetsControllerCompat(window, root).let {
-                it.systemBarsBehavior =
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                it.hide(WindowInsetsCompat.Type.systemBars())
-            }
+        dialogView.findViewById<ImageButton>(R.id.btnCloseSettings)?.setOnClickListener {
+            settingsDialog?.dismiss()
         }
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        if (this::webView.isInitialized) {
-            webView.saveState(outState)
+        dialogView.findViewById<Button>(R.id.btnCancelSettings)?.setOnClickListener {
+            settingsDialog?.dismiss()
         }
-    }
-
-    override fun onDestroy() {
-        if (this::webView.isInitialized) {
-            webView.apply {
-                loadUrl("about:blank")
-                stopLoading()
-                clearHistory()
-                removeAllViews()
-                destroy()
-            }
-        }
-        if (this::downloadBridge.isInitialized) {
-            downloadBridge.dispose()
-        }
-        ProcessLifecycleOwner.get().lifecycle.removeObserver(appVisibilityObserver)
-        super.onDestroy()
-    }
-
-    private fun notifyWebVisibility(state: String) {
-        if (!this::webView.isInitialized) return
-        pendingVisibilityState = state
-        if (!isPageReady) {
-            return
-        }
-        dispatchVisibilityState(state)
-    }
-
-    private fun dispatchVisibilityState(state: String) {
-        if (!this::webView.isInitialized) return
-        if (state == lastVisibilityState) {
-            return
-        }
-        lastVisibilityState = state
-        webView.post {
-            webView.evaluateJavascript(
-                "window.__setNativeVisibility && window.__setNativeVisibility('$state');",
-                null
+        dialogView.findViewById<Button>(R.id.btnApplySettings)?.setOnClickListener {
+            val current = latestUiState ?: state
+            viewModel.onUpdateSettings(
+                apiKey = current.apiKey,
+                baseUrl = current.baseUrlOverride,
+                enableMock = current.enableMockResponses,
             )
         }
-    }
 
-    private fun dispatchPendingVisibility() {
-        val state = pendingVisibilityState ?: return
-        dispatchVisibilityState(state)
-    }
-
-    private fun handleAppVisibility(isForeground: Boolean) {
-        val changed = isAppInForeground != isForeground
-        isAppInForeground = isForeground
-        updateWebViewActivityState()
-        if (changed) {
-            notifyWebVisibility(if (isForeground) "foreground" else "background")
+        dialogView.findViewById<Button>(R.id.tabModels)?.setOnClickListener {
+            selectSettingsTab(SettingsTab.MODELS, latestUiState ?: state)
         }
-    }
-
-    fun onStreamingStateChanged(active: Boolean) {
-        if (!this::webView.isInitialized) return
-        if (isStreaming == active) return
-        isStreaming = active
-        updateWebViewActivityState()
-    }
-
-    private fun updateWebViewActivityState() {
-        if (!this::webView.isInitialized) return
-        val shouldKeepActive = shouldKeepWebViewActive()
-        if (shouldKeepActive) {
-            if (areImagesBlocked) {
-                webView.settings.blockNetworkImage = false
-                areImagesBlocked = false
-            }
-            if (areTimersPaused) {
-                webView.onResume()
-                webView.resumeTimers()
-                areTimersPaused = false
-            }
-        } else {
-            if (!areImagesBlocked) {
-                webView.settings.blockNetworkImage = true
-                areImagesBlocked = true
-            }
-            if (!areTimersPaused) {
-                webView.onPause()
-                webView.pauseTimers()
-                areTimersPaused = true
-            }
+        dialogView.findViewById<Button>(R.id.tabPrompts)?.setOnClickListener {
+            selectSettingsTab(SettingsTab.PROMPTS, latestUiState ?: state)
+        }
+        dialogView.findViewById<Button>(R.id.tabBackup)?.setOnClickListener {
+            selectSettingsTab(SettingsTab.BACKUP, latestUiState ?: state)
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val desiredPriority = if (shouldKeepActive) {
-                WebView.RENDERER_PRIORITY_IMPORTANT
+        settingsDialog = MaterialAlertDialogBuilder(this)
+            .setView(dialogView)
+            .setOnDismissListener {
+                settingsDialog = null
+                settingsDialogView = null
+                currentSettingsTab = SettingsTab.MODELS
+                viewModel.onDismissSettings()
+            }
+            .create()
+
+        settingsDialog?.show()
+        settingsDialog?.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        settingsDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        selectSettingsTab(currentSettingsTab, state)
+    }
+
+    private fun updateSettingsDialog(state: HtmlAppUiState) {
+        val dialogView = settingsDialogView ?: return
+        dialogView.findViewById<Button>(R.id.btnApplySettings)?.isEnabled = !state.isBackupInProgress
+        dialogView.findViewById<Button>(R.id.btnExportAll)?.let { button ->
+            val baseLabel = (button.tag as? String) ?: button.text.toString().also { button.tag = it }
+            button.isEnabled = !state.isBackupInProgress
+            button.text = if (state.isBackupInProgress) {
+                getString(R.string.settings_exporting)
             } else {
-                WebView.RENDERER_PRIORITY_BOUND
-            }
-            val desiredWaived = !shouldKeepActive
-            if (desiredPriority != lastRendererPriority || desiredWaived != lastRendererWaived) {
-                webView.setRendererPriorityPolicy(desiredPriority, desiredWaived)
-                lastRendererPriority = desiredPriority
-                lastRendererWaived = desiredWaived
+                baseLabel
             }
         }
+        dialogView.findViewById<Button>(R.id.btnExportSessions)?.isEnabled = !state.isBackupInProgress
+        dialogView.findViewById<Button>(R.id.btnExportPresets)?.isEnabled = !state.isBackupInProgress
+        dialogView.findViewById<TextView>(R.id.sessionCount)?.text = state.sessions.size.toString()
+        dialogView.findViewById<TextView>(R.id.messageCount)?.text = state.messages.size.toString()
+        dialogView.findViewById<TextView>(R.id.modelPresetCount)?.text = state.availableModels.size.toString()
+        dialogView.findViewById<TextView>(R.id.promptPresetCount)?.text = "0"
+        dialogView.findViewById<TextView>(R.id.dataSize)?.text = "-"
     }
 
-    private fun shouldKeepWebViewActive(): Boolean {
-        return isAppInForeground || isStreaming
-    }
-}
+    private fun selectSettingsTab(tab: SettingsTab, state: HtmlAppUiState?) {
+        val dialogView = settingsDialogView ?: return
+        currentSettingsTab = tab
+        dialogView.findViewById<Button>(R.id.tabModels)?.isSelected = tab == SettingsTab.MODELS
+        dialogView.findViewById<Button>(R.id.tabPrompts)?.isSelected = tab == SettingsTab.PROMPTS
+        dialogView.findViewById<Button>(R.id.tabBackup)?.isSelected = tab == SettingsTab.BACKUP
 
-private class DownloadBridge(activity: MainActivity) {
-    private val activityRef = WeakReference(activity)
-    private val appContext = activity.applicationContext
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "bg-io").apply {
-            priority = Thread.MIN_PRIORITY
-            isDaemon = true
+        val container = dialogView.findViewById<ViewGroup>(R.id.settingsPaneContainer) ?: return
+        container.removeAllViews()
+        val layoutId = when (tab) {
+            SettingsTab.MODELS -> R.layout.pane_models
+            SettingsTab.PROMPTS -> R.layout.pane_prompts
+            SettingsTab.BACKUP -> R.layout.pane_backup
         }
+        LayoutInflater.from(this).inflate(layoutId, container, true)
+        when (tab) {
+            SettingsTab.MODELS -> bindModelsPane(container, state)
+            SettingsTab.PROMPTS -> bindPromptsPane(container)
+            SettingsTab.BACKUP -> bindBackupPane(container)
+        }
+        state?.let { updateSettingsDialog(it) }
     }
 
-    fun dispose() {
-        ioExecutor.shutdownNow()
-        activityRef.clear()
+    private fun bindModelsPane(container: ViewGroup, state: HtmlAppUiState?) {
+        val currentModel = state?.availableModels?.firstOrNull()
+        container.findViewById<EditText>(R.id.singleModelName)?.setText(currentModel?.displayName.orEmpty())
+        container.findViewById<SwitchCompat>(R.id.modelToggle)?.isChecked = currentModel != null
     }
 
-    @JavascriptInterface
-    fun saveFile(filename: String, jsonText: String): String {
-        val safeName = filename.ifBlank { "backup-${UUID.randomUUID()}.json" }
-        return try {
-            ioExecutor.execute {
-                val (success, location) = performSave(safeName, jsonText)
-                notify(success, location)
+    private fun bindPromptsPane(container: ViewGroup) {
+        val recycler = container.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.promptPresetList)
+        recycler?.layoutManager = LinearLayoutManager(this)
+        recycler?.adapter = promptPresetAdapter
+        promptPresetAdapter.submitList(
+            listOf(PromptPresetItem(name = "默认预设", description = "空", isSelected = true))
+        )
+
+        val rulesContainer = container.findViewById<LinearLayout>(R.id.regexRulesContainer)
+        container.findViewById<Button>(R.id.btnAddRegexRule)?.setOnClickListener {
+            val ruleView = LayoutInflater.from(this).inflate(R.layout.item_regex_rule, rulesContainer, false)
+            ruleView.findViewById<ImageButton>(R.id.btnRemoveRule)?.setOnClickListener {
+                rulesContainer?.removeView(ruleView)
             }
-            SAVE_PENDING
-        } catch (e: RejectedExecutionException) {
-            val (success, location) = performSave(safeName, jsonText)
-            notify(success, location)
-            location ?: ""
+            rulesContainer?.addView(ruleView)
+        }
+
+        container.findViewById<Button>(R.id.btnSavePromptPreset)?.setOnClickListener {
+            Toast.makeText(this, "保存预设功能即将上线", Toast.LENGTH_SHORT).show()
+        }
+        container.findViewById<Button>(R.id.btnUpdatePromptPreset)?.setOnClickListener {
+            Toast.makeText(this, "更新预设功能即将上线", Toast.LENGTH_SHORT).show()
+        }
+        container.findViewById<Button>(R.id.btnDeletePromptPreset)?.setOnClickListener {
+            Toast.makeText(this, "删除预设功能即将上线", Toast.LENGTH_SHORT).show()
         }
     }
 
-    @JavascriptInterface
-    fun notifyStreamingState(active: Boolean) {
-        activityRef.get()?.let { activity ->
-            activity.runOnUiThread {
-                activity.onStreamingStateChanged(active)
+    private fun bindBackupPane(container: ViewGroup) {
+        val importModes = listOf("合并数据", "覆盖数据")
+        val spinner = container.findViewById<Spinner>(R.id.importMode)
+        spinner?.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, importModes).also {
+            it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        container.findViewById<Button>(R.id.btnExportAll)?.setOnClickListener {
+            viewModel.onExportBackup()
+        }
+        container.findViewById<Button>(R.id.btnExportSessions)?.setOnClickListener {
+            Toast.makeText(this, "敬请期待", Toast.LENGTH_SHORT).show()
+        }
+        container.findViewById<Button>(R.id.btnExportPresets)?.setOnClickListener {
+            Toast.makeText(this, "敬请期待", Toast.LENGTH_SHORT).show()
+        }
+        container.findViewById<Button>(R.id.btnImport)?.setOnClickListener {
+            Toast.makeText(this, "导入功能即将上线", Toast.LENGTH_SHORT).show()
+        }
+        container.findViewById<Button>(R.id.btnClearAll)?.setOnClickListener {
+            Toast.makeText(this, "清空功能即将上线", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showSessionsDialog(state: HtmlAppUiState) {
+        val existing = sessionsDialog
+        if (existing?.isShowing == true) {
+            updateSessionsDialog(state)
+            return
+        }
+        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_sessions, null)
+        sessionsDialogView = dialogView
+
+        val recycler = dialogView.findViewById<RecyclerView>(R.id.sessionRecyclerView)
+        recycler?.layoutManager = LinearLayoutManager(this)
+        recycler?.adapter = sessionAdapter
+
+        dialogView.findViewById<View>(R.id.btnCloseSessions)?.setOnClickListener {
+            sessionsDialog?.dismiss()
+        }
+        dialogView.findViewById<Button>(R.id.btnNewChat)?.setOnClickListener {
+            viewModel.onNewChat()
+            sessionsDialog?.dismiss()
+        }
+
+        val bottomSheet = BottomSheetDialog(this)
+        bottomSheet.setContentView(dialogView)
+        bottomSheet.setOnShowListener { dialog ->
+            (dialog as? BottomSheetDialog)?.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)?.setBackgroundResource(android.R.color.transparent)
+        }
+        bottomSheet.setOnDismissListener {
+            sessionsDialog = null
+            sessionsDialogView = null
+        }
+        sessionsDialog = bottomSheet
+        bottomSheet.show()
+        updateSessionsDialog(state)
+    }
+
+    private fun updateSessionsDialog(state: HtmlAppUiState) {
+        val dialogView = sessionsDialogView ?: return
+        val isEmpty = state.sessions.isEmpty()
+        dialogView.findViewById<TextView>(R.id.emptySessions)?.isVisible = isEmpty
+        dialogView.findViewById<RecyclerView>(R.id.sessionRecyclerView)?.isVisible = !isEmpty
+        dialogView.findViewById<View>(R.id.btnNewChat)?.isEnabled = !state.isSending
+        dialogView.findViewById<com.google.android.material.chip.ChipGroup>(R.id.newChatModelSelector)?.updateModelChips(
+            models = state.availableModels,
+            selectedModelId = state.selectedModelId,
+            onSelect = viewModel::onSelectModel,
+        )
+    }
+
+    private enum class SettingsTab { MODELS, PROMPTS, BACKUP }
+
+    private class PromptPresetAdapter : androidx.recyclerview.widget.RecyclerView.Adapter<PromptPresetAdapter.ViewHolder>() {
+        private var items: List<PromptPresetItem> = emptyList()
+
+        fun submitList(data: List<PromptPresetItem>) {
+            items = data
+            notifyDataSetChanged()
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+            val view = LayoutInflater.from(parent.context).inflate(R.layout.item_prompt_preset, parent, false)
+            return ViewHolder(view)
+        }
+
+        override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+            holder.bind(items[position])
+        }
+
+        override fun getItemCount(): Int = items.size
+
+        class ViewHolder(view: View) : androidx.recyclerview.widget.RecyclerView.ViewHolder(view) {
+            private val name: TextView = view.findViewById(R.id.presetName)
+            private val desc: TextView = view.findViewById(R.id.presetDesc)
+
+            fun bind(item: PromptPresetItem) {
+                name.text = item.name
+                desc.text = item.description
+                itemView.isSelected = item.isSelected
             }
         }
     }
 
-    private fun performSave(filename: String, jsonText: String): Pair<Boolean, String?> {
-        return try {
-            val data = jsonText.toByteArray(Charsets.UTF_8)
-            val location = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                saveToMediaStore(filename, data)
-            } else {
-                saveToLegacyStorage(filename, data)
-            }
-            Pair(!location.isNullOrBlank(), location)
-        } catch (e: Exception) {
-            Pair(false, null)
-        }
-    }
-
-    @RequiresApi(Build.VERSION_CODES.Q)
-    private fun saveToMediaStore(filename: String, data: ByteArray): String? {
-        val resolver = appContext.contentResolver
-        val targetDir = Environment.DIRECTORY_DOWNLOADS + "/AIChat"
-        val values = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, filename)
-            put(MediaStore.Downloads.MIME_TYPE, "application/json")
-            put(MediaStore.Downloads.IS_PENDING, 1)
-            put(MediaStore.Downloads.RELATIVE_PATH, targetDir)
-        }
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
-        return try {
-            resolver.openOutputStream(uri)?.use { output ->
-                output.write(data)
-            } ?: return null
-            values.clear()
-            values.put(MediaStore.Downloads.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
-            "内部存储/Download/AIChat/$filename"
-        } catch (e: Exception) {
-            resolver.delete(uri, null, null)
-            null
-        }
-    }
-
-    @Suppress("DEPRECATION")
-    private fun saveToLegacyStorage(filename: String, data: ByteArray): String? {
-        return try {
-            val baseDir = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return null
-            if (!baseDir.exists()) {
-                baseDir.mkdirs()
-            }
-            val targetDir = File(baseDir, "AIChat")
-            if (!targetDir.exists()) {
-                targetDir.mkdirs()
-            }
-            val file = File(targetDir, filename)
-            FileOutputStream(file).use { it.write(data) }
-            file.absolutePath
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun notify(success: Boolean, location: String?) {
-        mainHandler.post {
-            val message = if (success) {
-                if (!location.isNullOrBlank()) {
-                    "备份已保存: $location"
-                } else {
-                    "备份已保存"
-                }
-            } else {
-                "保存备份失败"
-            }
-            Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
-        }
-    }
-
-    companion object {
-        private const val SAVE_PENDING = "__NATIVE_PENDING__"
-    }
+    private data class PromptPresetItem(
+        val name: String,
+        val description: String,
+        val isSelected: Boolean = false,
+    )
 }
