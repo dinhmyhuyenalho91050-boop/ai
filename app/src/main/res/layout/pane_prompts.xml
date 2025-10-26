@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="240dp"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:layout_marginEnd="16dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="提示词预设"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:textColor="@color/fg"
+            android:layout_marginBottom="12dp"/>
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/promptPresetList"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_preset_list"
+            android:padding="8dp"/>
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="16dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="编辑预设"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/fg"/>
+
+                <TextView
+                    android:id="@+id/promptEditingHint"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="未选择预设"
+                    android:textSize="11sp"
+                    android:textColor="@color/muted"/>
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="预设名称"
+                android:textSize="13sp"
+                android:textColor="@color/muted"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp"/>
+
+            <EditText
+                android:id="@+id/promptPresetName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="如: 默认预设"
+                android:textSize="14sp"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:background="@drawable/bg_input_field"
+                android:padding="12dp"
+                android:layout_marginBottom="16dp"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="系统提示"
+                android:textSize="13sp"
+                android:textColor="@color/muted"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp"/>
+
+            <EditText
+                android:id="@+id/sysPrompt"
+                android:layout_width="match_parent"
+                android:layout_height="120dp"
+                android:hint="选填但每次发送"
+                android:textSize="14sp"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:background="@drawable/bg_input_field"
+                android:padding="12dp"
+                android:gravity="top"
+                android:inputType="textMultiLine"
+                android:layout_marginBottom="16dp"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="首条用户消息"
+                android:textSize="13sp"
+                android:textColor="@color/muted"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp"/>
+
+            <EditText
+                android:id="@+id/firstUser"
+                android:layout_width="match_parent"
+                android:layout_height="140dp"
+                android:hint="选填但每次发送"
+                android:textSize="14sp"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:background="@drawable/bg_input_field"
+                android:padding="12dp"
+                android:gravity="top"
+                android:inputType="textMultiLine"
+                android:layout_marginBottom="16dp"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="首条助手消息"
+                android:textSize="13sp"
+                android:textColor="@color/muted"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp"/>
+
+            <EditText
+                android:id="@+id/firstAssistant"
+                android:layout_width="match_parent"
+                android:layout_height="140dp"
+                android:hint="进入对话即显示"
+                android:textSize="14sp"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:background="@drawable/bg_input_field"
+                android:padding="12dp"
+                android:gravity="top"
+                android:inputType="textMultiLine"
+                android:layout_marginBottom="16dp"/>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="@color/border"
+                android:layout_marginVertical="20dp"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="消息前缀"
+                android:textSize="13sp"
+                android:textColor="@color/muted"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp"/>
+
+            <EditText
+                android:id="@+id/messagePrefix"
+                android:layout_width="match_parent"
+                android:layout_height="100dp"
+                android:hint="拼接到最新用户消息前(可选)"
+                android:textSize="14sp"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:background="@drawable/bg_input_field"
+                android:padding="12dp"
+                android:gravity="top"
+                android:inputType="textMultiLine"
+                android:layout_marginBottom="16dp"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="助手预填充"
+                android:textSize="13sp"
+                android:textColor="@color/muted"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp"/>
+
+            <EditText
+                android:id="@+id/assistantPrefill"
+                android:layout_width="match_parent"
+                android:layout_height="100dp"
+                android:hint="引导助手回复开头(可选)"
+                android:textSize="14sp"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:background="@drawable/bg_input_field"
+                android:padding="12dp"
+                android:gravity="top"
+                android:inputType="textMultiLine"
+                android:layout_marginBottom="16dp"/>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="@color/border"
+                android:layout_marginVertical="20dp"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="正则替换规则(生成后处理)"
+                android:textSize="13sp"
+                android:textColor="@color/muted"
+                android:textStyle="bold"
+                android:layout_marginBottom="12dp"/>
+
+            <LinearLayout
+                android:id="@+id/regexRulesContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:layout_marginBottom="12dp"/>
+
+            <Button
+                android:id="@+id/btnAddRegexRule"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="+ 添加规则"
+                style="@style/ButtonSmall"
+                android:layout_marginBottom="16dp"/>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="@color/border"
+                android:layout_marginVertical="20dp"/>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnSavePromptPreset"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_weight="1"
+                    android:text="保存为新预设"
+                    style="@style/ButtonNormal"
+                    android:layout_marginEnd="12dp"/>
+
+                <Button
+                    android:id="@+id/btnUpdatePromptPreset"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_weight="1"
+                    android:text="更新当前预设"
+                    style="@style/ButtonNormal"
+                    android:layout_marginEnd="12dp"/>
+
+                <Button
+                    android:id="@+id/btnDeletePromptPreset"
+                    android:layout_width="wrap_content"
+                    android:layout_height="48dp"
+                    android:text="删除预设"
+                    style="@style/ButtonWarn"/>
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

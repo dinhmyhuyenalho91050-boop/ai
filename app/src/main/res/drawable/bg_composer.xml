@@ -1,8 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="@color/panel_dark"/>
-    <corners android:topLeftRadius="16dp" android:topRightRadius="16dp"/>
-    <stroke
-        android:width="1dp"
-        android:color="@color/border"/>
-</shape>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape>
+            <gradient
+                android:angle="270"
+                android:startColor="#fa151921"
+                android:endColor="#0a0e14"
+                android:type="linear"/>
+        </shape>
+    </item>
+    <item android:top="0dp">
+        <shape>
+            <solid android:color="@color/border"/>
+            <size android:height="1dp"/>
+        </shape>
+    </item>
+</layer-list>

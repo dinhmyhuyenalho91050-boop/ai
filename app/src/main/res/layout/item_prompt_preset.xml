@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@drawable/bg_preset_item"
+    android:padding="10dp"
+    android:layout_marginBottom="8dp">
+
+    <TextView
+        android:id="@+id/presetName"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="默认预设"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:textColor="@color/fg"
+        android:layout_marginBottom="4dp"/>
+
+    <TextView
+        android:id="@+id/presetDesc"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="空"
+        android:textSize="11sp"
+        android:textColor="@color/muted"
+        android:maxLines="1"
+        android:ellipsize="end"/>
+</LinearLayout>

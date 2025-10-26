@@ -4,9 +4,15 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
-import android.widget.Switch
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.Spinner
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -67,6 +73,9 @@ class MainActivity : AppCompatActivity() {
     private var settingsDialogView: View? = null
     private var isUpdatingComposer = false
     private var lastRenderedMessageCount = 0
+    private var currentSettingsTab = SettingsTab.MODELS
+    private val promptPresetAdapter = PromptPresetAdapter()
+    private var latestUiState: HtmlAppUiState? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -135,6 +144,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderState(state: HtmlAppUiState) {
+        latestUiState = state
         updateSessions(state)
         updateModels(state)
         updateMessages(state)
@@ -208,71 +218,191 @@ class MainActivity : AppCompatActivity() {
     private fun showSettingsDialog(state: HtmlAppUiState) {
         if (settingsDialog?.isShowing == true) return
         val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_settings, null)
-        val apiKeyInput = dialogView.findViewById<EditText>(R.id.inputApiKey)
-        val baseUrlInput = dialogView.findViewById<EditText>(R.id.inputBaseUrl)
-        val mockSwitch = dialogView.findViewById<Switch>(R.id.switchMockResponses)
-        val exportButton = dialogView.findViewById<Button>(R.id.btnExportBackup)
-        exportButton.setOnClickListener {
-            viewModel.onExportBackup()
-        }
-
-        apiKeyInput.setText(state.apiKey)
-        baseUrlInput.setText(state.baseUrlOverride.orEmpty())
-        mockSwitch.isChecked = state.enableMockResponses
-        exportButton.isEnabled = !state.isBackupInProgress
-        exportButton.text = if (state.isBackupInProgress) {
-            getString(R.string.settings_exporting)
-        } else {
-            getString(R.string.settings_export)
-        }
-
         settingsDialogView = dialogView
 
+        dialogView.findViewById<ImageButton>(R.id.btnCloseSettings)?.setOnClickListener {
+            settingsDialog?.dismiss()
+        }
+        dialogView.findViewById<Button>(R.id.btnCancelSettings)?.setOnClickListener {
+            settingsDialog?.dismiss()
+        }
+        dialogView.findViewById<Button>(R.id.btnApplySettings)?.setOnClickListener {
+            val current = latestUiState ?: state
+            viewModel.onUpdateSettings(
+                apiKey = current.apiKey,
+                baseUrl = current.baseUrlOverride,
+                enableMock = current.enableMockResponses,
+            )
+        }
+
+        dialogView.findViewById<Button>(R.id.tabModels)?.setOnClickListener {
+            selectSettingsTab(SettingsTab.MODELS, latestUiState ?: state)
+        }
+        dialogView.findViewById<Button>(R.id.tabPrompts)?.setOnClickListener {
+            selectSettingsTab(SettingsTab.PROMPTS, latestUiState ?: state)
+        }
+        dialogView.findViewById<Button>(R.id.tabBackup)?.setOnClickListener {
+            selectSettingsTab(SettingsTab.BACKUP, latestUiState ?: state)
+        }
+
         settingsDialog = MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.settings_title)
             .setView(dialogView)
-            .setPositiveButton(R.string.settings_save) { _, _ ->
-                viewModel.onUpdateSettings(
-                    apiKey = apiKeyInput.text?.toString().orEmpty(),
-                    baseUrl = baseUrlInput.text?.toString()?.takeIf { it.isNotBlank() },
-                    enableMock = mockSwitch.isChecked,
-                )
-            }
-            .setNegativeButton(android.R.string.cancel) { dialog, _ ->
-                dialog.dismiss()
-                viewModel.onDismissSettings()
-            }
             .setOnDismissListener {
                 settingsDialog = null
                 settingsDialogView = null
+                currentSettingsTab = SettingsTab.MODELS
                 viewModel.onDismissSettings()
             }
             .create()
 
         settingsDialog?.show()
+        settingsDialog?.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        selectSettingsTab(currentSettingsTab, state)
     }
 
     private fun updateSettingsDialog(state: HtmlAppUiState) {
         val dialogView = settingsDialogView ?: return
-        val apiKeyInput = dialogView.findViewById<EditText>(R.id.inputApiKey)
-        val baseUrlInput = dialogView.findViewById<EditText>(R.id.inputBaseUrl)
-        val mockSwitch = dialogView.findViewById<Switch>(R.id.switchMockResponses)
-        val exportButton = dialogView.findViewById<Button>(R.id.btnExportBackup) ?: return
-        if (apiKeyInput.text?.toString() != state.apiKey) {
-            apiKeyInput.setText(state.apiKey)
+        dialogView.findViewById<Button>(R.id.btnApplySettings)?.isEnabled = !state.isBackupInProgress
+        dialogView.findViewById<Button>(R.id.btnExportAll)?.let { button ->
+            val baseLabel = (button.tag as? String) ?: button.text.toString().also { button.tag = it }
+            button.isEnabled = !state.isBackupInProgress
+            button.text = if (state.isBackupInProgress) {
+                getString(R.string.settings_exporting)
+            } else {
+                baseLabel
+            }
         }
-        val baseUrl = state.baseUrlOverride.orEmpty()
-        if (baseUrlInput.text?.toString() != baseUrl) {
-            baseUrlInput.setText(baseUrl)
+        dialogView.findViewById<Button>(R.id.btnExportSessions)?.isEnabled = !state.isBackupInProgress
+        dialogView.findViewById<Button>(R.id.btnExportPresets)?.isEnabled = !state.isBackupInProgress
+        dialogView.findViewById<TextView>(R.id.sessionCount)?.text = state.sessions.size.toString()
+        dialogView.findViewById<TextView>(R.id.messageCount)?.text = state.messages.size.toString()
+        dialogView.findViewById<TextView>(R.id.modelPresetCount)?.text = state.availableModels.size.toString()
+        dialogView.findViewById<TextView>(R.id.promptPresetCount)?.text = "0"
+        dialogView.findViewById<TextView>(R.id.dataSize)?.text = "-"
+    }
+
+    private fun selectSettingsTab(tab: SettingsTab, state: HtmlAppUiState?) {
+        val dialogView = settingsDialogView ?: return
+        currentSettingsTab = tab
+        dialogView.findViewById<Button>(R.id.tabModels)?.isSelected = tab == SettingsTab.MODELS
+        dialogView.findViewById<Button>(R.id.tabPrompts)?.isSelected = tab == SettingsTab.PROMPTS
+        dialogView.findViewById<Button>(R.id.tabBackup)?.isSelected = tab == SettingsTab.BACKUP
+
+        val container = dialogView.findViewById<FrameLayout>(R.id.settingsPaneContainer) ?: return
+        container.removeAllViews()
+        val layoutId = when (tab) {
+            SettingsTab.MODELS -> R.layout.pane_models
+            SettingsTab.PROMPTS -> R.layout.pane_prompts
+            SettingsTab.BACKUP -> R.layout.pane_backup
         }
-        if (mockSwitch.isChecked != state.enableMockResponses) {
-            mockSwitch.isChecked = state.enableMockResponses
+        LayoutInflater.from(this).inflate(layoutId, container, true)
+        when (tab) {
+            SettingsTab.MODELS -> bindModelsPane(container, state)
+            SettingsTab.PROMPTS -> bindPromptsPane(container)
+            SettingsTab.BACKUP -> bindBackupPane(container)
         }
-        exportButton.isEnabled = !state.isBackupInProgress
-        exportButton.text = if (state.isBackupInProgress) {
-            getString(R.string.settings_exporting)
-        } else {
-            getString(R.string.settings_export)
+        state?.let { updateSettingsDialog(it) }
+    }
+
+    private fun bindModelsPane(container: ViewGroup, state: HtmlAppUiState?) {
+        val context = container.context
+        val modelNames = state?.availableModels?.map { it.displayName }.orEmpty()
+        val adapterItems = if (modelNames.isNotEmpty()) modelNames else listOf("默认模型")
+        val adapter = ArrayAdapter(context, android.R.layout.simple_spinner_item, adapterItems)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        container.findViewById<Spinner>(R.id.model1Type)?.adapter = adapter
+        container.findViewById<Spinner>(R.id.model2Type)?.adapter = adapter
+        container.findViewById<EditText>(R.id.model1Name)?.setText(modelNames.getOrNull(0) ?: "")
+        container.findViewById<EditText>(R.id.model2Name)?.setText(modelNames.getOrNull(1) ?: "")
+    }
+
+    private fun bindPromptsPane(container: ViewGroup) {
+        val recycler = container.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.promptPresetList)
+        recycler?.layoutManager = LinearLayoutManager(this)
+        recycler?.adapter = promptPresetAdapter
+        promptPresetAdapter.submitList(
+            listOf(PromptPresetItem(name = "默认预设", description = "空", isSelected = true))
+        )
+
+        val rulesContainer = container.findViewById<LinearLayout>(R.id.regexRulesContainer)
+        container.findViewById<Button>(R.id.btnAddRegexRule)?.setOnClickListener {
+            val ruleView = LayoutInflater.from(this).inflate(R.layout.item_regex_rule, rulesContainer, false)
+            ruleView.findViewById<ImageButton>(R.id.btnRemoveRule)?.setOnClickListener {
+                rulesContainer?.removeView(ruleView)
+            }
+            rulesContainer?.addView(ruleView)
+        }
+
+        container.findViewById<Button>(R.id.btnSavePromptPreset)?.setOnClickListener {
+            Toast.makeText(this, "保存预设功能即将上线", Toast.LENGTH_SHORT).show()
+        }
+        container.findViewById<Button>(R.id.btnUpdatePromptPreset)?.setOnClickListener {
+            Toast.makeText(this, "更新预设功能即将上线", Toast.LENGTH_SHORT).show()
+        }
+        container.findViewById<Button>(R.id.btnDeletePromptPreset)?.setOnClickListener {
+            Toast.makeText(this, "删除预设功能即将上线", Toast.LENGTH_SHORT).show()
         }
     }
+
+    private fun bindBackupPane(container: ViewGroup) {
+        val importModes = listOf("合并数据", "覆盖数据")
+        val spinner = container.findViewById<Spinner>(R.id.importMode)
+        spinner?.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, importModes).also {
+            it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        container.findViewById<Button>(R.id.btnExportAll)?.setOnClickListener {
+            viewModel.onExportBackup()
+        }
+        container.findViewById<Button>(R.id.btnExportSessions)?.setOnClickListener {
+            Toast.makeText(this, "敬请期待", Toast.LENGTH_SHORT).show()
+        }
+        container.findViewById<Button>(R.id.btnExportPresets)?.setOnClickListener {
+            Toast.makeText(this, "敬请期待", Toast.LENGTH_SHORT).show()
+        }
+        container.findViewById<Button>(R.id.btnImport)?.setOnClickListener {
+            Toast.makeText(this, "导入功能即将上线", Toast.LENGTH_SHORT).show()
+        }
+        container.findViewById<Button>(R.id.btnClearAll)?.setOnClickListener {
+            Toast.makeText(this, "清空功能即将上线", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private enum class SettingsTab { MODELS, PROMPTS, BACKUP }
+
+    private class PromptPresetAdapter : androidx.recyclerview.widget.RecyclerView.Adapter<PromptPresetAdapter.ViewHolder>() {
+        private var items: List<PromptPresetItem> = emptyList()
+
+        fun submitList(data: List<PromptPresetItem>) {
+            items = data
+            notifyDataSetChanged()
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+            val view = LayoutInflater.from(parent.context).inflate(R.layout.item_prompt_preset, parent, false)
+            return ViewHolder(view)
+        }
+
+        override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+            holder.bind(items[position])
+        }
+
+        override fun getItemCount(): Int = items.size
+
+        class ViewHolder(view: View) : androidx.recyclerview.widget.RecyclerView.ViewHolder(view) {
+            private val name: TextView = view.findViewById(R.id.presetName)
+            private val desc: TextView = view.findViewById(R.id.presetDesc)
+
+            fun bind(item: PromptPresetItem) {
+                name.text = item.name
+                desc.text = item.description
+                itemView.isSelected = item.isSelected
+            }
+        }
+    }
+
+    private data class PromptPresetItem(
+        val name: String,
+        val description: String,
+        val isSelected: Boolean = false,
+    )
 }

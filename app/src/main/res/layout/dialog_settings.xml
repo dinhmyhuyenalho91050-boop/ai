@@ -1,74 +1,109 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:padding="16dp">
+    android:layout_height="match_parent"
+    android:background="@color/panel">
 
     <LinearLayout
+        android:id="@+id/settingsHeader"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical">
+        android:layout_height="56dp"
+        android:orientation="horizontal"
+        android:background="@color/panel_dark_transparent"
+        android:paddingHorizontal="20dp"
+        android:gravity="center_vertical"
+        app:layout_constraintTop_toTopOf="parent">
 
-        <com.google.android.material.textfield.TextInputLayout
-            android:layout_width="match_parent"
+        <TextView
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="12dp"
-            app:boxBackgroundMode="outlined"
-            app:hintEnabled="true">
+            android:layout_weight="1"
+            android:text="设置"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:textColor="@color/fg"/>
 
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/inputApiKey"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="API Key"
-                android:inputType="textPassword"
-                android:textColor="@color/fg"
-                android:textColorHint="@color/muted"/>
-        </com.google.android.material.textfield.TextInputLayout>
+        <ImageButton
+            android:id="@+id/btnCloseSettings"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_close"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:tint="@color/fg"/>
+    </LinearLayout>
 
-        <com.google.android.material.textfield.TextInputLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="12dp"
-            app:boxBackgroundMode="outlined">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/inputBaseUrl"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Base URL"
-                android:inputType="textUri"
-                android:textColor="@color/fg"
-                android:textColorHint="@color/muted"/>
-        </com.google.android.material.textfield.TextInputLayout>
+    <LinearLayout
+        android:id="@+id/settingsContent"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:orientation="horizontal"
+        app:layout_constraintTop_toBottomOf="@id/settingsHeader"
+        app:layout_constraintBottom_toTopOf="@id/settingsFooter">
 
         <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="12dp">
+            android:id="@+id/settingsTabs"
+            android:layout_width="200dp"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:background="@color/panel_dark_transparent">
 
-            <TextView
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="启用离线演示"
-                android:textColor="@color/fg"
-                android:textSize="14sp"/>
+            <Button
+                android:id="@+id/tabModels"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:text="模型预设"
+                style="@style/SettingsTab"
+                android:stateListAnimator="@null"/>
 
-            <Switch
-                android:id="@+id/switchMockResponses"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"/>
+            <Button
+                android:id="@+id/tabPrompts"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:text="提示词"
+                style="@style/SettingsTab"
+                android:stateListAnimator="@null"/>
+
+            <Button
+                android:id="@+id/tabBackup"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:text="备份"
+                style="@style/SettingsTab"
+                android:stateListAnimator="@null"/>
         </LinearLayout>
 
-        <Button
-            android:id="@+id/btnExportBackup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/settings_export"
-            style="@style/ButtonNormal"/>
+        <FrameLayout
+            android:id="@+id/settingsPaneContainer"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"/>
     </LinearLayout>
-</ScrollView>
+
+    <LinearLayout
+        android:id="@+id/settingsFooter"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:background="@color/panel_dark_transparent"
+        android:padding="16dp"
+        android:gravity="end"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <Button
+            android:id="@+id/btnCancelSettings"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:text="关闭"
+            style="@style/ButtonNormal"
+            android:layout_marginEnd="12dp"/>
+
+        <Button
+            android:id="@+id/btnApplySettings"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:text="应用"
+            style="@style/ButtonPrimary"/>
+    </LinearLayout>
+</androidx.constraintlayout.widget.ConstraintLayout>

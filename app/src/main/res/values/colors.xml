@@ -7,13 +7,15 @@
     <color name="panel_transparent">#99151921</color>
     <color name="panel_dark">#0a0e14</color>
     <color name="panel_dark_transparent">#33000000</color>
-    <color name="panel_gradient">#141824</color>
+    <color name="panel_gradient">#CC151921</color>
 
     <color name="accent">#fbbf24</color>
     <color name="accent2">#60a5fa</color>
     <color name="accent2_transparent">#1a60a5fa</color>
+    <color name="accent2_light">#1a60a5fa</color>
     <color name="accent3">#10b981</color>
     <color name="danger">#ef4444</color>
+    <color name="danger_light">#1aef4444</color>
 
     <color name="border">#1f2937</color>
     <color name="shadow">#4d000000</color>
@@ -21,5 +23,4 @@
 
     <color name="em_yellow">#fbbf24</color>
     <color name="em_green">#10b981</color>
-
 </resources>
