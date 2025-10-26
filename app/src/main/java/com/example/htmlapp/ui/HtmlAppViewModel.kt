@@ -7,9 +7,11 @@ import com.example.htmlapp.data.ChatBackupManager
 import com.example.htmlapp.data.ChatRepository
 import com.example.htmlapp.data.MessageWindowManager
 import com.example.htmlapp.data.MessageWindowSnapshot
+import com.example.htmlapp.data.model.AppSettings
 import com.example.htmlapp.data.model.ChatMessage
 import com.example.htmlapp.data.model.ChatMessageRole
 import com.example.htmlapp.data.model.ChatSession
+import com.example.htmlapp.data.model.ChatStore
 import com.example.htmlapp.data.model.ModelPreset
 import com.example.htmlapp.data.model.ModelProvider
 import com.example.htmlapp.network.StreamEvent
@@ -43,16 +45,29 @@ class HtmlAppViewModel(
     private val streamingMessageId = MutableStateFlow<String?>(null)
     private var streamingJob: Job? = null
 
-    val uiState: StateFlow<HtmlAppUiState> = combine(
+    private val baseUiFlow = combine(
         chatRepository.storeFlow,
         settingsRepository.settingsFlow,
         composer,
         isSettingsVisible,
         isBackupInProgress,
+    ) { store, settings, composerText, showSettings, backup ->
+        BaseUiInputs(
+            store = store,
+            settings = settings,
+            composerText = composerText,
+            showSettings = showSettings,
+            isBackupInProgress = backup,
+        )
+    }
+
+    val uiState: StateFlow<HtmlAppUiState> = combine(
+        baseUiFlow,
         toastMessage,
         windowVersion,
         streamingMessageId,
-    ) { store, settings, composerText, showSettings, backup, toast, _, streamingId ->
+    ) { inputs, toast, _, streamingId ->
+        val store = inputs.store
         val sessions = store.sessions.sortedByDescending { it.updatedAt }
         val selectedSessionId = store.selectedSessionId ?: sessions.firstOrNull()?.id
         val snapshot: MessageWindowSnapshot = if (selectedSessionId != null) {
@@ -61,18 +76,19 @@ class HtmlAppViewModel(
         } else {
             MessageWindowSnapshot(emptyList(), canLoadMore = false)
         }
+        val settings = inputs.settings
         HtmlAppUiState(
             sessions = sessions.map { it.toUi(selectedSessionId) },
             selectedSessionId = selectedSessionId,
             availableModels = modelPresets.map { it.toUi(settings.activeModelId) },
             selectedModelId = settings.activeModelId,
             messages = snapshot.messages.map { it.toUi(modelPresets) },
-            composerText = composerText,
+            composerText = inputs.composerText,
             isSending = streamingId != null,
             canLoadMore = snapshot.canLoadMore,
-            isSettingsVisible = showSettings,
+            isSettingsVisible = inputs.showSettings,
             toastMessage = toast,
-            isBackupInProgress = backup,
+            isBackupInProgress = inputs.isBackupInProgress,
             apiKey = settings.apiKey,
             baseUrlOverride = settings.baseUrlOverride,
             enableMockResponses = settings.enableMockResponses,
@@ -290,6 +306,14 @@ class HtmlAppViewModel(
         toastMessage.value = null
     }
 }
+
+private data class BaseUiInputs(
+    val store: ChatStore,
+    val settings: AppSettings,
+    val composerText: String,
+    val showSettings: Boolean,
+    val isBackupInProgress: Boolean,
+)
 
 private fun ChatSession.toUi(selectedId: String?): ChatSessionUi = ChatSessionUi(
     id = id,
