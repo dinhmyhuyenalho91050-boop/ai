@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="ButtonBase" parent="Widget.MaterialComponents.Button">
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="cornerRadius">8dp</item>
+        <item name="android:minHeight">40dp</item>
+        <item name="android:paddingHorizontal">16dp</item>
+    </style>
+
+    <style name="ButtonNormal" parent="ButtonBase">
+        <item name="backgroundTint">@color/panel</item>
+        <item name="android:textColor">@color/fg</item>
+        <item name="strokeColor">@color/border</item>
+        <item name="strokeWidth">1dp</item>
+    </style>
+
+    <style name="ButtonPrimary" parent="ButtonBase">
+        <item name="backgroundTint">@color/accent2</item>
+        <item name="android:textColor">@android:color/white</item>
+    </style>
+
+    <style name="ButtonWarn" parent="ButtonBase">
+        <item name="backgroundTint">@color/danger</item>
+        <item name="android:textColor">@android:color/white</item>
+    </style>
+
+    <style name="ButtonSmall" parent="ButtonNormal">
+        <item name="android:textSize">12sp</item>
+        <item name="android:minHeight">32dp</item>
+        <item name="android:paddingHorizontal">12dp</item>
+        <item name="cornerRadius">6dp</item>
+    </style>
+
+    <style name="ButtonSmallWarn" parent="ButtonSmall">
+        <item name="backgroundTint">@color/danger</item>
+        <item name="android:textColor">@android:color/white</item>
+    </style>
+
+    <style name="ModelChip" parent="Widget.MaterialComponents.Chip.Choice">
+        <item name="chipBackgroundColor">@color/chip_bg_selector</item>
+        <item name="android:textColor">@color/chip_text_selector</item>
+        <item name="chipStrokeColor">@color/border</item>
+        <item name="chipStrokeWidth">1dp</item>
+        <item name="chipCornerRadius">6dp</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+</resources>

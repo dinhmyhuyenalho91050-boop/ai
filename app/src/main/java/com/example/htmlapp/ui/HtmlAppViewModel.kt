@@ -145,10 +145,30 @@ class HtmlAppViewModel(
         }
     }
 
+    fun onDeleteSession(sessionId: String) {
+        viewModelScope.launch {
+            chatRepository.deleteSession(sessionId)
+            messageWindowManager.reset(sessionId)
+            windowVersion.value += 1
+        }
+    }
+
     fun onLoadMore() {
         val sessionId = uiState.value.selectedSessionId ?: return
         messageWindowManager.expand(sessionId)
         windowVersion.value += 1
+    }
+
+    fun onDeleteMessage(messageId: String) {
+        val sessionId = uiState.value.selectedSessionId ?: return
+        viewModelScope.launch {
+            chatRepository.deleteMessage(sessionId, messageId)
+            windowVersion.value += 1
+        }
+    }
+
+    fun onRegenerateMessage(@Suppress("UNUSED_PARAMETER") messageId: String) {
+        toastMessage.value = "重新生成功能暂未实现"
     }
 
     fun onSendMessage() {

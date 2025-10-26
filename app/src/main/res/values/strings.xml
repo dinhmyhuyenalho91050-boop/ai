@@ -1,4 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AI Chat</string>
+    <string name="settings_title">设置</string>
+    <string name="settings_save">保存</string>
+    <string name="settings_export">导出备份</string>
+    <string name="settings_exporting">导出中…</string>
+    <string name="session_active_badge">当前</string>
+    <string name="message_index_format">#%1$d</string>
+    <string name="model_unknown">未知模型</string>
+    <string name="action_stop">停止</string>
+    <string name="action_regenerate">重新生成</string>
+    <string name="action_send">发送</string>
+    <string name="send_in_progress">发送中…</string>
+    <string name="action_load_more">加载更多</string>
 </resources>

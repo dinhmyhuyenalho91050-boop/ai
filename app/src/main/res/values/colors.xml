@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0a0e14</color>
+    <color name="fg">#e6e8eb</color>
+    <color name="muted">#9ca3af</color>
+    <color name="panel">#151921</color>
+    <color name="panel_transparent">#99151921</color>
+    <color name="panel_dark">#0a0e14</color>
+    <color name="panel_dark_transparent">#33000000</color>
+    <color name="panel_gradient">#141824</color>
+
+    <color name="accent">#fbbf24</color>
+    <color name="accent2">#60a5fa</color>
+    <color name="accent2_transparent">#1a60a5fa</color>
+    <color name="accent3">#10b981</color>
+    <color name="danger">#ef4444</color>
+
+    <color name="border">#1f2937</color>
+    <color name="shadow">#4d000000</color>
+    <color name="glow">#2660a5fa</color>
+
+    <color name="em_yellow">#fbbf24</color>
+    <color name="em_green">#10b981</color>
+
+</resources>

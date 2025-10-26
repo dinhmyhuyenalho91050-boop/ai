@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.material.card.MaterialCardView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="16dp"
+    app:cardCornerRadius="16dp"
+    app:cardElevation="4dp"
+    app:strokeColor="@color/border"
+    app:strokeWidth="1dp"
+    app:cardBackgroundColor="@color/panel_gradient">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="12dp"
+            android:background="@color/panel_dark_transparent"
+            android:gravity="center_vertical">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="ASSISTANT"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/fg"/>
+
+                <TextView
+                    android:id="@+id/modelBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="GPT-4"
+                    android:textSize="10sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/accent2"
+                    android:background="@drawable/bg_model_badge"
+                    android:paddingHorizontal="8dp"
+                    android:paddingVertical="3dp"
+                    android:layout_marginStart="8dp"/>
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/messageIndex"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="#2"
+                android:textSize="11sp"
+                android:textColor="@color/muted"
+                android:background="@drawable/bg_pill"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="4dp"/>
+        </LinearLayout>
+
+        <View
+            android:layout_width="3dp"
+            android:layout_height="match_parent"
+            android:background="@color/accent2"/>
+
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/thinkingCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_margin="12dp"
+            android:visibility="gone"
+            app:cardCornerRadius="8dp"
+            app:cardElevation="0dp"
+            app:strokeColor="@color/accent2"
+            app:strokeWidth="1dp"
+            app:cardBackgroundColor="@color/accent2_transparent">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:id="@+id/thinkingHeader"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="🤔 思维链"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/accent2"
+                    android:drawableEnd="@drawable/ic_expand_more"
+                    android:drawableTint="@color/accent2"
+                    android:paddingVertical="4dp"/>
+
+                <TextView
+                    android:id="@+id/thinkingContent"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:textSize="13sp"
+                    android:textColor="@color/fg"
+                    android:lineSpacingMultiplier="1.7"
+                    android:visibility="gone"/>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <TextView
+            android:id="@+id/messageContent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="16dp"
+            android:textSize="15sp"
+            android:textColor="@color/fg"
+            android:lineSpacingMultiplier="1.7"/>
+
+        <LinearLayout
+            android:id="@+id/messageActions"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="12dp"
+            android:background="@color/panel_dark_transparent"
+            android:gravity="end">
+
+            <Button
+                android:id="@+id/btnEdit"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:text="编辑"
+                style="@style/ButtonSmall"
+                android:layout_marginEnd="6dp"/>
+
+            <Button
+                android:id="@+id/btnRegen"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:text="重新生成"
+                style="@style/ButtonSmall"
+                android:layout_marginEnd="6dp"/>
+
+            <Button
+                android:id="@+id/btnDeleteMsg"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:text="删除"
+                style="@style/ButtonSmallWarn"/>
+        </LinearLayout>
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>
