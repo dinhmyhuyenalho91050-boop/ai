@@ -1,14 +1,12 @@
 package com.example.htmlapp
 
 import android.os.Bundle
-import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
-import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.Spinner
@@ -16,6 +14,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.isVisible
 import androidx.core.widget.addTextChangedListener
@@ -32,8 +31,11 @@ import com.example.htmlapp.ui.adapter.ChatMessageAdapter
 import com.example.htmlapp.ui.adapter.SessionListAdapter
 import com.example.htmlapp.ui.widget.updateModelChips
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import android.view.WindowManager
+import androidx.recyclerview.widget.RecyclerView
 
 class MainActivity : AppCompatActivity() {
     private val appContainer: AppContainer by lazy { AppContainer(applicationContext) }
@@ -52,7 +54,7 @@ class MainActivity : AppCompatActivity() {
     private val sessionAdapter = SessionListAdapter(
         onOpen = { sessionId ->
             viewModel.onSelectSession(sessionId)
-            binding.drawerLayout.closeDrawers()
+            sessionsDialog?.dismiss()
         },
         onDelete = { sessionId -> viewModel.onDeleteSession(sessionId) },
     )
@@ -71,6 +73,8 @@ class MainActivity : AppCompatActivity() {
 
     private var settingsDialog: android.app.Dialog? = null
     private var settingsDialogView: View? = null
+    private var sessionsDialog: BottomSheetDialog? = null
+    private var sessionsDialogView: View? = null
     private var isUpdatingComposer = false
     private var lastRenderedMessageCount = 0
     private var currentSettingsTab = SettingsTab.MODELS
@@ -81,22 +85,15 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        setupSessionList()
         setupMessageList()
         setupComposer()
         setupActions()
         collectState()
-    }
-
-    private fun setupSessionList() {
-        binding.sessionRecyclerView.apply {
-            adapter = sessionAdapter
-            layoutManager = LinearLayoutManager(this@MainActivity)
-        }
     }
 
     private fun setupMessageList() {
@@ -121,16 +118,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupActions() {
         binding.btnSessions.setOnClickListener {
-            binding.drawerLayout.openDrawer(Gravity.START)
+            showSessionsDialog(latestUiState ?: viewModel.uiState.value)
         }
         binding.btnSettings.setOnClickListener {
             viewModel.onOpenSettings()
         }
-        binding.btnNewChat.setOnClickListener {
-            binding.drawerLayout.closeDrawers()
-            viewModel.onNewChat()
-        }
-
     }
 
     private fun collectState() {
@@ -152,6 +144,7 @@ class MainActivity : AppCompatActivity() {
         updateControls(state)
         handleToast(state)
         updateSettingsDialog(state)
+        updateSessionsDialog(state)
         if (state.isSettingsVisible) {
             showSettingsDialog(state)
         } else {
@@ -165,11 +158,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateModels(state: HtmlAppUiState) {
         binding.modelSelector.updateModelChips(
-            models = state.availableModels,
-            selectedModelId = state.selectedModelId,
-            onSelect = viewModel::onSelectModel,
-        )
-        binding.newChatModelSelector.updateModelChips(
             models = state.availableModels,
             selectedModelId = state.selectedModelId,
             onSelect = viewModel::onSelectModel,
@@ -257,6 +245,7 @@ class MainActivity : AppCompatActivity() {
 
         settingsDialog?.show()
         settingsDialog?.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        settingsDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
         selectSettingsTab(currentSettingsTab, state)
     }
 
@@ -288,7 +277,7 @@ class MainActivity : AppCompatActivity() {
         dialogView.findViewById<Button>(R.id.tabPrompts)?.isSelected = tab == SettingsTab.PROMPTS
         dialogView.findViewById<Button>(R.id.tabBackup)?.isSelected = tab == SettingsTab.BACKUP
 
-        val container = dialogView.findViewById<FrameLayout>(R.id.settingsPaneContainer) ?: return
+        val container = dialogView.findViewById<ViewGroup>(R.id.settingsPaneContainer) ?: return
         container.removeAllViews()
         val layoutId = when (tab) {
             SettingsTab.MODELS -> R.layout.pane_models
@@ -305,15 +294,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindModelsPane(container: ViewGroup, state: HtmlAppUiState?) {
-        val context = container.context
-        val modelNames = state?.availableModels?.map { it.displayName }.orEmpty()
-        val adapterItems = if (modelNames.isNotEmpty()) modelNames else listOf("默认模型")
-        val adapter = ArrayAdapter(context, android.R.layout.simple_spinner_item, adapterItems)
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        container.findViewById<Spinner>(R.id.model1Type)?.adapter = adapter
-        container.findViewById<Spinner>(R.id.model2Type)?.adapter = adapter
-        container.findViewById<EditText>(R.id.model1Name)?.setText(modelNames.getOrNull(0) ?: "")
-        container.findViewById<EditText>(R.id.model2Name)?.setText(modelNames.getOrNull(1) ?: "")
+        val currentModel = state?.availableModels?.firstOrNull()
+        container.findViewById<EditText>(R.id.singleModelName)?.setText(currentModel?.displayName.orEmpty())
+        container.findViewById<SwitchCompat>(R.id.modelToggle)?.isChecked = currentModel != null
     }
 
     private fun bindPromptsPane(container: ViewGroup) {
@@ -365,6 +348,54 @@ class MainActivity : AppCompatActivity() {
         container.findViewById<Button>(R.id.btnClearAll)?.setOnClickListener {
             Toast.makeText(this, "清空功能即将上线", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun showSessionsDialog(state: HtmlAppUiState) {
+        val existing = sessionsDialog
+        if (existing?.isShowing == true) {
+            updateSessionsDialog(state)
+            return
+        }
+        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_sessions, null)
+        sessionsDialogView = dialogView
+
+        val recycler = dialogView.findViewById<RecyclerView>(R.id.sessionRecyclerView)
+        recycler?.layoutManager = LinearLayoutManager(this)
+        recycler?.adapter = sessionAdapter
+
+        dialogView.findViewById<View>(R.id.btnCloseSessions)?.setOnClickListener {
+            sessionsDialog?.dismiss()
+        }
+        dialogView.findViewById<Button>(R.id.btnNewChat)?.setOnClickListener {
+            viewModel.onNewChat()
+            sessionsDialog?.dismiss()
+        }
+
+        val bottomSheet = BottomSheetDialog(this)
+        bottomSheet.setContentView(dialogView)
+        bottomSheet.setOnShowListener { dialog ->
+            (dialog as? BottomSheetDialog)?.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)?.setBackgroundResource(android.R.color.transparent)
+        }
+        bottomSheet.setOnDismissListener {
+            sessionsDialog = null
+            sessionsDialogView = null
+        }
+        sessionsDialog = bottomSheet
+        bottomSheet.show()
+        updateSessionsDialog(state)
+    }
+
+    private fun updateSessionsDialog(state: HtmlAppUiState) {
+        val dialogView = sessionsDialogView ?: return
+        val isEmpty = state.sessions.isEmpty()
+        dialogView.findViewById<TextView>(R.id.emptySessions)?.isVisible = isEmpty
+        dialogView.findViewById<RecyclerView>(R.id.sessionRecyclerView)?.isVisible = !isEmpty
+        dialogView.findViewById<View>(R.id.btnNewChat)?.isEnabled = !state.isSending
+        dialogView.findViewById<com.google.android.material.chip.ChipGroup>(R.id.newChatModelSelector)?.updateModelChips(
+            models = state.availableModels,
+            selectedModelId = state.selectedModelId,
+            onSelect = viewModel::onSelectModel,
+        )
     }
 
     private enum class SettingsTab { MODELS, PROMPTS, BACKUP }

@@ -1,208 +1,133 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.drawerlayout.widget.DrawerLayout
+<androidx.constraintlayout.widget.ConstraintLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
-    android:id="@+id/drawerLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/bg_gradient_main"
     tools:context=".MainActivity">
 
     <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/header"
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="60dp"
+        android:background="@drawable/bg_header"
+        android:paddingHorizontal="20dp"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <Button
+            android:id="@+id/btnSessions"
+            style="@style/ButtonNormal"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:text="对话列表"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent"/>
+
+        <Button
+            android:id="@+id/btnSettings"
+            style="@style/ButtonNormal"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:text="设置"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent"/>
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <TextView
+        android:id="@+id/emptyState"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="还没有消息，发送第一条吧！"
+        android:textColor="@color/muted"
+        android:textSize="14sp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@id/composerContainer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/header"
+        app:layout_constraintVertical_bias="0.3"/>
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/messagesRecyclerView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:clipToPadding="false"
+        android:overScrollMode="never"
+        android:padding="16dp"
+        app:layout_constraintBottom_toTopOf="@id/composerContainer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/header"/>
+
+    <LinearLayout
+        android:id="@+id/composerContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/bg_composer"
+        android:elevation="8dp"
+        android:orientation="vertical"
+        android:padding="12dp"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <HorizontalScrollView
+            android:id="@+id/modelSelectorContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:scrollbars="none">
+
+            <com.google.android.material.chip.ChipGroup
+                android:id="@+id/modelSelector"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                app:chipSpacingHorizontal="4dp"
+                app:singleSelection="true"/>
+        </HorizontalScrollView>
 
         <LinearLayout
-            android:id="@+id/header"
             android:layout_width="match_parent"
-            android:layout_height="60dp"
-            android:orientation="horizontal"
-            android:background="@drawable/bg_header"
-            android:paddingHorizontal="20dp"
+            android:layout_height="wrap_content"
             android:gravity="center_vertical"
-            android:elevation="4dp"
-            app:layout_constraintTop_toTopOf="parent">
+            android:orientation="horizontal">
 
-            <LinearLayout
+            <EditText
+                android:id="@+id/inputMessage"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:orientation="horizontal"
-                android:gravity="center_vertical">
+                android:background="@drawable/bg_input"
+                android:gravity="top"
+                android:hint="输入消息后点击右侧&quot;发送&quot;"
+                android:inputType="textMultiLine|textCapSentences"
+                android:maxHeight="200dp"
+                android:minHeight="44dp"
+                android:overScrollMode="never"
+                android:padding="12dp"
+                android:scrollbars="vertical"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:textSize="15sp"/>
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="AI Chat"
-                    android:textSize="18sp"
-                    android:textStyle="bold"
-                    android:background="@drawable/bg_gradient_text"
-                    android:textColor="@android:color/transparent"
-                    android:paddingHorizontal="4dp"
-                    android:paddingVertical="2dp"/>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="v9.3⚡"
-                    android:textSize="11sp"
-                    android:textStyle="bold"
-                    android:textColor="@color/muted"
-                    android:background="@drawable/bg_pill"
-                    android:paddingHorizontal="10dp"
-                    android:paddingVertical="4dp"
-                    android:layout_marginStart="10dp"/>
-            </LinearLayout>
-
-            <Button
-                android:id="@+id/btnSessions"
+            <ProgressBar
+                android:id="@+id/progressSending"
+                style="@android:style/Widget.Material.ProgressBar.Small"
                 android:layout_width="wrap_content"
-                android:layout_height="40dp"
-                android:text="对话列表"
-                style="@style/ButtonNormal"
-                android:layout_marginEnd="8dp"/>
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:visibility="gone"/>
 
             <Button
-                android:id="@+id/btnSettings"
+                android:id="@+id/btnSend"
+                style="@style/ButtonPrimary"
                 android:layout_width="wrap_content"
-                android:layout_height="40dp"
-                android:text="设置"
-                style="@style/ButtonNormal"/>
-        </LinearLayout>
-
-        <TextView
-            android:id="@+id/emptyState"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="还没有消息，发送第一条吧！"
-            android:textColor="@color/muted"
-            android:textSize="14sp"
-            android:visibility="gone"
-            app:layout_constraintTop_toBottomOf="@id/header"
-            app:layout_constraintBottom_toTopOf="@id/composerContainer"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintVertical_bias="0.3"/>
-
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/messagesRecyclerView"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:padding="16dp"
-            android:clipToPadding="false"
-            android:overScrollMode="never"
-            app:layout_constraintTop_toBottomOf="@id/header"
-            app:layout_constraintBottom_toTopOf="@id/composerContainer"/>
-
-        <LinearLayout
-            android:id="@+id/composerContainer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/bg_composer"
-            android:padding="12dp"
-            android:elevation="8dp"
-            app:layout_constraintBottom_toBottomOf="parent">
-
-            <HorizontalScrollView
-                android:id="@+id/modelSelectorContainer"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:scrollbars="none"
-                android:layout_marginBottom="12dp">
-
-                <com.google.android.material.chip.ChipGroup
-                    android:id="@+id/modelSelector"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    app:singleSelection="true"
-                    app:chipSpacingHorizontal="4dp"/>
-            </HorizontalScrollView>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical">
-
-                <EditText
-                    android:id="@+id/inputMessage"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:minHeight="44dp"
-                    android:maxHeight="200dp"
-                    android:hint="输入消息后点击右侧&quot;发送&quot;"
-                    android:textSize="15sp"
-                    android:textColor="@color/fg"
-                    android:textColorHint="@color/muted"
-                    android:background="@drawable/bg_input"
-                    android:padding="12dp"
-                    android:gravity="top"
-                    android:inputType="textMultiLine|textCapSentences"
-                    android:overScrollMode="never"
-                    android:scrollbars="vertical"/>
-
-                <ProgressBar
-                    android:id="@+id/progressSending"
-                    style="@android:style/Widget.Material.ProgressBar.Small"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:visibility="gone"/>
-
-                <Button
-                    android:id="@+id/btnSend"
-                    android:layout_width="wrap_content"
-                    android:layout_height="48dp"
-                    android:text="@string/action_send"
-                    style="@style/ButtonPrimary"
-                    android:layout_marginStart="10dp"/>
-            </LinearLayout>
-        </LinearLayout>
-    </androidx.constraintlayout.widget.ConstraintLayout>
-
-    <androidx.constraintlayout.widget.ConstraintLayout
-        android:id="@+id/sidebar"
-        android:layout_width="300dp"
-        android:layout_height="match_parent"
-        android:layout_gravity="start"
-        android:background="@drawable/bg_sidebar">
-
-        <LinearLayout
-            android:id="@+id/sidebarHeader"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="16dp"
-            android:background="@color/panel_dark"
-            app:layout_constraintTop_toTopOf="parent">
-
-            <com.google.android.material.chip.ChipGroup
-                android:id="@+id/newChatModelSelector"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="8dp"
-                app:singleSelection="true"
-                app:chipSpacingHorizontal="4dp"/>
-
-            <Button
-                android:id="@+id/btnNewChat"
-                android:layout_width="match_parent"
                 android:layout_height="48dp"
-                android:text="新建"
-                style="@style/ButtonPrimary"/>
+                android:layout_marginStart="10dp"
+                android:text="@string/action_send"/>
         </LinearLayout>
+    </LinearLayout>
 
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/sessionRecyclerView"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:padding="12dp"
-            android:clipToPadding="false"
-            app:layout_constraintTop_toBottomOf="@id/sidebarHeader"
-            app:layout_constraintBottom_toBottomOf="parent"
-            android:overScrollMode="never"/>
-    </androidx.constraintlayout.widget.ConstraintLayout>
-</androidx.drawerlayout.widget.DrawerLayout>
+</androidx.constraintlayout.widget.ConstraintLayout>
