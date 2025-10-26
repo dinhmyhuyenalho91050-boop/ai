@@ -133,7 +133,7 @@
                     android:layout_weight="1"
                     android:minHeight="44dp"
                     android:maxHeight="200dp"
-                    android:hint="输入消息后点击右侧\"发送\""
+                    android:hint="输入消息后点击右侧&quot;发送&quot;"
                     android:textSize="15sp"
                     android:textColor="@color/fg"
                     android:textColorHint="@color/muted"
