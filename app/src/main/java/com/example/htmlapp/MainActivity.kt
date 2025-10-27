@@ -368,10 +368,37 @@ class MainActivity : AppCompatActivity() {
         updateWebViewActivityState()
         if (changed) {
             if (isForeground) {
-                refreshWebViewInputConnection()
+                resumeWebViewAfterBackground()
+            } else {
+                prepareWebViewForBackground()
             }
             notifyWebVisibility(if (isForeground) "foreground" else "background")
         }
+    }
+
+    private fun prepareWebViewForBackground() {
+        if (!this::webView.isInitialized) return
+        try {
+            webView.onPause()
+        } catch (_: Throwable) {
+        }
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        webView.post {
+            if (!webView.isAttachedToWindow) {
+                return@post
+            }
+            webView.clearFocus()
+            imm?.hideSoftInputFromWindow(webView.windowToken, InputMethodManager.HIDE_NOT_ALWAYS)
+        }
+    }
+
+    private fun resumeWebViewAfterBackground() {
+        if (!this::webView.isInitialized) return
+        try {
+            webView.onResume()
+        } catch (_: Throwable) {
+        }
+        refreshWebViewInputConnection()
     }
 
     private fun refreshWebViewInputConnection() {
