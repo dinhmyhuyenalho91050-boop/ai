@@ -27,6 +27,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import android.view.inputmethod.InputMethodManager
 import androidx.activity.addCallback
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
@@ -305,6 +306,7 @@ class MainActivity : AppCompatActivity() {
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 it.hide(WindowInsetsCompat.Type.systemBars())
             }
+            refreshWebViewInputConnection()
         }
     }
 
@@ -365,7 +367,26 @@ class MainActivity : AppCompatActivity() {
         isAppInForeground = isForeground
         updateWebViewActivityState()
         if (changed) {
+            if (isForeground) {
+                refreshWebViewInputConnection()
+            }
             notifyWebVisibility(if (isForeground) "foreground" else "background")
+        }
+    }
+
+    private fun refreshWebViewInputConnection() {
+        if (!this::webView.isInitialized) return
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            ?: return
+        webView.post {
+            if (!webView.isAttachedToWindow) {
+                return@post
+            }
+            if (!webView.hasFocus()) {
+                webView.requestFocus(View.FOCUS_DOWN)
+                webView.requestFocusFromTouch()
+            }
+            imm.restartInput(webView)
         }
     }
 
