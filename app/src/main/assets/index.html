@@ -341,6 +341,7 @@
             <div class="field" style="grid-template-columns:1fr"><label>首条助手消息</label><textarea id="firstAssistant" rows="5" placeholder="进入对话即显示"></textarea></div>
             <div class="sep"></div>
             <div class="field" style="grid-template-columns:1fr"><label>消息前缀</label><textarea id="messagePrefix" rows="3" placeholder="拼接到最新用户消息前(可选)"></textarea></div>
+            <div class="field" style="grid-template-columns:1fr"><label>消息后缀</label><textarea id="messageSuffix" rows="3" placeholder="拼接到最新用户消息后(可选)"></textarea></div>
             <div class="field" style="grid-template-columns:1fr"><label>助手预填充</label><textarea id="assistantPrefill" rows="3" placeholder="引导助手回复开头(可选)"></textarea></div>
             <div class="sep"></div>
             <div style="margin-bottom:1rem">
@@ -1581,7 +1582,7 @@ class StateManager{
       currentId:null,
       promptPresets:{
         'default':{name:'默认预设',sysPrompt:'',firstUser:'',firstAssistant:'',
-          messagePrefix:'',assistantPrefill:'',regexRules:[]}
+          messagePrefix:'',messageSuffix:'',assistantPrefill:'',regexRules:[]}
       },
       currentModelIndex:0,
       editingPromptPreset:null
@@ -1610,6 +1611,13 @@ class StateManager{
     this.state.currentId=currentId;
     this.state.promptPresets=promptPresets;
 
+    Object.keys(this.state.promptPresets||{}).forEach(key=>{
+      const preset=this.state.promptPresets[key]||{};
+      if(typeof preset.messageSuffix!=='string'){
+        this.state.promptPresets[key]={...preset,messageSuffix:preset.messageSuffix||''};
+      }
+    });
+
     StorageManager.seedSessionsCache(this.state.sessions);
     this.initialized=true;
   }
@@ -1629,7 +1637,27 @@ class StateManager{
       return;
     }
 
-    this.state[key]=value;
+    if(key==='promptPresets'&&value&&typeof value==='object'){
+      const normalized={};
+      Object.keys(value).forEach(presetKey=>{
+        const preset=value[presetKey]||{};
+        normalized[presetKey]={
+          ...preset,
+          messageSuffix:typeof preset.messageSuffix==='string'?preset.messageSuffix:'',
+          messagePrefix:typeof preset.messagePrefix==='string'?preset.messagePrefix:'',
+          assistantPrefill:typeof preset.assistantPrefill==='string'?preset.assistantPrefill:'',
+          sysPrompt:typeof preset.sysPrompt==='string'?preset.sysPrompt:'',
+          firstUser:typeof preset.firstUser==='string'?preset.firstUser:'',
+          firstAssistant:typeof preset.firstAssistant==='string'?preset.firstAssistant:''
+        };
+        if(!Array.isArray(normalized[presetKey].regexRules)){
+          normalized[presetKey].regexRules=[];
+        }
+      });
+      this.state[key]=normalized;
+    }else{
+      this.state[key]=value;
+    }
     this.pendingSaves.add(key);
     this.debounceSave();
   }
@@ -1693,18 +1721,38 @@ class StateManager{
     return presets[this.state.currentModelIndex]||presets[0];
   }
   
+  _normalizePromptConfig(preset){
+    const fallback={
+      sysPrompt:'',
+      firstUser:'',
+      firstAssistant:'',
+      messagePrefix:'',
+      messageSuffix:'',
+      assistantPrefill:'',
+      regexRules:[]
+    };
+    if(!preset)return{...fallback};
+    const normalized={...fallback,...preset};
+    if(!Array.isArray(normalized.regexRules))normalized.regexRules=[];
+    normalized.messagePrefix=typeof normalized.messagePrefix==='string'?normalized.messagePrefix:'';
+    normalized.messageSuffix=typeof normalized.messageSuffix==='string'?normalized.messageSuffix:'';
+    normalized.assistantPrefill=typeof normalized.assistantPrefill==='string'?normalized.assistantPrefill:'';
+    normalized.sysPrompt=typeof normalized.sysPrompt==='string'?normalized.sysPrompt:'';
+    normalized.firstUser=typeof normalized.firstUser==='string'?normalized.firstUser:'';
+    normalized.firstAssistant=typeof normalized.firstAssistant==='string'?normalized.firstAssistant:'';
+    return normalized;
+  }
+
   getCurrentPromptConfig(){
     // 返回default预设作为后备
-    return this.state.promptPresets['default']||
-      {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[]};
+    return this._normalizePromptConfig(this.state.promptPresets['default']);
   }
-  
+
   getSessionPromptConfig(session){
     if(!session)return this.getCurrentPromptConfig();
     const presetName=session.promptPresetName||'default';
-    return this.state.promptPresets[presetName]||
-      this.state.promptPresets['default']||
-      {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[]};
+    const preset=this.state.promptPresets[presetName]||this.state.promptPresets['default'];
+    return this._normalizePromptConfig(preset);
   }
 }
 
@@ -1770,7 +1818,12 @@ class APIManager{
     history.forEach((m,i)=>{
       if(m.role==='user'||m.role==='assistant'){
         const isLastUser=m.role==='user'&&i===history.length-1;
-        const content=(isLastUser&&pc.messagePrefix)?pc.messagePrefix+m.content:m.content;
+        let content=m.content;
+        if(isLastUser){
+          const prefix=pc.messagePrefix||'';
+          const suffix=pc.messageSuffix||'';
+          if(prefix||suffix)content=`${prefix}${content}${suffix}`;
+        }
         msgs.push({role:m.role,content});
       }
     });
@@ -1898,8 +1951,13 @@ if (qs.length) url += `?${qs.join('&')}`;
     const history=session.history||[];
     history.forEach((m,i)=>{
       const isLastUser=m.role==='user'&&i===history.length-1;
-      const content=(isLastUser&&pc.messagePrefix)?pc.messagePrefix+m.content:m.content;
-      
+      let content=m.content;
+      if(isLastUser){
+        const prefix=pc.messagePrefix||'';
+        const suffix=pc.messageSuffix||'';
+        if(prefix||suffix)content=`${prefix}${content}${suffix}`;
+      }
+
       if(m.role==='assistant')contents.push({role:'model',parts:[{text:m.content}]});
       if(m.role==='user')contents.push({role:'user',parts:[{text:content}]});
     });
@@ -2103,6 +2161,7 @@ class UIManager{
       firstUser:'',
       firstAssistant:'',
       messagePrefix:'',
+      messageSuffix:'',
       assistantPrefill:'',
       regexRules:[]
     };
@@ -2118,6 +2177,7 @@ class UIManager{
         firstUser:preset.firstUser||'',
         firstAssistant:preset.firstAssistant||'',
         messagePrefix:preset.messagePrefix||'',
+        messageSuffix:preset.messageSuffix||'',
         assistantPrefill:preset.assistantPrefill||'',
         regexRules:Array.isArray(preset.regexRules)?preset.regexRules.map(rule=>({
           name:rule?.name||'',
@@ -3383,6 +3443,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(Utils.$('#firstUser'))Utils.$('#firstUser').value=this.promptPresetDraft.firstUser||'';
     if(Utils.$('#firstAssistant'))Utils.$('#firstAssistant').value=this.promptPresetDraft.firstAssistant||'';
     if(Utils.$('#messagePrefix'))Utils.$('#messagePrefix').value=this.promptPresetDraft.messagePrefix||'';
+    if(Utils.$('#messageSuffix'))Utils.$('#messageSuffix').value=this.promptPresetDraft.messageSuffix||'';
     if(Utils.$('#assistantPrefill'))Utils.$('#assistantPrefill').value=this.promptPresetDraft.assistantPrefill||'';
 
     this.renderRegexRules(this.promptPresetDraft.regexRules||[]);
@@ -3495,6 +3556,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       firstUser:Utils.$('#firstUser')?.value.trim()||'',
       firstAssistant:Utils.$('#firstAssistant')?.value.trim()||'',
       messagePrefix:Utils.$('#messagePrefix')?.value.trim()||'',
+      messageSuffix:Utils.$('#messageSuffix')?.value.trim()||'',
       assistantPrefill:Utils.$('#assistantPrefill')?.value.trim()||'',
       regexRules:regexRules
     };
@@ -3529,6 +3591,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       firstUser:Utils.$('#firstUser')?.value.trim()||'',
       firstAssistant:Utils.$('#firstAssistant')?.value.trim()||'',
       messagePrefix:Utils.$('#messagePrefix')?.value.trim()||'',
+      messageSuffix:Utils.$('#messageSuffix')?.value.trim()||'',
       assistantPrefill:Utils.$('#assistantPrefill')?.value.trim()||'',
       regexRules:(this.promptPresetDraft&&Array.isArray(this.promptPresetDraft.regexRules))?
         this.promptPresetDraft.regexRules.map(rule=>({
@@ -3571,6 +3634,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     Utils.$('#firstUser').value='';
     Utils.$('#firstAssistant').value='';
     Utils.$('#messagePrefix').value='';
+    Utils.$('#messageSuffix').value='';
     Utils.$('#assistantPrefill').value='';
 
     this.renderPromptPresetList();
@@ -3838,7 +3902,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     
     this.state.set('promptPresets',{
       'default':{name:'默认预设',sysPrompt:'',firstUser:'',firstAssistant:'',
-        messagePrefix:'',assistantPrefill:'',regexRules:[]}
+        messagePrefix:'',messageSuffix:'',assistantPrefill:'',regexRules:[]}
     });
     
     this.state.set('sessions',{});
