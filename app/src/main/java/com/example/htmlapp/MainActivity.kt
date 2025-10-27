@@ -385,7 +385,6 @@ class MainActivity : AppCompatActivity() {
                 areImagesBlocked = false
             }
             if (areTimersPaused) {
-                webView.onResume()
                 webView.resumeTimers()
                 areTimersPaused = false
             }
@@ -395,7 +394,6 @@ class MainActivity : AppCompatActivity() {
                 areImagesBlocked = true
             }
             if (!areTimersPaused) {
-                webView.onPause()
                 webView.pauseTimers()
                 areTimersPaused = true
             }
