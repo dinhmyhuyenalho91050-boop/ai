@@ -378,9 +378,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun prepareWebViewForBackground() {
         if (!this::webView.isInitialized) return
-        try {
-            webView.onPause()
-        } catch (_: Throwable) {
+        if (!shouldKeepWebViewActive()) {
+            try {
+                webView.onPause()
+            } catch (_: Throwable) {
+            }
         }
         val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         webView.post {
