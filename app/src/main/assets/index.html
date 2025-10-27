@@ -2087,6 +2087,9 @@ class UIManager{
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
     this._currentBatcher=null;
     this._pendingFoldCheck=false;
+    this._inputWasFocused=false;      // track whether composer had focus before disabling
+    this._restoreFocusPending=false;  // defer restoring focus until viewport is ready
+    this._restoreFocusFrame=null;
 
     window._sanitizer=this.sanitizer;
 
@@ -2194,8 +2197,49 @@ class UIManager{
     }
   }
 
+  _focusComposerInput(){
+    const input=Utils.$('#input');
+    if(!input||input.disabled)return false;
+    try{
+      input.focus({preventScroll:true});
+    }catch(_){
+      try{ input.focus(); }catch(_){ return false; }
+    }
+    try{
+      if(typeof input.setSelectionRange==='function'){
+        const len=input.value.length;
+        input.setSelectionRange(len,len);
+      }
+    }catch(_){/* ignore selection errors */}
+    return document.activeElement===input;
+  }
+
   onNativeVisibilityChange(state){
-    this._handleVisibilityChange(state==='background');
+    const hidden=state==='background';
+    this._handleVisibilityChange(hidden);
+    if(hidden){
+      if(this._restoreFocusFrame){
+        cancelAnimationFrame(this._restoreFocusFrame);
+        this._restoreFocusFrame=null;
+      }
+      return;
+    }
+    if(this._restoreFocusPending&&!this.isSending){
+      if(this._restoreFocusFrame){
+        cancelAnimationFrame(this._restoreFocusFrame);
+        this._restoreFocusFrame=null;
+      }
+      this._restoreFocusFrame=requestAnimationFrame(()=>{
+        this._restoreFocusFrame=null;
+        if(this.isSending){
+          this._restoreFocusPending=true;
+          return;
+        }
+        if(this._focusComposerInput()){
+          this._restoreFocusPending=false;
+        }
+      });
+    }
   }
   preserveScroll(fn){
     const box=Utils.$('#messages');
@@ -3163,6 +3207,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         sendBtn.classList.add('warn','sending');
         sendBtn.innerHTML='<span class="spinner"></span>停止';
         sendBtn.disabled=false;
+        if(this._restoreFocusFrame){
+          cancelAnimationFrame(this._restoreFocusFrame);
+          this._restoreFocusFrame=null;
+        }
+        this._restoreFocusPending=false;
+        this._inputWasFocused=document.activeElement===input;
+        if(this._inputWasFocused){
+          // release IME connection before disabling to avoid stuck keyboard
+          try{ input.blur(); }catch(_){/* ignore blur errors */}
+        }
         input.disabled=true;
       }else{
         sendBtn.classList.add('primary');
@@ -3170,9 +3224,35 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         sendBtn.textContent='发送';
         sendBtn.disabled=false;
         input.disabled=false;
+        if(this._inputWasFocused){
+          this._restoreFocusPending=true;
+          const scheduleRestore=()=>{
+            this._restoreFocusFrame=null;
+            if(this.isSending){
+              this._restoreFocusPending=true;
+              return;
+            }
+            if(!this._focusComposerInput()){
+              this._restoreFocusPending=true;
+            }else{
+              this._restoreFocusPending=false;
+            }
+          };
+          if(!document.hidden){
+            if(this._restoreFocusFrame){
+              cancelAnimationFrame(this._restoreFocusFrame);
+              this._restoreFocusFrame=null;
+            }
+            // restore focus after the DOM settles so the IME can reattach
+            this._restoreFocusFrame=requestAnimationFrame(scheduleRestore);
+          }
+        }else{
+          this._restoreFocusPending=false;
+        }
+        this._inputWasFocused=false;
       }
     }
-    
+
     const disableButtons=(containerKey)=>{
       const container=Utils.$(containerKey);
       if(container){
@@ -4481,7 +4561,14 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     this.domPool.clear();
     this.clearMessages();
     this.state.forceSave();
-    
+
+    if(this._restoreFocusFrame){
+      cancelAnimationFrame(this._restoreFocusFrame);
+      this._restoreFocusFrame=null;
+    }
+    this._restoreFocusPending=false;
+    this._inputWasFocused=false;
+
     if(window._sanitizer===this.sanitizer){
       window._sanitizer=null;
     }
