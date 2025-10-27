@@ -460,6 +460,7 @@ const RX_PATTERNS={
 };
 
 const SPECIAL_CHARS=new Set([34,42,8220,8221,65282,65290]);
+const NON_TEXT_INPUT_TYPES=new Set(['button','submit','reset','checkbox','radio','range','color','file','image','hidden','date','time','datetime-local','month','week']);
 
 // ===== SmartSanitizer - ✅ 简化版：全量处理更快 =====
 class SmartSanitizer{
@@ -2087,6 +2088,8 @@ class UIManager{
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
     this._currentBatcher=null;
     this._pendingFoldCheck=false;
+    this._imeNeedsReset=false;
+    this._imeResetTimer=null;
 
     window._sanitizer=this.sanitizer;
 
@@ -2094,6 +2097,9 @@ class UIManager{
     this.events.on(document,'visibilitychange',()=>{
       this._handleVisibilityChange(document.hidden);
     });
+    this.events.on(document,'focusin',(e)=>{
+      this._maybeKickIme(e?.target);
+    },{capture:true});
   }
 
   _clonePromptPreset(preset){
@@ -2156,7 +2162,10 @@ class UIManager{
 
   _handleVisibilityChange(isHidden){
     const hidden=!!isHidden;
-    if(this._appHidden===hidden)return;
+    if(this._appHidden===hidden){
+      if(!hidden)this._markImeResetNeeded();
+      return;
+    }
     this._appHidden=hidden;
     if(hidden){
       this.dom.stopAutoCleanup();
@@ -2170,6 +2179,7 @@ class UIManager{
         this._currentBatcher.setBackgroundMode(false);
         this._currentBatcher.flushPending(true);
       }
+      this._markImeResetNeeded();
     }
   }
 
@@ -2196,6 +2206,83 @@ class UIManager{
 
   onNativeVisibilityChange(state){
     this._handleVisibilityChange(state==='background');
+  }
+  _markImeResetNeeded(){
+    this._imeNeedsReset=true;
+    requestAnimationFrame(()=>this._refreshImeIfNeeded());
+  }
+  _refreshImeIfNeeded(){
+    if(!this._imeNeedsReset)return;
+    const active=document.activeElement;
+    if(this._isTextInput(active)){
+      this._stabilizeTextInput(active);
+    }
+  }
+  _maybeKickIme(target){
+    if(!this._imeNeedsReset)return;
+    if(!this._isTextInput(target))return;
+    this._stabilizeTextInput(target);
+  }
+  _isTextInput(el){
+    if(!el)return false;
+    const tag=(el.tagName||'').toLowerCase();
+    if(tag==='textarea')return true;
+    if(tag==='input'){
+      const type=(el.type||'text').toLowerCase();
+      return !NON_TEXT_INPUT_TYPES.has(type);
+    }
+    return !!el.isContentEditable;
+  }
+  _captureSelection(el){
+    const snap={};
+    try{
+      if(typeof el.selectionStart==='number'&&typeof el.selectionEnd==='number'){
+        snap.start=el.selectionStart;
+        snap.end=el.selectionEnd;
+      }
+    }catch{}
+    if(typeof el.value==='string')snap.valueLength=el.value.length;
+    if(typeof el.scrollTop==='number')snap.scrollTop=el.scrollTop;
+    if(typeof el.scrollLeft==='number')snap.scrollLeft=el.scrollLeft;
+    return snap;
+  }
+  _restoreSelection(el,snap){
+    if(!snap||!el)return;
+    try{
+      if(typeof snap.start==='number'&&typeof snap.end==='number'&&typeof el.setSelectionRange==='function'){
+        el.setSelectionRange(snap.start,snap.end);
+      }else if(typeof snap.valueLength==='number'&&typeof el.setSelectionRange==='function'){
+        el.setSelectionRange(snap.valueLength,snap.valueLength);
+      }
+    }catch{}
+    if(typeof snap.scrollTop==='number'){
+      try{ el.scrollTop=snap.scrollTop; }catch{}
+    }
+    if(typeof snap.scrollLeft==='number'){
+      try{ el.scrollLeft=snap.scrollLeft; }catch{}
+    }
+  }
+  _stabilizeTextInput(target){
+    if(!target||typeof target.focus!=='function'){
+      this._imeNeedsReset=false;
+      return;
+    }
+    this._imeNeedsReset=false;
+    if(this._imeResetTimer){
+      this.events.clearTimeout(this._imeResetTimer);
+      this._imeResetTimer=null;
+    }
+    const snapshot=this._captureSelection(target);
+    this._imeResetTimer=this.events.setTimeout(()=>{
+      this._imeResetTimer=null;
+      if(!target.isConnected)return;
+      try{
+        target.focus({preventScroll:true});
+      }catch(e){
+        try{ target.focus(); }catch(_){ return; }
+      }
+      this._restoreSelection(target,snapshot);
+    },80);
   }
   preserveScroll(fn){
     const box=Utils.$('#messages');
