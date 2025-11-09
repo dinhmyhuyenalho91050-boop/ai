@@ -926,13 +926,15 @@ const Utils={
   },
   
   numOrNull(value){
+    if(value===''||value==null)return null;
     const n=Number(value);
-    return Number.isFinite(n)&&n!==0?n:null;
+    return Number.isFinite(n)?n:null;
   },
   
   intOrNull(value){
+    if(value===''||value==null)return null;
     const n=parseInt(value,10);
-    return Number.isFinite(n)&&n!==0?n:null;
+    return Number.isFinite(n)?n:null;
   },
   
   scheduleIdleTask(fn,options={}){
@@ -1819,9 +1821,9 @@ class APIManager{
       stream:!!cfg.stream
     };
     
-    if(cfg.temperature!=null)body.temperature=cfg.temperature;
-    if(cfg.top_p!=null)body.top_p=cfg.top_p;
-    if(cfg.max_tokens!=null)body.max_tokens=cfg.max_tokens;
+    if(cfg.temperature!=null&&cfg.temperature!==0)body.temperature=cfg.temperature;
+    if(cfg.top_p!=null&&cfg.top_p!==0)body.top_p=cfg.top_p;
+    if(cfg.max_tokens!=null&&cfg.max_tokens!==0)body.max_tokens=cfg.max_tokens;
     
     // ✅ 添加思维链支持 - 只有在启用时才发送
     if(cfg.useThinking&&cfg.thinkingEffort){
@@ -1917,10 +1919,10 @@ if (qs.length) url += `?${qs.join('&')}`;
     if(pc.assistantPrefill)contents.push({role:'model',parts:[{text:pc.assistantPrefill}]});
     
     const generationConfig={};
-    if(cfg.temperature!=null)generationConfig.temperature=cfg.temperature;
-    if(cfg.top_p!=null)generationConfig.topP=cfg.top_p;
-    if(cfg.top_k!=null)generationConfig.topK=cfg.top_k;
-    if(cfg.max_output_tokens!=null)generationConfig.maxOutputTokens=cfg.max_output_tokens;
+    if(cfg.temperature!=null&&cfg.temperature!==0)generationConfig.temperature=cfg.temperature;
+    if(cfg.top_p!=null&&cfg.top_p!==0)generationConfig.topP=cfg.top_p;
+    if(cfg.top_k!=null&&cfg.top_k!==0)generationConfig.topK=cfg.top_k;
+    if(cfg.max_output_tokens!=null&&cfg.max_output_tokens!==0)generationConfig.maxOutputTokens=cfg.max_output_tokens;
     
     // ✅ 添加思维链支持 - 根据官方文档格式
     if(cfg.useThinking){
