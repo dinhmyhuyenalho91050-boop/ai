@@ -2096,6 +2096,7 @@ class UIManager{
     this._pendingAutoLoad=false;
     this._regexInputDebounced=null;
     this._pendingTypingUpdate=null;
+    this._resetIMEState=null;
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
     this._currentBatcher=null;
     this._pendingFoldCheck=false;
@@ -4541,6 +4542,29 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       box.style.setProperty('--composer-pad', pad + 'px');
     };
     const updatePad = Utils.rafThrottle(()=> this._updateBottomPadding());
+    const resetImeState = ()=>{
+      try{ setKeyboardInset(0); }catch(e){}
+      if(this._ime){
+        this._ime.active=false;
+        this._ime.wasNearBottom=false;
+        try{
+          if(this._vvAvailable && window.visualViewport){
+            this._ime.baseVVH=window.visualViewport.height;
+          }else{
+            this._ime.baseVVH=null;
+          }
+        }catch(e){ this._ime.baseVVH=null; }
+      }
+      updatePad();
+      try{ this._updateBottomPadding(); }catch(e){}
+      try{
+        if(document.body){
+          document.body.style.paddingBottom='';
+          document.body.classList.remove('kb-open');
+        }
+      }catch(e){}
+    };
+    this._resetIMEState = resetImeState;
 
     this._smoothStickBottom = (duration=220)=>{
       const start = box.scrollTop;
@@ -4599,6 +4623,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
 
     this.events.on(window, 'resize', updatePad, {passive:true});
+    this.events.on(document,'visibilitychange',()=>{
+      if(document.hidden){
+        resetImeState();
+      }else{
+        if(this._ime){
+          this._ime.active=false;
+        }
+        updatePad();
+      }
+    });
     if('virtualKeyboard' in navigator){
       try{ navigator.virtualKeyboard.overlaysContent = true; }catch(e){}
       const syncVK = ()=>{
@@ -4623,6 +4657,20 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       }, {passive:true});
     }
     requestAnimationFrame(()=> this._updateBottomPadding());
+  }
+
+  resetIMEState(){
+    if(typeof this._resetIMEState==='function'){
+      try{ this._resetIMEState(); }catch(e){}
+    }else{
+      try{
+        document.documentElement?.style?.setProperty('--kb','0px');
+        if(document.body){
+          document.body.style.paddingBottom='';
+          document.body.classList.remove('kb-open');
+        }
+      }catch(e){}
+    }
   }
 }
 
@@ -4815,6 +4863,13 @@ if(document.readyState==='loading'){
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', applyThrottled);
     }
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        scrollPending = false;
+        pendingElement = null;
+        try { document.body.style.paddingBottom = ''; } catch (_) {}
+      }
+    }, { passive: true });
   })();
 })();
 </script>
@@ -4822,10 +4877,40 @@ if(document.readyState==='loading'){
 <script>
 (function(){
   'use strict';
+  const blurActiveEditable=()=>{
+    try{
+      const active=document.activeElement;
+      if(!active)return;
+      const tag=(active.tagName||'').toLowerCase();
+      const isEditable=/^(input|textarea|select)$/i.test(tag)||active.isContentEditable;
+      if(isEditable&&typeof active.blur==='function'){
+        active.blur();
+      }
+    }catch(_){ }
+  };
+  const resetImeForState=(ui)=>{
+    if(ui&&typeof ui.resetIMEState==='function'){
+      try{ ui.resetIMEState(); }catch(_){ }
+    }else{
+      try{
+        document.documentElement?.style?.setProperty('--kb','0px');
+        if(document.body){
+          document.body.style.paddingBottom='';
+          document.body.classList.remove('kb-open');
+        }
+      }catch(_){ }
+    }
+  };
   const applyState=(state)=>{
     const normalized=state==='background'?'background':'foreground';
     window.__APP_VISIBILITY__=normalized;
     const ui=window.chatApp?.ui;
+    if(normalized==='background'){
+      blurActiveEditable();
+      resetImeForState(ui);
+    }else{
+      resetImeForState(ui);
+    }
     if(ui&&typeof ui.onNativeVisibilityChange==='function'){
       try{ ui.onNativeVisibilityChange(normalized); }catch(e){}
     }
