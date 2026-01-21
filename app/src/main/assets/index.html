@@ -1815,6 +1815,7 @@ class APIManager{
       modelDefault='kimi-k2-0905-preview';
     }
     const url=(cfg.base||baseDefault).replace(/\/+$/,'')+'/chat/completions';
+    const allowThinking=!!cfg.useThinking;
     const body={
       model:cfg.model||modelDefault,
       messages:this.buildMessages(session,{isDeepSeek,isKimi}),
@@ -1826,9 +1827,9 @@ class APIManager{
     if(cfg.max_tokens!=null&&cfg.max_tokens!==0)body.max_tokens=cfg.max_tokens;
     
     // ✅ 添加思维链支持 - 只有在启用时才发送
-    if(cfg.useThinking&&cfg.thinkingEffort){
+    if(allowThinking&&cfg.thinkingEffort){
       body.reasoning_effort=cfg.thinkingEffort;
-    }else if(cfg.useThinking){
+    }else if(allowThinking){
       // 启用但未指定级别，使用medium作为默认值
       body.reasoning_effort='medium';
     }
@@ -1868,7 +1869,7 @@ class APIManager{
             try{
               const json=JSON.parse(data);
               const delta=json?.choices?.[0]?.delta?.content||'';
-              const thinkDelta=json?.choices?.[0]?.delta?.reasoning_content||'';
+              const thinkDelta=allowThinking?json?.choices?.[0]?.delta?.reasoning_content||'':'';
               if(thinkDelta)thinking+=thinkDelta;
               if(delta){
                 full+=delta;
@@ -1884,7 +1885,7 @@ class APIManager{
     }else{
       const data=await res.json();
       const content=data?.choices?.[0]?.message?.content||'(空响应)';
-      const thinking=data?.choices?.[0]?.message?.reasoning_content||'';
+      const thinking=allowThinking?data?.choices?.[0]?.message?.reasoning_content||'':'';
       return{content,thinking};
     }
   }
