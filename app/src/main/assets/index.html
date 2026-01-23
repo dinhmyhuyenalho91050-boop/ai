@@ -381,10 +381,11 @@
                 </select>
               </div>
               <div class="field" style="grid-template-columns:1fr">
-                <label>Steps 配置(JSON)</label>
-                <textarea id="multiStepRunnerSteps" rows="6" placeholder='例如: [{"name":"step1","history":{"mode":"none"},"user":{"mode":"replace","content":"{{reply1}}"}}]&#10;示例(指定模型预设): [{"name":"step2","preset":"DeepSeek","history":{"mode":"range","start":1,"end":2},"user":{"mode":"append","content":"补充说明"}}]'></textarea>
-                <div style="font-size:11px;color:var(--muted);margin-top:.35rem;line-height:1.4">
-                  每个 step 支持可选字段：preset/presetName(模型预设名称) 或 presetIndex(启用的模型预设序号，0 起)；未填写则使用当前会话的模型预设。
+                <label>步骤配置</label>
+                <div id="multiStepRunnerStepsContainer" style="display:flex;flex-direction:column;gap:.75rem"></div>
+                <button type="button" class="btn small" id="btnAddMultiStepStep" style="justify-self:start;margin-top:.35rem">+ 添加步骤</button>
+                <div style="font-size:11px;color:var(--muted);margin-top:.4rem;line-height:1.4">
+                  提示：每一步可以指定系统提示、历史楼层范围与最新用户消息改写；从第 2 步开始可使用 {{reply1}}/{{reply2}} 引用前序回复。
                 </div>
               </div>
             </div>
@@ -2013,7 +2014,7 @@ class APIManager{
     const total=turns.length;
     const config=this._normalizeHistoryConfig(historyConfig);
     const rawMode=String(config.mode||'all').toLowerCase().replace(/\s+/g,' ').trim();
-    const mode=rawMode.includes('all')?'all':(rawMode.includes('none')||rawMode.includes('empty')?'none':(rawMode.includes('range')?'range':rawMode));
+    const mode=rawMode.includes('all')?'all':(rawMode.includes('none')||rawMode.includes('empty')?'none':(rawMode.includes('range')?'range':(rawMode.includes('last')||rawMode.includes('latest')||rawMode.includes('recent')?'latest':rawMode)));
     if(mode==='none')return [];
     if(total===0)return [];
     let start=1;
@@ -2021,6 +2022,11 @@ class APIManager{
     if(mode==='range'){
       start=Number.isFinite(config.start)?Math.trunc(config.start):1;
       end=Number.isFinite(config.end)?Math.trunc(config.end):total;
+    }else if(mode==='latest'){
+      const countRaw=Number.isFinite(config.count)?Math.trunc(config.count):Math.trunc(config.latest);
+      const count=Number.isFinite(countRaw)?Math.max(1,countRaw):1;
+      start=Math.max(1,total-count+1);
+      end=total;
     }
     if(start<1||end<start||end>total){
       throw new Error(`历史回合范围无效: ${start}..${end} (总回合=${total})`);
@@ -2134,6 +2140,84 @@ class APIManager{
       return presets[resolved];
     }
     return defaultPreset;
+  }
+
+  _estimateValidationTurnCount(steps){
+    let maxTurns=0;
+    steps.forEach(step=>{
+      const config=this._normalizeHistoryConfig(step?.history);
+      const rawMode=String(config.mode||'all').toLowerCase();
+      const mode=rawMode.includes('range')?'range':(rawMode.includes('last')||rawMode.includes('latest')||rawMode.includes('recent')?'latest':rawMode);
+      if(mode==='range'){
+        const end=Number.isFinite(config.end)?Math.trunc(config.end):0;
+        if(end>maxTurns)maxTurns=end;
+      }else if(mode==='latest'){
+        const countRaw=Number.isFinite(config.count)?Math.trunc(config.count):Math.trunc(config.latest);
+        const count=Number.isFinite(countRaw)?Math.max(1,countRaw):1;
+        if(count>maxTurns)maxTurns=count;
+      }
+      const turnEdits=[...(step?.patches?.turnUsers||[]),...(step?.patches?.turnAssistants||[])];
+      turnEdits.forEach(edit=>{
+        const idx=Math.trunc(edit?.turn);
+        if(Number.isInteger(idx)&&idx>maxTurns)maxTurns=idx;
+      });
+    });
+    return Math.max(0,maxTurns);
+  }
+
+  validateMultiStepRunnerSteps(steps,options={}){
+    if(!Array.isArray(steps))throw new Error('多步编排 steps 必须为数组');
+    const baseSystem=options.baseSystem??'';
+    const baseUserRaw=options.baseUser??'示例用户输入';
+    const baseUser=options.messagePrefix?options.messagePrefix+baseUserRaw:baseUserRaw;
+    if(!baseUser)throw new Error('多步编排需要最新 user 消息');
+    const totalTurns=this._estimateValidationTurnCount(steps);
+    const baseTurns=[];
+    for(let i=1;i<=totalTurns;i++){
+      baseTurns.push({
+        user:{role:'user',content:`用户示例${i}`},
+        assistant:{role:'assistant',content:`助手示例${i}`}
+      });
+    }
+
+    const replies=[];
+    for(let i=0;i<steps.length;i++){
+      const step=steps[i]||{};
+      const stepIndex=i+1;
+      this._resolveStepPreset(step,this.state.getCurrentPreset());
+      let system=baseSystem;
+      if(step.system!==undefined){
+        system=this._applyContentEdit(system,step.system,replies);
+      }
+      const selectedTurns=this._selectTurns(baseTurns,step.history);
+      if(step.patches?.turnUsers){
+        this._applyTurnEdits(selectedTurns,step.patches.turnUsers,replies,'user');
+      }
+      if(step.patches?.turnAssistants){
+        this._applyTurnEdits(selectedTurns,step.patches.turnAssistants,replies,'assistant');
+      }
+      if(step.patches?.system!==undefined){
+        system=this._applyContentEdit(system,step.patches.system,replies);
+      }
+      let userContent=baseUser;
+      if(step.user!==undefined){
+        userContent=this._applyContentEdit(userContent,step.user,replies);
+      }
+      if(step.patches?.latestUser!==undefined){
+        userContent=this._applyContentEdit(userContent,step.patches.latestUser,replies);
+      }
+      const messages=[];
+      if(system){
+        messages.push({role:'system',content:system});
+      }
+      selectedTurns.forEach(turn=>{
+        messages.push({role:'user',content:turn.user.content});
+        messages.push({role:'assistant',content:turn.assistant.content});
+      });
+      messages.push({role:'user',content:userContent});
+      this._validateStepMessages(stepIndex,messages);
+      replies.push(`reply${stepIndex}`);
+    }
   }
 
   async runMultiStep(session,preset,onDelta){
@@ -4059,16 +4143,240 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(Utils.$('#multiStepRunnerEnabled')){
       Utils.$('#multiStepRunnerEnabled').value=(this.promptPresetDraft.multiStepRunner?.enabled?'true':'false');
     }
-    if(Utils.$('#multiStepRunnerSteps')){
-      const steps=this.promptPresetDraft.multiStepRunner?.steps;
-      Utils.$('#multiStepRunnerSteps').value=Array.isArray(steps)?JSON.stringify(steps,null,2):'';
-    }
+    this.renderMultiStepSteps(this.promptPresetDraft.multiStepRunner?.steps||[]);
 
     this.renderRegexRules(this.promptPresetDraft.regexRules||[]);
 
     this.state.state.editingPromptPreset=key;
     this.renderPromptPresetList();
     this.updatePromptEditingHint();
+  }
+
+  _getStepPresetOptions(stepPresetName=''){
+    const presets=this.state.getActivePresets();
+    const options=[{value:'',label:'默认(当前会话)'}];
+    presets.forEach(preset=>{
+      options.push({value:preset.name,label:preset.name});
+    });
+    if(stepPresetName&&stepPresetName!==''&&!options.some(opt=>opt.value===stepPresetName)){
+      options.push({value:stepPresetName,label:`未启用: ${stepPresetName}`});
+    }
+    return options;
+  }
+
+  _renderTurnEditList(edits,role,stepIdx){
+    if(!Array.isArray(edits)||edits.length===0){
+      return `<div style="color:var(--muted);font-size:11px;padding:.35rem 0">暂无${role==='assistant'?'助手':'用户'}楼层改写。</div>`;
+    }
+    return edits.map((edit,idx)=>`
+      <div style="display:grid;grid-template-columns:80px 120px 1fr auto;gap:.5rem;align-items:center;margin-bottom:.5rem" data-edit-idx="${idx}" data-edit-role="${role}">
+        <input type="number" min="1" step="1" placeholder="楼层" data-field="turn" value="${Number.isFinite(edit?.turn)?edit.turn:''}" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem"/>
+        <select data-field="mode" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem">
+          <option value="replace"${(edit?.mode||'replace')==='replace'?' selected':''}>替换</option>
+          <option value="append"${(edit?.mode||'replace')==='append'?' selected':''}>追加</option>
+          <option value="prepend"${(edit?.mode||'replace')==='prepend'?' selected':''}>前置</option>
+        </select>
+        <textarea rows="2" data-field="content" placeholder="支持 {{reply1}} 变量" style="width:100%;border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.4rem .6rem;resize:vertical">${edit?.content??''}</textarea>
+        <button class="btn small warn" data-action="remove-turn-edit" data-role="${role}" data-step-idx="${stepIdx}" data-edit-idx="${idx}">×</button>
+      </div>
+    `).join('');
+  }
+
+  renderMultiStepSteps(steps){
+    const container=Utils.$('#multiStepRunnerStepsContainer');
+    if(!container)return;
+    const safeSteps=Array.isArray(steps)?steps:[];
+    if(safeSteps.length===0){
+      container.innerHTML='<div style="color:var(--muted);font-size:11px;padding:.4rem 0">暂无步骤。点击下方按钮添加。</div>';
+      return;
+    }
+    const html=safeSteps.map((step,idx)=>{
+      const presetName=step?.presetName||step?.preset||'';
+      const presetOptions=this._getStepPresetOptions(presetName).map(opt=>`<option value="${opt.value}"${opt.value===presetName?' selected':''}>${opt.label}</option>`).join('');
+      const rawHistoryMode=String(step?.history?.mode||'all');
+      const historyMode=rawHistoryMode.includes('last')||rawHistoryMode.includes('latest')||rawHistoryMode.includes('recent')?'latest':rawHistoryMode;
+      const rangeStart=Number.isFinite(step?.history?.start)?step.history.start:'';
+      const rangeEnd=Number.isFinite(step?.history?.end)?step.history.end:'';
+      const latestCount=Number.isFinite(step?.history?.count)?step.history.count:(Number.isFinite(step?.history?.latest)?step.history.latest:'');
+      const systemEdit=typeof step?.system==='string'?{mode:'replace',content:step.system}:{mode:step?.system?.mode||'replace',content:step?.system?.content??step?.system?.text??''};
+      const userEdit=typeof step?.user==='string'?{mode:'replace',content:step.user}:{mode:step?.user?.mode||'replace',content:step?.user?.content??step?.user?.text??''};
+      return `
+        <div style="border:1px solid var(--border);border-radius:.75rem;padding:.8rem;background:rgba(18,20,27,.75)" data-step-idx="${idx}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem">
+            <div style="font-weight:600;font-size:13px">步骤 ${idx+1}</div>
+            <button class="btn small warn" data-action="remove-step" data-step-idx="${idx}">删除</button>
+          </div>
+          <div style="display:grid;gap:.6rem">
+            <div class="field" style="grid-template-columns:1fr">
+              <label>步骤名称(可选)</label>
+              <input data-field="name" placeholder="如: 方案生成" value="${step?.name||''}"/>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>使用模型预设</label>
+              <select data-field="presetName">${presetOptions}</select>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>系统提示(可选)</label>
+              <textarea rows="3" data-field="systemContent" placeholder="可留空，支持 {{reply1}}">${systemEdit.content||''}</textarea>
+              <div style="display:flex;gap:.5rem;margin-top:.35rem">
+                <label style="font-size:11px;color:var(--muted)">系统提示模式</label>
+                <select data-field="systemMode">
+                  <option value="replace"${systemEdit.mode==='replace'?' selected':''}>替换</option>
+                  <option value="append"${systemEdit.mode==='append'?' selected':''}>追加</option>
+                  <option value="prepend"${systemEdit.mode==='prepend'?' selected':''}>前置</option>
+                </select>
+              </div>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>楼层选择</label>
+              <select data-field="historyMode">
+                <option value="all"${historyMode==='all'?' selected':''}>全部楼层</option>
+                <option value="range"${historyMode==='range'?' selected':''}>指定范围</option>
+                <option value="latest"${historyMode==='latest'?' selected':''}>最新 N 楼</option>
+                <option value="none"${historyMode==='none'?' selected':''}>不带历史</option>
+              </select>
+              <div data-history-range style="display:${historyMode==='range'?'grid':'none'};grid-template-columns:1fr 1fr;gap:.5rem;margin-top:.4rem">
+                <input type="number" min="1" step="1" placeholder="起始楼层" data-field="rangeStart" value="${rangeStart}"/>
+                <input type="number" min="1" step="1" placeholder="结束楼层" data-field="rangeEnd" value="${rangeEnd}"/>
+              </div>
+              <div data-history-latest style="display:${historyMode==='latest'?'block':'none'};margin-top:.4rem">
+                <input type="number" min="1" step="1" placeholder="最新楼层数" data-field="latestCount" value="${latestCount}" style="width:100%"/>
+              </div>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>最新用户消息改写</label>
+              <div style="display:grid;gap:.5rem">
+                <select data-field="userMode">
+                  <option value="replace"${userEdit.mode==='replace'?' selected':''}>替换</option>
+                  <option value="append"${userEdit.mode==='append'?' selected':''}>追加</option>
+                  <option value="prepend"${userEdit.mode==='prepend'?' selected':''}>前置</option>
+                </select>
+                <textarea rows="2" data-field="userContent" placeholder="支持 {{reply1}}">${userEdit.content||''}</textarea>
+              </div>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>用户楼层改写</label>
+              <div data-edit-list="user">${this._renderTurnEditList(step?.patches?.turnUsers||[],'user',idx)}</div>
+              <button type="button" class="btn small" data-action="add-turn-edit" data-role="user" data-step-idx="${idx}">+ 添加用户楼层改写</button>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>助手楼层改写</label>
+              <div data-edit-list="assistant">${this._renderTurnEditList(step?.patches?.turnAssistants||[],'assistant',idx)}</div>
+              <button type="button" class="btn small" data-action="add-turn-edit" data-role="assistant" data-step-idx="${idx}">+ 添加助手楼层改写</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+    container.innerHTML=html;
+  }
+
+  collectMultiStepStepsFromDOM(){
+    const container=Utils.$('#multiStepRunnerStepsContainer');
+    if(!container)return [];
+    const stepEls=container.querySelectorAll('[data-step-idx]');
+    const steps=[];
+    stepEls.forEach(stepEl=>{
+      const step={};
+      const name=stepEl.querySelector('[data-field="name"]')?.value.trim();
+      if(name)step.name=name;
+      const presetName=stepEl.querySelector('[data-field="presetName"]')?.value.trim();
+      if(presetName)step.presetName=presetName;
+      const systemContent=stepEl.querySelector('[data-field="systemContent"]')?.value??'';
+      const systemMode=stepEl.querySelector('[data-field="systemMode"]')?.value||'replace';
+      if(systemContent.trim()!==''){
+        step.system={mode:systemMode,content:systemContent};
+      }
+      const historyMode=stepEl.querySelector('[data-field="historyMode"]')?.value||'all';
+      if(historyMode!=='all'){
+        step.history={mode:historyMode};
+        if(historyMode==='range'){
+          const start=parseInt(stepEl.querySelector('[data-field="rangeStart"]')?.value,10);
+          const end=parseInt(stepEl.querySelector('[data-field="rangeEnd"]')?.value,10);
+          if(Number.isFinite(start))step.history.start=start;
+          if(Number.isFinite(end))step.history.end=end;
+        }else if(historyMode==='latest'){
+          const count=parseInt(stepEl.querySelector('[data-field="latestCount"]')?.value,10);
+          if(Number.isFinite(count))step.history.count=count;
+        }
+      }
+      const userContent=stepEl.querySelector('[data-field="userContent"]')?.value??'';
+      const userMode=stepEl.querySelector('[data-field="userMode"]')?.value||'replace';
+      if(userContent.trim()!==''){
+        step.user={mode:userMode,content:userContent};
+      }
+      const userEdits=[];
+      stepEl.querySelectorAll('[data-edit-role="user"]').forEach(editEl=>{
+        const turn=parseInt(editEl.querySelector('[data-field="turn"]')?.value,10);
+        const mode=editEl.querySelector('[data-field="mode"]')?.value||'replace';
+        const content=editEl.querySelector('[data-field="content"]')?.value??'';
+        if(Number.isFinite(turn)&&content.trim()!==''){
+          userEdits.push({turn,mode,content});
+        }
+      });
+      const assistantEdits=[];
+      stepEl.querySelectorAll('[data-edit-role="assistant"]').forEach(editEl=>{
+        const turn=parseInt(editEl.querySelector('[data-field="turn"]')?.value,10);
+        const mode=editEl.querySelector('[data-field="mode"]')?.value||'replace';
+        const content=editEl.querySelector('[data-field="content"]')?.value??'';
+        if(Number.isFinite(turn)&&content.trim()!==''){
+          assistantEdits.push({turn,mode,content});
+        }
+      });
+      if(userEdits.length||assistantEdits.length){
+        step.patches={};
+        if(userEdits.length)step.patches.turnUsers=userEdits;
+        if(assistantEdits.length)step.patches.turnAssistants=assistantEdits;
+      }
+      steps.push(step);
+    });
+    return steps;
+  }
+
+  addMultiStepStep(){
+    const editing=this.state.get('editingPromptPreset');
+    if(!editing){
+      ErrorHandler.show('请先选择一个提示词预设');
+      return;
+    }
+    const steps=this.collectMultiStepStepsFromDOM();
+    steps.push({history:{mode:'all'},patches:{turnUsers:[],turnAssistants:[]}});
+    this.renderMultiStepSteps(steps);
+  }
+
+  removeMultiStepStep(idx){
+    const steps=this.collectMultiStepStepsFromDOM();
+    if(idx>=0&&idx<steps.length){
+      steps.splice(idx,1);
+      this.renderMultiStepSteps(steps);
+    }
+  }
+
+  addMultiStepTurnEdit(stepIdx,role){
+    const steps=this.collectMultiStepStepsFromDOM();
+    if(!steps[stepIdx])return;
+    if(!steps[stepIdx].patches)steps[stepIdx].patches={};
+    const list=role==='assistant'?'turnAssistants':'turnUsers';
+    if(!Array.isArray(steps[stepIdx].patches[list]))steps[stepIdx].patches[list]=[];
+    steps[stepIdx].patches[list].push({turn:1,mode:'replace',content:''});
+    this.renderMultiStepSteps(steps);
+  }
+
+  removeMultiStepTurnEdit(stepIdx,role,editIdx){
+    const steps=this.collectMultiStepStepsFromDOM();
+    const list=role==='assistant'?'turnAssistants':'turnUsers';
+    const edits=steps[stepIdx]?.patches?.[list];
+    if(Array.isArray(edits)&&editIdx>=0&&editIdx<edits.length){
+      edits.splice(editIdx,1);
+      this.renderMultiStepSteps(steps);
+    }
+  }
+
+  updateHistoryFieldsForStep(stepEl,mode){
+    const rangeEl=stepEl.querySelector('[data-history-range]');
+    const latestEl=stepEl.querySelector('[data-history-latest]');
+    if(rangeEl)rangeEl.style.display=mode==='range'?'grid':'none';
+    if(latestEl)latestEl.style.display=mode==='latest'?'block':'none';
   }
   
   renderRegexRules(rules){
@@ -4169,17 +4477,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       [];
 
     const runnerEnabled=Utils.$('#multiStepRunnerEnabled')?.value==='true';
-    const runnerRaw=Utils.$('#multiStepRunnerSteps')?.value.trim()||'';
-    let runnerSteps=[];
-    if(runnerRaw){
+    const runnerSteps=this.collectMultiStepStepsFromDOM();
+    if(runnerEnabled){
       try{
-        runnerSteps=JSON.parse(runnerRaw);
-      }catch(_){
-        ErrorHandler.show('多步编排器配置 JSON 无效');
-        return;
-      }
-      if(!Array.isArray(runnerSteps)){
-        ErrorHandler.show('多步编排器配置必须为数组');
+        this.api.validateMultiStepRunnerSteps(runnerSteps,{
+          baseSystem:Utils.$('#sysPrompt')?.value.trim()||'',
+          baseUser:'示例用户输入',
+          messagePrefix:Utils.$('#messagePrefix')?.value.trim()||''
+        });
+      }catch(err){
+        ErrorHandler.show(`多步编排配置错误: ${err.message||err}`);
         return;
       }
     }
@@ -4220,17 +4527,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const name=nameInput?.value.trim()||presets[editing].name;
 
     const runnerEnabled=Utils.$('#multiStepRunnerEnabled')?.value==='true';
-    const runnerRaw=Utils.$('#multiStepRunnerSteps')?.value.trim()||'';
-    let runnerSteps=[];
-    if(runnerRaw){
+    const runnerSteps=this.collectMultiStepStepsFromDOM();
+    if(runnerEnabled){
       try{
-        runnerSteps=JSON.parse(runnerRaw);
-      }catch(_){
-        ErrorHandler.show('多步编排器配置 JSON 无效');
-        return;
-      }
-      if(!Array.isArray(runnerSteps)){
-        ErrorHandler.show('多步编排器配置必须为数组');
+        this.api.validateMultiStepRunnerSteps(runnerSteps,{
+          baseSystem:Utils.$('#sysPrompt')?.value.trim()||'',
+          baseUser:'示例用户输入',
+          messagePrefix:Utils.$('#messagePrefix')?.value.trim()||''
+        });
+      }catch(err){
+        ErrorHandler.show(`多步编排配置错误: ${err.message||err}`);
         return;
       }
     }
@@ -4286,7 +4592,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     Utils.$('#messagePrefix').value='';
     Utils.$('#assistantPrefill').value='';
     if(Utils.$('#multiStepRunnerEnabled'))Utils.$('#multiStepRunnerEnabled').value='false';
-    if(Utils.$('#multiStepRunnerSteps'))Utils.$('#multiStepRunnerSteps').value='';
+    this.renderMultiStepSteps([]);
 
     this.renderPromptPresetList();
     this.updatePromptEditingHint();
@@ -5129,6 +5435,36 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     
     const btnAddRegexRule=Utils.$('#btnAddRegexRule');
     if(btnAddRegexRule)this.events.on(btnAddRegexRule,'click',()=>this.addRegexRule());
+
+    const btnAddMultiStepStep=Utils.$('#btnAddMultiStepStep');
+    if(btnAddMultiStepStep)this.events.on(btnAddMultiStepStep,'click',()=>this.addMultiStepStep());
+
+    const multiStepContainer=Utils.$('#multiStepRunnerStepsContainer');
+    if(multiStepContainer){
+      this.events.on(multiStepContainer,'click',(e)=>{
+        const actionBtn=e.target.closest('[data-action]');
+        if(!actionBtn)return;
+        const action=actionBtn.dataset.action;
+        const stepIdx=parseInt(actionBtn.dataset.stepIdx,10);
+        if(action==='remove-step'){
+          if(!isNaN(stepIdx))this.removeMultiStepStep(stepIdx);
+        }else if(action==='add-turn-edit'){
+          const role=actionBtn.dataset.role;
+          if(!isNaN(stepIdx)&&role)this.addMultiStepTurnEdit(stepIdx,role);
+        }else if(action==='remove-turn-edit'){
+          const role=actionBtn.dataset.role;
+          const editIdx=parseInt(actionBtn.dataset.editIdx,10);
+          if(!isNaN(stepIdx)&&!isNaN(editIdx)&&role)this.removeMultiStepTurnEdit(stepIdx,role,editIdx);
+        }
+      });
+
+      this.events.on(multiStepContainer,'change',(e)=>{
+        if(e.target.matches('[data-field="historyMode"]')){
+          const stepEl=e.target.closest('[data-step-idx]');
+          if(stepEl)this.updateHistoryFieldsForStep(stepEl,e.target.value);
+        }
+      });
+    }
     
     const regexContainer=Utils.$('#regexRulesContainer');
     if(regexContainer){
