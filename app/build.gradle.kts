@@ -6,13 +6,14 @@ plugins {
 android {
     namespace = "com.example.htmlapp"
     compileSdk = 34
+    val buildVersionCode = (System.currentTimeMillis() / 1000).toInt()
 
     defaultConfig {
         applicationId = "com.example.htmlapp"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = buildVersionCode
+        versionName = "1.0.${buildVersionCode}"
         resourceConfigurations += listOf("en", "zh")
     }
 
