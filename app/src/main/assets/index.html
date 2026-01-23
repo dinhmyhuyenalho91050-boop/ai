@@ -2517,13 +2517,13 @@ class UIManager{
     }
   }
   finalizeTypingAndAppend(typing,msg){
-    const scrollState=this.captureScrollState();
-    if(typing){
-      this.removeTyping(typing);
-    }
-    this.appendMessage(msg);
-    if(typeof this.flushUpdates==='function') this.flushUpdates();
-    this.restoreScrollState(scrollState);
+    this.preserveScroll(()=>{
+      if(typing){
+        this.removeTyping(typing);
+      }
+      this.appendMessage(msg);
+      if(typeof this.flushUpdates==='function') this.flushUpdates();
+    });
   }
   renumberMessagesFrom(startIdx=0){
     const session=this.state.getActiveSession();
@@ -3289,6 +3289,13 @@ class UIManager{
           modelName:preset?.name
         });
         sessionDirty=true;
+      }else if(isAbort){
+        (function(){ try{ if (this.typingElement) this.typingElement.removeAttribute('data-streaming'); }catch(_){} }).call(this);
+        this.preserveScroll(()=>{
+          if(typing){
+            this.removeTyping(typing);
+          }
+        });
       }else if(!isAbort){
         (function(){ try{ if (this.typingElement) this.typingElement.removeAttribute('data-streaming'); }catch(_){} }).call(this);
         this.finalizeTypingAndAppend(typing,{
