@@ -396,6 +396,22 @@
               <button type="button" class="btn small" id="btnAddRegexRule" style="margin-top:.5rem">+ 添加规则</button>
             </div>
             <div class="sep"></div>
+            <div style="margin-bottom:1rem">
+              <div style="font-weight:600;font-size:13px;margin-bottom:.5rem;color:var(--muted)">调试日志</div>
+              <div class="field" style="grid-template-columns:1fr">
+                <label>启用 API 日志(内存)</label>
+                <select id="apiLogEnabled">
+                  <option value="false">否</option>
+                  <option value="true">是</option>
+                </select>
+              </div>
+              <div style="display:flex;gap:.6rem;align-items:center;margin-top:.5rem">
+                <button type="button" class="btn small" id="btnShowApiLogs">查看日志</button>
+                <button type="button" class="btn small warn" id="btnClearApiLogs">清空日志</button>
+                <span style="font-size:11px;color:var(--muted)">关闭日志会立即清空记录</span>
+              </div>
+            </div>
+            <div class="sep"></div>
             <div style="display:flex;gap:.75rem">
               <button class="btn" id="btnSavePromptPreset">保存为新预设</button>
               <button class="btn" id="btnUpdatePromptPreset">更新当前预设</button>
@@ -471,6 +487,18 @@
       </div>
       <div style="padding:1rem 1.5rem;border-top:1px solid var(--border);background:rgba(0,0,0,.18);display:flex;gap:.75rem;justify-content:flex-end">
         <button class="btn" type="button" id="btnCancelSelectPreset">取消</button>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="dlgApiLogs">
+    <div style="padding:0;min-width:min(860px,92vw)">
+      <div style="padding:1.2rem 1.4rem;border-bottom:1px solid var(--border);background:rgba(0,0,0,.2)">
+        <h2 style="font-size:18px;font-weight:600;margin:0">API 调试日志</h2>
+        <p style="font-size:12px;color:var(--muted);margin-top:.4rem">仅保存在内存中，关闭日志会自动清空。</p>
+      </div>
+      <div style="padding:1rem 1.4rem;max-height:65vh;overflow-y:auto" id="apiLogsContainer"></div>
+      <div style="padding:1rem 1.4rem;border-top:1px solid var(--border);background:rgba(0,0,0,.18);display:flex;gap:.6rem;justify-content:flex-end">
+        <button class="btn" type="button" id="btnCloseApiLogs">关闭</button>
       </div>
     </div>
   </dialog>
@@ -1906,6 +1934,63 @@ class APIManager{
     this.state=state;
     this.abortController=null;
     this.activeReader=null;
+    this.debugLogs=[];
+    this.debugLogEnabled=false;
+    this.debugLogLimit=200;
+    this.regexProcessor=new RegexProcessor();
+  }
+
+  isDebugLoggingEnabled(){
+    return !!this.debugLogEnabled;
+  }
+
+  setDebugLogging(enabled){
+    this.debugLogEnabled=!!enabled;
+    if(!this.debugLogEnabled){
+      this.clearDebugLogs();
+    }
+  }
+
+  clearDebugLogs(){
+    this.debugLogs=[];
+  }
+
+  _enqueueDebugLog(entry){
+    if(!this.debugLogEnabled)return null;
+    this.debugLogs.push(entry);
+    if(this.debugLogs.length>this.debugLogLimit){
+      this.debugLogs.splice(0,this.debugLogs.length-this.debugLogLimit);
+    }
+    return entry;
+  }
+
+  _startApiLog(meta){
+    if(!this.debugLogEnabled)return null;
+    const entry={
+      id:`log_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+      startedAt:new Date().toISOString(),
+      status:'pending',
+      ...meta
+    };
+    return this._enqueueDebugLog(entry);
+  }
+
+  _finishApiLog(entry,response){
+    if(!entry)return;
+    entry.status='ok';
+    entry.finishedAt=new Date().toISOString();
+    entry.response=response;
+  }
+
+  _failApiLog(entry,error){
+    if(!entry)return;
+    entry.status='error';
+    entry.finishedAt=new Date().toISOString();
+    entry.error=error instanceof Error?error.message:String(error);
+  }
+
+  getDebugLogs(){
+    return this.debugLogs.slice().reverse();
   }
   
   buildMessages(session,options={}){
@@ -1984,6 +2069,13 @@ class APIManager{
     if(mode==='append')return prev+content;
     if(mode==='prepend')return content+prev;
     return content;
+  }
+
+  _applyReplyRegex(content,rules){
+    if(!content||!Array.isArray(rules)||rules.length===0)return content;
+    const compiled=this.regexProcessor?.compileRules?.(rules);
+    if(!compiled)return content;
+    return this.regexProcessor?.process?.(content,compiled)??content;
   }
 
   _buildTurns(history){
@@ -2301,7 +2393,12 @@ class APIManager{
       this._validateStepMessages(stepIndex,messages);
 
       const stepResult=await this.sendWithMessages(stepPreset,messages,isFinal?onDelta:null);
-      replies.push(stepResult?.content??'');
+      const rawContent=stepResult?.content??'';
+      const processedContent=this._applyReplyRegex(rawContent,step.replyRegexRules);
+      replies.push(processedContent);
+      if(processedContent!==rawContent){
+        stepResult.content=processedContent;
+      }
       if(isFinal)lastResult=stepResult;
     }
 
@@ -2392,19 +2489,34 @@ class APIManager{
       body.reasoning_effort='medium';
     }
     
-    const res=await fetch(url,{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'Authorization':`Bearer ${cfg.key}`
-      },
-      body:JSON.stringify(body),
-      signal
+    const logEntry=this._startApiLog({
+      provider:isDeepSeek?'deepseek':(isKimi?'kimi':'openai'),
+      url,
+      request:{
+        model:body.model,
+        messages,
+        stream:!!body.stream,
+        temperature:body.temperature,
+        top_p:body.top_p,
+        max_tokens:body.max_tokens,
+        reasoning_effort:body.reasoning_effort
+      }
     });
-    
-    if(!res.ok)throw new Error(`HTTP ${res.status}`);
-    
-    if(cfg.stream){
+
+    try{
+      const res=await fetch(url,{
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'Authorization':`Bearer ${cfg.key}`
+        },
+        body:JSON.stringify(body),
+        signal
+      });
+      
+      if(!res.ok)throw new Error(`HTTP ${res.status}`);
+      
+      if(cfg.stream){
       const reader=res.body.getReader();
       this.activeReader=reader;
       const decoder=new TextDecoder();
@@ -2445,20 +2557,28 @@ class APIManager{
       }finally{
         if(this.activeReader===reader)this.activeReader=null;
       }
-      return{content:full||'(空响应)',thinking};
-    }else{
-      const data=await res.json();
-      const message=data?.choices?.[0]?.message||{};
-      let content='(空响应)';
-      let thinking=message?.reasoning_content||'';
-      if(Array.isArray(message?.content)){
-        const partResult=extractContentParts(message.content);
-        content=partResult.text||'(空响应)';
-        if(partResult.thinking)thinking+=partResult.thinking;
+        const result={content:full||'(空响应)',thinking};
+        this._finishApiLog(logEntry,{content:result.content,thinking:result.thinking});
+        return result;
       }else{
-        content=message?.content||'(空响应)';
+        const data=await res.json();
+        const message=data?.choices?.[0]?.message||{};
+        let content='(空响应)';
+        let thinking=message?.reasoning_content||'';
+        if(Array.isArray(message?.content)){
+          const partResult=extractContentParts(message.content);
+          content=partResult.text||'(空响应)';
+          if(partResult.thinking)thinking+=partResult.thinking;
+        }else{
+          content=message?.content||'(空响应)';
+        }
+        const result={content,thinking};
+        this._finishApiLog(logEntry,{content,thinking});
+        return result;
       }
-      return{content,thinking};
+    }catch(err){
+      this._failApiLog(logEntry,err);
+      throw err;
     }
   }
 
@@ -2485,20 +2605,35 @@ class APIManager{
     if(cfg.temperature!=null&&cfg.temperature!==0)body.temperature=cfg.temperature;
     if(cfg.top_p!=null&&cfg.top_p!==0)body.top_p=cfg.top_p;
 
-    const res=await fetch(url,{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'x-api-key':cfg.key||'',
-        'anthropic-version':'2023-06-01'
-      },
-      body:JSON.stringify(body),
-      signal
+    const logEntry=this._startApiLog({
+      provider:'anthropic',
+      url,
+      request:{
+        model,
+        messages:converted,
+        system,
+        stream:!!cfg.stream,
+        max_tokens:body.max_tokens,
+        temperature:body.temperature,
+        top_p:body.top_p
+      }
     });
 
-    if(!res.ok)throw new Error(`HTTP ${res.status}`);
+    try{
+      const res=await fetch(url,{
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'x-api-key':cfg.key||'',
+          'anthropic-version':'2023-06-01'
+        },
+        body:JSON.stringify(body),
+        signal
+      });
 
-    if(cfg.stream){
+      if(!res.ok)throw new Error(`HTTP ${res.status}`);
+
+      if(cfg.stream){
       const reader=res.body.getReader();
       this.activeReader=reader;
       const decoder=new TextDecoder();
@@ -2546,23 +2681,31 @@ class APIManager{
       }finally{
         if(this.activeReader===reader)this.activeReader=null;
       }
-      return{content:full||'(空响应)',thinking};
-    }else{
-      const data=await res.json();
-      let content='(空响应)';
-      let thinking='';
-      if(Array.isArray(data?.content)){
-        const textParts=[];
-        data.content.forEach((part)=>{
-          if(part?.type==='text'&&part?.text)textParts.push(part.text);
-          if(part?.type==='thinking'){
-            if(part?.thinking)thinking+=part.thinking;
-            if(part?.text)thinking+=part.text;
-          }
-        });
-        if(textParts.length)content=textParts.join('');
+        const result={content:full||'(空响应)',thinking};
+        this._finishApiLog(logEntry,{content:result.content,thinking:result.thinking});
+        return result;
+      }else{
+        const data=await res.json();
+        let content='(空响应)';
+        let thinking='';
+        if(Array.isArray(data?.content)){
+          const textParts=[];
+          data.content.forEach((part)=>{
+            if(part?.type==='text'&&part?.text)textParts.push(part.text);
+            if(part?.type==='thinking'){
+              if(part?.thinking)thinking+=part.thinking;
+              if(part?.text)thinking+=part.text;
+            }
+          });
+          if(textParts.length)content=textParts.join('');
+        }
+        const result={content,thinking};
+        this._finishApiLog(logEntry,{content,thinking});
+        return result;
       }
-      return{content,thinking};
+    }catch(err){
+      this._failApiLog(logEntry,err);
+      throw err;
     }
   }
 
@@ -2626,16 +2769,29 @@ if (qs.length) url += `?${qs.join('&')}`;
 if (!isProxy && cfg.key) headers['X-Goog-Api-Key'] = cfg.key;
 if (isProxy && cfg.proxyPass) headers.Authorization = `Bearer ${cfg.proxyPass}`;
     
-    const res=await fetch(url,{
-      method:'POST',
-      headers,
-      body:JSON.stringify(body),
-      signal
+    const logEntry=this._startApiLog({
+      provider:isProxy?'gemini-proxy':'gemini',
+      url,
+      request:{
+        model,
+        system,
+        contents,
+        stream:!!cfg.stream,
+        generationConfig
+      }
     });
-    
-    if(!res.ok)throw new Error(`HTTP ${res.status}`);
-    
-    if(cfg.stream){
+
+    try{
+      const res=await fetch(url,{
+        method:'POST',
+        headers,
+        body:JSON.stringify(body),
+        signal
+      });
+      
+      if(!res.ok)throw new Error(`HTTP ${res.status}`);
+      
+      if(cfg.stream){
       const reader = res.body.getReader();
       this.activeReader=reader;
       const decoder = new TextDecoder();
@@ -2670,19 +2826,27 @@ if (isProxy && cfg.proxyPass) headers.Authorization = `Bearer ${cfg.proxyPass}`;
       }finally{
         if(this.activeReader===reader)this.activeReader=null;
       }
-      return { content: full || '(空响应)', thinking };
-    }else{
-      const data=await res.json();
-      const parts=data?.candidates?.[0]?.content?.parts||[];
-      let content='',thinking='';
-      for(const part of parts){
-        if(part.thought){
-          thinking+=part.text||'';
-        }else if(part.text){
-          content+=part.text;
+        const result={content:full||'(空响应)',thinking};
+        this._finishApiLog(logEntry,{content:result.content,thinking:result.thinking});
+        return result;
+      }else{
+        const data=await res.json();
+        const parts=data?.candidates?.[0]?.content?.parts||[];
+        let content='',thinking='';
+        for(const part of parts){
+          if(part.thought){
+            thinking+=part.text||'';
+          }else if(part.text){
+            content+=part.text;
+          }
         }
+        const result={content:content||'(空响应)',thinking};
+        this._finishApiLog(logEntry,{content:result.content,thinking:result.thinking});
+        return result;
       }
-      return{content:content||'(空响应)',thinking};
+    }catch(err){
+      this._failApiLog(logEntry,err);
+      throw err;
     }
   }
 
@@ -3966,6 +4130,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     
     this.renderPromptPresetList();
     this.updatePromptEditingHint();
+    const apiLogEnabled=Utils.$('#apiLogEnabled');
+    if(apiLogEnabled)apiLogEnabled.value=this.api?.isDebugLoggingEnabled?.()?'true':'false';
     
     this._settingsRendered=true;
   }
@@ -3987,6 +4153,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     });
     
     this.renderPromptPresetList();
+    const apiLogEnabled=Utils.$('#apiLogEnabled');
+    if(apiLogEnabled)apiLogEnabled.value=this.api?.isDebugLoggingEnabled?.()?'true':'false';
   }
   
   renderModelConfig(index,type,config={}){
@@ -4203,6 +4371,19 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     `).join('');
   }
 
+  _renderStepReplyRegexRules(rules,stepIdx){
+    if(!Array.isArray(rules)||rules.length===0){
+      return `<div style="color:var(--muted);font-size:11px;padding:.35rem 0">暂无回复正则规则。</div>`;
+    }
+    return rules.map((rule,idx)=>`
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:.5rem;align-items:center;margin-bottom:.5rem" data-reply-regex-idx="${idx}">
+        <input type="text" data-field="replyRegexPattern" placeholder="正则表达式" value="${rule?.pattern||''}" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem;font-family:'Consolas','Monaco','Courier New',monospace;font-size:12px"/>
+        <input type="text" data-field="replyRegexReplacement" placeholder="替换为" value="${rule?.replacement||''}" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem"/>
+        <button class="btn small warn" data-action="remove-reply-regex" data-step-idx="${stepIdx}" data-regex-idx="${idx}">×</button>
+      </div>
+    `).join('');
+  }
+
   renderMultiStepSteps(steps){
     const container=Utils.$('#multiStepRunnerStepsContainer');
     if(!container)return;
@@ -4221,6 +4402,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       const latestCount=Number.isFinite(step?.history?.count)?step.history.count:(Number.isFinite(step?.history?.latest)?step.history.latest:'');
       const systemEdit=typeof step?.system==='string'?{mode:'replace',content:step.system}:{mode:step?.system?.mode||'keep',content:step?.system?.content??step?.system?.text??''};
       const userEdit=typeof step?.user==='string'?{mode:'replace',content:step.user}:{mode:step?.user?.mode||'keep',content:step?.user?.content??step?.user?.text??''};
+      const replyRegexRules=Array.isArray(step?.replyRegexRules)?step.replyRegexRules:[];
       return `
         <div style="border:1px solid var(--border);border-radius:.75rem;padding:.8rem;background:rgba(18,20,27,.75)" data-step-idx="${idx}">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem">
@@ -4292,6 +4474,12 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
               <div data-edit-list="assistant">${this._renderTurnEditList(step?.patches?.turnAssistants||[],'assistant',idx)}</div>
               <button type="button" class="btn small" data-action="add-turn-edit" data-role="assistant" data-step-idx="${idx}">+ 添加助手楼层改写</button>
             </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>步骤回复正则处理</label>
+              <div data-reply-regex-list="step">${this._renderStepReplyRegexRules(replyRegexRules,idx)}</div>
+              <button type="button" class="btn small" data-action="add-reply-regex" data-step-idx="${idx}">+ 添加回复正则</button>
+              <div style="font-size:11px;color:var(--muted);margin-top:.35rem">仅处理该步骤的输出内容，可与全局正则叠加。</div>
+            </div>
           </div>
         </div>
       `;
@@ -4358,6 +4546,17 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         if(userEdits.length)step.patches.turnUsers=userEdits;
         if(assistantEdits.length)step.patches.turnAssistants=assistantEdits;
       }
+      const replyRegexRules=[];
+      stepEl.querySelectorAll('[data-reply-regex-idx]').forEach(ruleEl=>{
+        const pattern=ruleEl.querySelector('[data-field="replyRegexPattern"]')?.value.trim()||'';
+        const replacement=ruleEl.querySelector('[data-field="replyRegexReplacement"]')?.value??'';
+        if(pattern){
+          replyRegexRules.push({pattern,replacement});
+        }
+      });
+      if(replyRegexRules.length){
+        step.replyRegexRules=replyRegexRules;
+      }
       steps.push(step);
     });
     return steps;
@@ -4397,12 +4596,31 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     this.renderMultiStepSteps(steps);
   }
 
+  addMultiStepReplyRegex(stepIdx){
+    const steps=this.collectMultiStepStepsFromDOM();
+    if(!steps[stepIdx])return;
+    if(!Array.isArray(steps[stepIdx].replyRegexRules)){
+      steps[stepIdx].replyRegexRules=[];
+    }
+    steps[stepIdx].replyRegexRules.push({pattern:'',replacement:''});
+    this.renderMultiStepSteps(steps);
+  }
+
   removeMultiStepTurnEdit(stepIdx,role,editIdx){
     const steps=this.collectMultiStepStepsFromDOM();
     const list=role==='assistant'?'turnAssistants':'turnUsers';
     const edits=steps[stepIdx]?.patches?.[list];
     if(Array.isArray(edits)&&editIdx>=0&&editIdx<edits.length){
       edits.splice(editIdx,1);
+      this.renderMultiStepSteps(steps);
+    }
+  }
+
+  removeMultiStepReplyRegex(stepIdx,ruleIdx){
+    const steps=this.collectMultiStepStepsFromDOM();
+    const rules=steps[stepIdx]?.replyRegexRules;
+    if(Array.isArray(rules)&&ruleIdx>=0&&ruleIdx<rules.length){
+      rules.splice(ruleIdx,1);
       this.renderMultiStepSteps(steps);
     }
   }
@@ -4429,6 +4647,55 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
 
     container.innerHTML=html;
 
+  }
+
+  renderApiLogs(){
+    const container=Utils.$('#apiLogsContainer');
+    if(!container)return;
+    const logs=this.api?.getDebugLogs?.()||[];
+    if(logs.length===0){
+      container.innerHTML='<div style="color:var(--muted);font-size:12px">暂无日志。</div>';
+      return;
+    }
+    container.innerHTML='';
+    const fragment=document.createDocumentFragment();
+    logs.forEach(entry=>{
+      const details=document.createElement('details');
+      details.style.cssText='border:1px solid var(--border);border-radius:.65rem;padding:.7rem .8rem;margin-bottom:.6rem;background:rgba(18,20,27,.7)';
+      const summary=document.createElement('summary');
+      summary.style.cssText='cursor:pointer;font-size:12px;font-weight:600;color:var(--fg);display:flex;justify-content:space-between;gap:.5rem';
+      const left=document.createElement('span');
+      const provider=entry?.provider||'api';
+      const status=entry?.status||'unknown';
+      const start=entry?.startedAt?new Date(entry.startedAt).toLocaleString():'';
+      left.textContent=`${provider} · ${status.toUpperCase()}${start?` · ${start}`:''}`;
+      summary.appendChild(left);
+      details.appendChild(summary);
+
+      const reqBlock=document.createElement('pre');
+      reqBlock.style.cssText='white-space:pre-wrap;font-size:11px;color:var(--muted);margin:.6rem 0 0';
+      const requestPayload={url:entry?.url||'',...(entry?.request||{})};
+      reqBlock.textContent=`请求:\n${JSON.stringify(requestPayload,null,2)}`;
+
+      const resBlock=document.createElement('pre');
+      resBlock.style.cssText='white-space:pre-wrap;font-size:11px;color:var(--muted);margin:.6rem 0 0';
+      const responsePayload=entry?.response??(entry?.error?{error:entry.error}:null);
+      resBlock.textContent=`响应:\n${JSON.stringify(responsePayload??{},null,2)}`;
+
+      details.appendChild(reqBlock);
+      details.appendChild(resBlock);
+      fragment.appendChild(details);
+    });
+    container.appendChild(fragment);
+  }
+
+  setApiLogEnabled(enabled){
+    this.api?.setDebugLogging?.(enabled);
+    const select=Utils.$('#apiLogEnabled');
+    if(select)select.value=enabled?'true':'false';
+    if(!enabled){
+      this.renderApiLogs();
+    }
   }
 
   addRegexRule(){
@@ -5471,6 +5738,38 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const btnAddRegexRule=Utils.$('#btnAddRegexRule');
     if(btnAddRegexRule)this.events.on(btnAddRegexRule,'click',()=>this.addRegexRule());
 
+    const apiLogEnabled=Utils.$('#apiLogEnabled');
+    if(apiLogEnabled){
+      this.events.on(apiLogEnabled,'change',()=>{
+        const enabled=apiLogEnabled.value==='true';
+        this.setApiLogEnabled(enabled);
+      });
+    }
+
+    const btnShowApiLogs=Utils.$('#btnShowApiLogs');
+    if(btnShowApiLogs){
+      this.events.on(btnShowApiLogs,'click',()=>{
+        this.renderApiLogs();
+        Utils.$('#dlgApiLogs')?.showModal();
+      });
+    }
+
+    const btnClearApiLogs=Utils.$('#btnClearApiLogs');
+    if(btnClearApiLogs){
+      this.events.on(btnClearApiLogs,'click',()=>{
+        this.api?.clearDebugLogs?.();
+        this.renderApiLogs();
+        ErrorHandler.show('日志已清空',2000);
+      });
+    }
+
+    const btnCloseApiLogs=Utils.$('#btnCloseApiLogs');
+    if(btnCloseApiLogs){
+      this.events.on(btnCloseApiLogs,'click',()=>{
+        Utils.$('#dlgApiLogs')?.close();
+      });
+    }
+
     const btnAddMultiStepStep=Utils.$('#btnAddMultiStepStep');
     if(btnAddMultiStepStep)this.events.on(btnAddMultiStepStep,'click',()=>this.addMultiStepStep());
 
@@ -5491,6 +5790,11 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           const role=actionBtn.dataset.role;
           const editIdx=parseInt(actionBtn.dataset.editIdx,10);
           if(!isNaN(stepIdx)&&!isNaN(editIdx)&&role)this.removeMultiStepTurnEdit(stepIdx,role,editIdx);
+        }else if(action==='add-reply-regex'){
+          if(!isNaN(stepIdx))this.addMultiStepReplyRegex(stepIdx);
+        }else if(action==='remove-reply-regex'){
+          const ruleIdx=parseInt(actionBtn.dataset.regexIdx,10);
+          if(!isNaN(stepIdx)&&!isNaN(ruleIdx))this.removeMultiStepReplyRegex(stepIdx,ruleIdx);
         }
       });
 
