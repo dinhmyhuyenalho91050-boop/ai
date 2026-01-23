@@ -3080,18 +3080,24 @@ class UIManager{
     }
   }
   finalizeTypingAndAppend(typing,msg){
-    const scrollState=this.captureScrollState();
-    const box=scrollState?.box;
-    if(typing){
-      this.removeTyping(typing);
+    const box=Utils.$('#messages');
+    const shouldStick=box?this.isAtBottom(box):false;
+    const applyChange=()=>{
+      if(typing){
+        this.removeTyping(typing);
+      }
+      this.appendMessage(msg);
+      if(typeof this.flushUpdates==='function') this.flushUpdates();
+    };
+    if(!box){
+      applyChange();
+      return;
     }
-    this.appendMessage(msg);
-    if(typeof this.flushUpdates==='function') this.flushUpdates();
-    if(!box||!scrollState)return;
-    if(scrollState.atBottom){
+    if(shouldStick){
+      applyChange();
       requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
     }else{
-      box.scrollTop=scrollState.top;
+      this.preserveScroll(applyChange);
     }
   }
   renumberMessagesFrom(startIdx=0){
