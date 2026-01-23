@@ -382,7 +382,10 @@
               </div>
               <div class="field" style="grid-template-columns:1fr">
                 <label>Steps 配置(JSON)</label>
-                <textarea id="multiStepRunnerSteps" rows="6" placeholder='例如: [{"name":"step1","history":{"mode":"none"},"user":{"mode":"replace","content":"{{reply1}}"}}]'></textarea>
+                <textarea id="multiStepRunnerSteps" rows="6" placeholder='例如: [{"name":"step1","history":{"mode":"none"},"user":{"mode":"replace","content":"{{reply1}}"}}]&#10;示例(指定模型预设): [{"name":"step2","preset":"DeepSeek","history":{"mode":"range","start":1,"end":2},"user":{"mode":"append","content":"补充说明"}}]'></textarea>
+                <div style="font-size:11px;color:var(--muted);margin-top:.35rem;line-height:1.4">
+                  每个 step 支持可选字段：preset/presetName(模型预设名称) 或 presetIndex(启用的模型预设序号，0 起)；未填写则使用当前会话的模型预设。
+                </div>
               </div>
             </div>
             <div class="sep"></div>
@@ -2113,6 +2116,26 @@ class APIManager{
     return '';
   }
 
+  _resolveStepPreset(step,defaultPreset){
+    if(!step)return defaultPreset;
+    const presets=this.state.getActivePresets();
+    const presetName=typeof step.preset==='string'?step.preset:(typeof step.presetName==='string'?step.presetName:'');
+    if(presetName){
+      const match=presets.find(p=>String(p.name||'').trim()===String(presetName).trim());
+      if(!match)throw new Error(`Step 预设不存在或未启用: ${presetName}`);
+      return match;
+    }
+    if(Number.isFinite(step.presetIndex)){
+      const idx=Math.trunc(step.presetIndex);
+      const resolved=idx>=0?idx:presets.length+idx;
+      if(resolved<0||resolved>=presets.length){
+        throw new Error(`Step 预设索引无效: ${step.presetIndex}`);
+      }
+      return presets[resolved];
+    }
+    return defaultPreset;
+  }
+
   async runMultiStep(session,preset,onDelta){
     const pc=this.state.getSessionPromptConfig(session);
     const runner=pc?.multiStepRunner;
@@ -2134,6 +2157,7 @@ class APIManager{
       const step=runner.steps[i]||{};
       const stepIndex=i+1;
       const isFinal=i===runner.steps.length-1;
+      const stepPreset=this._resolveStepPreset(step,preset);
 
       let system=baseSystem;
       if(step.system!==undefined){
@@ -2173,7 +2197,7 @@ class APIManager{
 
       this._validateStepMessages(stepIndex,messages);
 
-      lastResult=await this.sendWithMessages(preset,messages,isFinal?onDelta:null);
+      lastResult=await this.sendWithMessages(stepPreset,messages,isFinal?onDelta:null);
       replies.push(lastResult?.content??'');
     }
 
