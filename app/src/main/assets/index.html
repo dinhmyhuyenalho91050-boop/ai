@@ -308,7 +308,7 @@
         <button type="button" data-pane="backup">备份</button>
       </nav>
       <div class="pane" id="pane-models">
-        <h2 style="font-size:16px;margin-bottom:1rem">模型预设配置(最多2个)</h2>
+        <h2 style="font-size:16px;margin-bottom:1rem">模型预设配置(最多启用2个，可配置6个)</h2>
         <div class="model-preset-card">
           <h3>预设1</h3>
           <div class="field"><label>启用</label><select id="model1Enable"><option value="true">是</option><option value="false">否</option></select></div>
@@ -322,6 +322,34 @@
           <div class="field"><label>显示名称</label><input id="model2Name" placeholder="如: Gemini"/></div>
           <div class="field"><label>模型类型</label><select id="model2Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
           <div id="model2Config"></div>
+        </div>
+        <div class="model-preset-card">
+          <h3>预设3</h3>
+          <div class="field"><label>启用</label><select id="model3Enable"><option value="true">是</option><option value="false">否</option></select></div>
+          <div class="field"><label>显示名称</label><input id="model3Name" placeholder="如: Claude"/></div>
+          <div class="field"><label>模型类型</label><select id="model3Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
+          <div id="model3Config"></div>
+        </div>
+        <div class="model-preset-card">
+          <h3>预设4</h3>
+          <div class="field"><label>启用</label><select id="model4Enable"><option value="true">是</option><option value="false">否</option></select></div>
+          <div class="field"><label>显示名称</label><input id="model4Name" placeholder="如: 自定义"/></div>
+          <div class="field"><label>模型类型</label><select id="model4Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
+          <div id="model4Config"></div>
+        </div>
+        <div class="model-preset-card">
+          <h3>预设5</h3>
+          <div class="field"><label>启用</label><select id="model5Enable"><option value="true">是</option><option value="false">否</option></select></div>
+          <div class="field"><label>显示名称</label><input id="model5Name" placeholder="如: 备用A"/></div>
+          <div class="field"><label>模型类型</label><select id="model5Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
+          <div id="model5Config"></div>
+        </div>
+        <div class="model-preset-card">
+          <h3>预设6</h3>
+          <div class="field"><label>启用</label><select id="model6Enable"><option value="true">是</option><option value="false">否</option></select></div>
+          <div class="field"><label>显示名称</label><input id="model6Name" placeholder="如: 备用B"/></div>
+          <div class="field"><label>模型类型</label><select id="model6Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
+          <div id="model6Config"></div>
         </div>
       </div>
       <div class="pane" id="pane-prompts" hidden>
@@ -442,6 +470,8 @@ const CONFIG={
   DEBOUNCE_DELAY:300,
   PERSIST_DELAY:800,
   IDLE_TIMEOUT:2000,
+  MODEL_PRESET_SLOTS:6,
+  MODEL_ACTIVE_LIMIT:2,
   STORAGE_KEYS:{
     modelPresets:'chat.modelPresets',
     sessions:'chat.sessions',
@@ -3503,7 +3533,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
     
     const presets=this.state.get('modelPresets');
-    [1,2].forEach(i=>{
+    Array.from({length:CONFIG.MODEL_PRESET_SLOTS},(_,i)=>i+1).forEach(i=>{
       const preset=presets[i-1]||{enabled:false,name:'',type:'openai',config:{}};
       const enable=Utils.$(`#model${i}Enable`);
       const name=Utils.$(`#model${i}Name`);
@@ -3524,7 +3554,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   
   fillSettingsValues(){
     const presets=this.state.get('modelPresets');
-    [1,2].forEach(i=>{
+    Array.from({length:CONFIG.MODEL_PRESET_SLOTS},(_,i)=>i+1).forEach(i=>{
       const preset=presets[i-1]||{enabled:false,name:'',type:'openai',config:{}};
       const enable=Utils.$(`#model${i}Enable`);
       const name=Utils.$(`#model${i}Name`);
@@ -3562,7 +3592,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   
   saveSettingsUI(){
     const presets=[];
-    [1,2].forEach(i=>{
+    Array.from({length:CONFIG.MODEL_PRESET_SLOTS},(_,i)=>i+1).forEach(i=>{
       const enabled=Utils.$(`#model${i}Enable`)?.value==='true';
       const name=Utils.$(`#model${i}Name`)?.value.trim()||'';
       const type=Utils.$(`#model${i}Type`)?.value||'openai';
@@ -3638,9 +3668,14 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       presets.push({enabled,name,type,config});
     });
     
+    const activeCount=presets.filter(p=>p.enabled).length;
+    if(activeCount>CONFIG.MODEL_ACTIVE_LIMIT){
+      ErrorHandler.show(`最多只能启用${CONFIG.MODEL_ACTIVE_LIMIT}个模型预设`);
+      return false;
+    }
+    
     this.state.set('modelPresets',presets);
     
-    const activeCount=presets.filter(p=>p.enabled).length;
     if(activeCount===0)ErrorHandler.show('警告: 至少启用一个模型预设');
     
     if(this.state.get('currentModelIndex')>=activeCount){
@@ -3648,6 +3683,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
     
     this.updateModelSelectors();
+    return true;
   }
   
   renderPromptPresetList(){
@@ -4680,14 +4716,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     
     if(btnApply){
       this.events.on(btnApply,'click',()=>{
-        this.saveSettingsUI();
-        Utils.$('#dlgSettings')?.close();
-        this.clearMessages();
-        this.renderMessages(true);
+        const saved=this.saveSettingsUI();
+        if(saved){
+          Utils.$('#dlgSettings')?.close();
+          this.clearMessages();
+          this.renderMessages(true);
+        }
       });
     }
     
-    [1,2].forEach(i=>{
+    Array.from({length:CONFIG.MODEL_PRESET_SLOTS},(_,i)=>i+1).forEach(i=>{
       const typeSelect=Utils.$(`#model${i}Type`);
       if(typeSelect){
         this.events.on(typeSelect,'change',()=>{
