@@ -1396,8 +1396,16 @@ class StorageManager{
     const nextSignatures=new Map();
     const sourceLength=sourceHistory.length;
     const prevLength=Number.isInteger(entry.historyLength)?entry.historyLength:cachedHistory.length;
+    const signatureCache=new Array(sourceLength);
     let changed=false;
     let divergeIndex=-1;
+
+    const getSignature=(index,msg)=>{
+      if(signatureCache[index]!==undefined)return signatureCache[index];
+      const sig=this._messageSignature(msg);
+      signatureCache[index]=sig;
+      return sig;
+    };
 
     let canAppend=sourceLength>=prevLength;
     if(canAppend){
@@ -1410,10 +1418,9 @@ class StorageManager{
           divergeIndex=i;
           break;
         }
-        const sig=this._messageSignature(srcMsg);
+        const sig=getSignature(i,srcMsg);
         if(prevSignatures.get(msgId)!==sig){
           canAppend=false;
-          divergeIndex=i;
           break;
         }
         nextSignatures.set(msgId,prevSignatures.get(msgId)??sig);
@@ -1430,7 +1437,7 @@ class StorageManager{
         const cloned=this._cloneMessage(msg);
         cachedHistory.push(cloned);
         const key=msg?.id?msg.id:`__idx_${i}`;
-        nextSignatures.set(key,this._messageSignature(msg));
+        nextSignatures.set(key,getSignature(i,msg));
         changed=true;
       }
       if(sourceLength===0){
@@ -1449,7 +1456,7 @@ class StorageManager{
         if(divergeIndex===-1)divergeIndex=i;
         break;
       }
-      const sig=this._messageSignature(srcMsg);
+      const sig=getSignature(i,srcMsg);
       nextSignatures.set(msgId,sig);
       if(prevSignatures.get(msgId)!==sig){
         cachedHistory[i]=this._cloneMessage(srcMsg);
@@ -1464,7 +1471,7 @@ class StorageManager{
         const cloned=this._cloneMessage(msg);
         cachedHistory.push(cloned);
         const key=msg?.id?msg.id:`__idx_${j}`;
-        nextSignatures.set(key,this._messageSignature(msg));
+        nextSignatures.set(key,getSignature(j,msg));
       }
       changed=true;
     }
@@ -1480,7 +1487,7 @@ class StorageManager{
         const cloned=this._cloneMessage(msg);
         cachedHistory.push(cloned);
         const key=msg?.id?msg.id:`__idx_${k}`;
-        nextSignatures.set(key,this._messageSignature(msg));
+        nextSignatures.set(key,getSignature(k,msg));
       }
       changed=true;
     }
