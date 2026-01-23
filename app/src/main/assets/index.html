@@ -1980,6 +1980,7 @@ class APIManager{
     const rawContent=edit.content!=null?edit.content:edit.text;
     const content=this._interpolateReplies(rawContent??'',replies);
     const prev=String(base??'');
+    if(mode==='keep'||mode==='none'||mode==='unchanged')return prev;
     if(mode==='append')return prev+content;
     if(mode==='prepend')return content+prev;
     return content;
@@ -2142,6 +2143,21 @@ class APIManager{
     return defaultPreset;
   }
 
+  _resolveFinalStepIndex(steps){
+    const finalIndices=steps.map((step,idx)=>step?.isFinal?idx:null).filter(idx=>idx!==null);
+    if(finalIndices.length>1){
+      throw new Error('多步编排只能有一个最终步骤');
+    }
+    if(finalIndices.length===1){
+      const idx=finalIndices[0];
+      if(idx!==steps.length-1){
+        throw new Error('最终步骤必须为最后一步');
+      }
+      return idx;
+    }
+    return Math.max(0,steps.length-1);
+  }
+
   _estimateValidationTurnCount(steps){
     let maxTurns=0;
     steps.forEach(step=>{
@@ -2167,6 +2183,8 @@ class APIManager{
 
   validateMultiStepRunnerSteps(steps,options={}){
     if(!Array.isArray(steps))throw new Error('多步编排 steps 必须为数组');
+    if(steps.length===0)throw new Error('多步编排 steps 不能为空');
+    this._resolveFinalStepIndex(steps);
     const baseSystem=options.baseSystem??'';
     const baseUserRaw=options.baseUser??'示例用户输入';
     const baseUser=options.messagePrefix?options.messagePrefix+baseUserRaw:baseUserRaw;
@@ -2227,6 +2245,7 @@ class APIManager{
       throw new Error('多步编排器未配置 steps');
     }
 
+    const finalIndex=this._resolveFinalStepIndex(runner.steps);
     const baseTurns=this._buildTurns(session?.history||[]);
     const baseSystem=pc.sysPrompt||'';
     const baseUserRaw=this._getLatestUserContent(session);
@@ -2240,7 +2259,7 @@ class APIManager{
     for(let i=0;i<runner.steps.length;i++){
       const step=runner.steps[i]||{};
       const stepIndex=i+1;
-      const isFinal=i===runner.steps.length-1;
+      const isFinal=i===finalIndex;
       const stepPreset=this._resolveStepPreset(step,preset);
 
       let system=baseSystem;
@@ -2281,8 +2300,9 @@ class APIManager{
 
       this._validateStepMessages(stepIndex,messages);
 
-      lastResult=await this.sendWithMessages(stepPreset,messages,isFinal?onDelta:null);
-      replies.push(lastResult?.content??'');
+      const stepResult=await this.sendWithMessages(stepPreset,messages,isFinal?onDelta:null);
+      replies.push(stepResult?.content??'');
+      if(isFinal)lastResult=stepResult;
     }
 
     return lastResult;
@@ -4172,6 +4192,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       <div style="display:grid;grid-template-columns:80px 120px 1fr auto;gap:.5rem;align-items:center;margin-bottom:.5rem" data-edit-idx="${idx}" data-edit-role="${role}">
         <input type="number" min="1" step="1" placeholder="楼层" data-field="turn" value="${Number.isFinite(edit?.turn)?edit.turn:''}" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem"/>
         <select data-field="mode" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem">
+          <option value="keep"${(edit?.mode||'replace')==='keep'?' selected':''}>不变</option>
           <option value="replace"${(edit?.mode||'replace')==='replace'?' selected':''}>替换</option>
           <option value="append"${(edit?.mode||'replace')==='append'?' selected':''}>追加</option>
           <option value="prepend"${(edit?.mode||'replace')==='prepend'?' selected':''}>前置</option>
@@ -4198,13 +4219,18 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       const rangeStart=Number.isFinite(step?.history?.start)?step.history.start:'';
       const rangeEnd=Number.isFinite(step?.history?.end)?step.history.end:'';
       const latestCount=Number.isFinite(step?.history?.count)?step.history.count:(Number.isFinite(step?.history?.latest)?step.history.latest:'');
-      const systemEdit=typeof step?.system==='string'?{mode:'replace',content:step.system}:{mode:step?.system?.mode||'replace',content:step?.system?.content??step?.system?.text??''};
-      const userEdit=typeof step?.user==='string'?{mode:'replace',content:step.user}:{mode:step?.user?.mode||'replace',content:step?.user?.content??step?.user?.text??''};
+      const systemEdit=typeof step?.system==='string'?{mode:'replace',content:step.system}:{mode:step?.system?.mode||'keep',content:step?.system?.content??step?.system?.text??''};
+      const userEdit=typeof step?.user==='string'?{mode:'replace',content:step.user}:{mode:step?.user?.mode||'keep',content:step?.user?.content??step?.user?.text??''};
       return `
         <div style="border:1px solid var(--border);border-radius:.75rem;padding:.8rem;background:rgba(18,20,27,.75)" data-step-idx="${idx}">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem">
             <div style="font-weight:600;font-size:13px">步骤 ${idx+1}</div>
-            <button class="btn small warn" data-action="remove-step" data-step-idx="${idx}">删除</button>
+            <div style="display:flex;gap:.5rem;align-items:center">
+              <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:.3rem">
+                <input type="checkbox" data-field="isFinal"${step?.isFinal?' checked':''}/> 作为最终输出
+              </label>
+              <button class="btn small warn" data-action="remove-step" data-step-idx="${idx}">删除</button>
+            </div>
           </div>
           <div style="display:grid;gap:.6rem">
             <div class="field" style="grid-template-columns:1fr">
@@ -4221,6 +4247,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
               <div style="display:flex;gap:.5rem;margin-top:.35rem">
                 <label style="font-size:11px;color:var(--muted)">系统提示模式</label>
                 <select data-field="systemMode">
+                  <option value="keep"${systemEdit.mode==='keep'?' selected':''}>不变</option>
                   <option value="replace"${systemEdit.mode==='replace'?' selected':''}>替换</option>
                   <option value="append"${systemEdit.mode==='append'?' selected':''}>追加</option>
                   <option value="prepend"${systemEdit.mode==='prepend'?' selected':''}>前置</option>
@@ -4247,6 +4274,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
               <label>最新用户消息改写</label>
               <div style="display:grid;gap:.5rem">
                 <select data-field="userMode">
+                  <option value="keep"${userEdit.mode==='keep'?' selected':''}>不变</option>
                   <option value="replace"${userEdit.mode==='replace'?' selected':''}>替换</option>
                   <option value="append"${userEdit.mode==='append'?' selected':''}>追加</option>
                   <option value="prepend"${userEdit.mode==='prepend'?' selected':''}>前置</option>
@@ -4282,9 +4310,11 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       if(name)step.name=name;
       const presetName=stepEl.querySelector('[data-field="presetName"]')?.value.trim();
       if(presetName)step.presetName=presetName;
+      const isFinal=stepEl.querySelector('[data-field="isFinal"]')?.checked;
+      if(isFinal)step.isFinal=true;
       const systemContent=stepEl.querySelector('[data-field="systemContent"]')?.value??'';
       const systemMode=stepEl.querySelector('[data-field="systemMode"]')?.value||'replace';
-      if(systemContent.trim()!==''){
+      if(systemMode!=='keep'&&systemContent.trim()!==''){
         step.system={mode:systemMode,content:systemContent};
       }
       const historyMode=stepEl.querySelector('[data-field="historyMode"]')?.value||'all';
@@ -4302,7 +4332,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       }
       const userContent=stepEl.querySelector('[data-field="userContent"]')?.value??'';
       const userMode=stepEl.querySelector('[data-field="userMode"]')?.value||'replace';
-      if(userContent.trim()!==''){
+      if(userMode!=='keep'&&userContent.trim()!==''){
         step.user={mode:userMode,content:userContent};
       }
       const userEdits=[];
@@ -4310,7 +4340,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         const turn=parseInt(editEl.querySelector('[data-field="turn"]')?.value,10);
         const mode=editEl.querySelector('[data-field="mode"]')?.value||'replace';
         const content=editEl.querySelector('[data-field="content"]')?.value??'';
-        if(Number.isFinite(turn)&&content.trim()!==''){
+        if(mode!=='keep'&&Number.isFinite(turn)&&content.trim()!==''){
           userEdits.push({turn,mode,content});
         }
       });
@@ -4319,7 +4349,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         const turn=parseInt(editEl.querySelector('[data-field="turn"]')?.value,10);
         const mode=editEl.querySelector('[data-field="mode"]')?.value||'replace';
         const content=editEl.querySelector('[data-field="content"]')?.value??'';
-        if(Number.isFinite(turn)&&content.trim()!==''){
+        if(mode!=='keep'&&Number.isFinite(turn)&&content.trim()!==''){
           assistantEdits.push({turn,mode,content});
         }
       });
@@ -4339,6 +4369,11 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       ErrorHandler.show('请先选择一个提示词预设');
       return;
     }
+    if(this._multiStepAddLocked){
+      return;
+    }
+    this._multiStepAddLocked=true;
+    setTimeout(()=>{ this._multiStepAddLocked=false; },150);
     const steps=this.collectMultiStepStepsFromDOM();
     steps.push({history:{mode:'all'},patches:{turnUsers:[],turnAssistants:[]}});
     this.renderMultiStepSteps(steps);
@@ -5445,7 +5480,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         const actionBtn=e.target.closest('[data-action]');
         if(!actionBtn)return;
         const action=actionBtn.dataset.action;
-        const stepIdx=parseInt(actionBtn.dataset.stepIdx,10);
+        const stepHolder=actionBtn.closest('[data-step-idx]');
+        const stepIdx=parseInt(actionBtn.dataset.stepIdx ?? stepHolder?.dataset.stepIdx,10);
         if(action==='remove-step'){
           if(!isNaN(stepIdx))this.removeMultiStepStep(stepIdx);
         }else if(action==='add-turn-edit'){
