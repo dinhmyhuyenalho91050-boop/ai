@@ -2205,9 +2205,11 @@ class UIManager{
   _releaseAutoStick(){
     const box=Utils.$('#messages');
     const doStick = this._pendingStick;
+    const shouldStick = this._pendingStickWasNearBottom;
     this._suppressAutoStick=false;
     this._pendingStick=false;
-    if(doStick && box && this.isNearBottom(box)){
+    this._pendingStickWasNearBottom=false;
+    if(doStick && shouldStick && box){
       requestAnimationFrame(()=>{ box.scrollTop = box.scrollHeight; });
     }
   }
@@ -2216,6 +2218,7 @@ class UIManager{
     this.state=state;
     this._suppressAutoStick=false;
     this._pendingStick=false;
+    this._pendingStickWasNearBottom=false;
     this._vvAvailable=typeof window!=='undefined' && window.visualViewport;
     this._vpFrozen=false;
     this._vvListener=null;
@@ -2608,7 +2611,15 @@ class UIManager{
     
     this.updateLoadTip(box,win);
     
-    if(scrollToBottom){ if(!this._suppressAutoStick){ requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; }); this.ensureBottom(1, 140); } else { this._pendingStick=true; } }
+    if(scrollToBottom){
+      if(!this._suppressAutoStick){
+        requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
+        this.ensureBottom(1, 140);
+      }else{
+        this._pendingStick=true;
+        this._pendingStickWasNearBottom=true;
+      }
+    }
   }
   
   // ✅ 核心改进：复用子元素而不是重建
@@ -2939,6 +2950,7 @@ class UIManager{
         requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
       }else{
         this._pendingStick=true;
+        this._pendingStickWasNearBottom=true;
       }
     }
 
@@ -3038,7 +3050,7 @@ class UIManager{
       return;
     }
     
-    this._suppressAutoStick=true; this._pendingStick=false;
+    this._suppressAutoStick=true; this._pendingStick=false; this._pendingStickWasNearBottom=false;
     if(text){
       if(this._vvAvailable) this.freezeViewport();
       this.appendMessage({role:'user',content:text});
