@@ -1843,7 +1843,7 @@ class APIManager{
       modelDefault='kimi-k2-0905-preview';
     }
     const url=(cfg.base||baseDefault).replace(/\/+$/,'')+'/chat/completions';
-    const allowThinking=!!cfg.useThinking;
+    const requestThinking=!!cfg.useThinking;
     const isClaudeCompatible=/claude/i.test(cfg.model||'')||/anthropic/i.test(cfg.base||'');
     const extractContentParts=(parts)=>{
       let text='',thinking='';
@@ -1851,7 +1851,7 @@ class APIManager{
         const type=part?.type||'';
         if(type==='text'||type==='output_text'||type===''){
           if(part?.text)text+=part.text;
-        }else if(allowThinking&&(type==='thinking'||type==='reasoning')){
+        }else if(type==='thinking'||type==='reasoning'){
           if(part?.thinking)thinking+=part.thinking;
           else if(part?.text)thinking+=part.text;
         }
@@ -1869,9 +1869,9 @@ class APIManager{
     if(cfg.max_tokens!=null&&cfg.max_tokens!==0)body.max_tokens=cfg.max_tokens;
     
     // ✅ 添加思维链支持 - 只有在启用时才发送
-    if(allowThinking&&!isClaudeCompatible&&cfg.thinkingEffort){
+    if(requestThinking&&!isClaudeCompatible&&cfg.thinkingEffort){
       body.reasoning_effort=cfg.thinkingEffort;
-    }else if(allowThinking&&!isClaudeCompatible){
+    }else if(requestThinking&&!isClaudeCompatible){
       // 启用但未指定级别，使用medium作为默认值
       body.reasoning_effort='medium';
     }
@@ -1912,11 +1912,11 @@ class APIManager{
               const json=JSON.parse(data);
               const deltaPayload=json?.choices?.[0]?.delta||{};
               let delta='';
-              let thinkDelta=allowThinking?deltaPayload?.reasoning_content||'':'';
+              let thinkDelta=deltaPayload?.reasoning_content||'';
               if(Array.isArray(deltaPayload?.content)){
                 const partResult=extractContentParts(deltaPayload.content);
                 delta=partResult.text;
-                if(allowThinking&&partResult.thinking)thinkDelta+=partResult.thinking;
+                if(partResult.thinking)thinkDelta+=partResult.thinking;
               }else{
                 delta=deltaPayload?.content||'';
               }
@@ -1936,11 +1936,11 @@ class APIManager{
       const data=await res.json();
       const message=data?.choices?.[0]?.message||{};
       let content='(空响应)';
-      let thinking=allowThinking?message?.reasoning_content||'':'';
+      let thinking=message?.reasoning_content||'';
       if(Array.isArray(message?.content)){
         const partResult=extractContentParts(message.content);
         content=partResult.text||'(空响应)';
-        if(allowThinking&&partResult.thinking)thinking+=partResult.thinking;
+        if(partResult.thinking)thinking+=partResult.thinking;
       }else{
         content=message?.content||'(空响应)';
       }
@@ -1949,7 +1949,6 @@ class APIManager{
   }
 
   async sendAnthropic(session,cfg,onDelta,signal){
-    const allowThinking=!!cfg.useThinking;
     const base=(cfg.base||'https://api.anthropic.com/v1').replace(/\/+$/,'');
     const url=`${base}/messages`;
     const model=cfg.model||'claude-3-5-sonnet-20240620';
@@ -2004,7 +2003,7 @@ class APIManager{
                 const block=json.content_block||{};
                 if(block.type==='text'&&block.text){
                   full+=block.text;
-                }else if(allowThinking&&block.type==='thinking'){
+                }else if(block.type==='thinking'){
                   if(block.thinking)thinking+=block.thinking;
                   if(block.text)thinking+=block.text;
                 }
@@ -2013,7 +2012,7 @@ class APIManager{
                 const delta=json.delta||{};
                 if(delta.type==='text_delta'&&delta.text){
                   full+=delta.text;
-                }else if(allowThinking&&delta.type==='thinking_delta'&&delta.thinking){
+                }else if(delta.type==='thinking_delta'&&delta.thinking){
                   thinking+=delta.thinking;
                 }
               }
@@ -2035,7 +2034,7 @@ class APIManager{
         const textParts=[];
         data.content.forEach((part)=>{
           if(part?.type==='text'&&part?.text)textParts.push(part.text);
-          if(allowThinking&&part?.type==='thinking'){
+          if(part?.type==='thinking'){
             if(part?.thinking)thinking+=part.thinking;
             if(part?.text)thinking+=part.text;
           }
@@ -2208,7 +2207,7 @@ class UIManager{
     const doStick = this._pendingStick;
     this._suppressAutoStick=false;
     this._pendingStick=false;
-    if(doStick && box){
+    if(doStick && box && this.isNearBottom(box)){
       requestAnimationFrame(()=>{ box.scrollTop = box.scrollHeight; });
     }
   }
