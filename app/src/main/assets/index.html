@@ -372,6 +372,21 @@
             <div class="field" style="grid-template-columns:1fr"><label>助手预填充</label><textarea id="assistantPrefill" rows="3" placeholder="引导助手回复开头(可选)"></textarea></div>
             <div class="sep"></div>
             <div style="margin-bottom:1rem">
+              <div style="font-weight:600;font-size:13px;margin-bottom:.5rem;color:var(--muted)">多步任务编排器（后台执行）</div>
+              <div class="field" style="grid-template-columns:1fr">
+                <label>启用多步编排</label>
+                <select id="multiStepRunnerEnabled">
+                  <option value="true">是</option>
+                  <option value="false">否</option>
+                </select>
+              </div>
+              <div class="field" style="grid-template-columns:1fr">
+                <label>Steps 配置(JSON)</label>
+                <textarea id="multiStepRunnerSteps" rows="6" placeholder='例如: [{"name":"step1","history":{"mode":"none"},"user":{"mode":"replace","content":"{{reply1}}"}}]'></textarea>
+              </div>
+            </div>
+            <div class="sep"></div>
+            <div style="margin-bottom:1rem">
               <div style="font-weight:600;font-size:13px;margin-bottom:.5rem;color:var(--muted)">正则替换规则(生成后处理)</div>
               <div id="regexRulesContainer"></div>
               <button type="button" class="btn small" id="btnAddRegexRule" style="margin-top:.5rem">+ 添加规则</button>
@@ -1709,7 +1724,8 @@ class StateManager{
       currentId:null,
       promptPresets:{
         'default':{name:'默认预设',sysPrompt:'',firstUser:'',firstAssistant:'',
-          messagePrefix:'',assistantPrefill:'',regexRules:[]}
+          messagePrefix:'',assistantPrefill:'',regexRules:[],
+          multiStepRunner:{enabled:false,steps:[]}}
       },
       currentModelIndex:0,
       editingPromptPreset:null
@@ -1824,7 +1840,8 @@ class StateManager{
   getCurrentPromptConfig(){
     // 返回default预设作为后备
     return this.state.promptPresets['default']||
-      {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[]};
+      {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[],
+        multiStepRunner:{enabled:false,steps:[]}};
   }
   
   getSessionPromptConfig(session){
@@ -1832,7 +1849,8 @@ class StateManager{
     const presetName=session.promptPresetName||'default';
     return this.state.promptPresets[presetName]||
       this.state.promptPresets['default']||
-      {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[]};
+      {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[],
+        multiStepRunner:{enabled:false,steps:[]}};
   }
 }
 
@@ -1937,10 +1955,253 @@ class APIManager{
 
     return{messages,system};
   }
+
+  _interpolateReplies(text,replies){
+    if(text==null)return '';
+    return String(text).replace(/\{\{\s*reply(\d+)\s*\}\}/g,(match,num)=>{
+      const idx=Number(num)-1;
+      if(!Number.isInteger(idx)||idx<0||idx>=replies.length){
+        throw new Error(`引用了不存在的回复变量 ${match}`);
+      }
+      return replies[idx];
+    });
+  }
+
+  _applyContentEdit(base,edit,replies){
+    if(edit==null)return base;
+    if(typeof edit==='string'){
+      return this._interpolateReplies(edit,replies);
+    }
+    const mode=(edit.mode||'replace').toLowerCase();
+    const rawContent=edit.content!=null?edit.content:edit.text;
+    const content=this._interpolateReplies(rawContent??'',replies);
+    const prev=String(base??'');
+    if(mode==='append')return prev+content;
+    if(mode==='prepend')return content+prev;
+    return content;
+  }
+
+  _buildTurns(history){
+    const turns=[];
+    let pendingUser=null;
+    for(const msg of history||[]){
+      if(msg?.role==='user'){
+        pendingUser=msg;
+        continue;
+      }
+      if(msg?.role==='assistant'&&pendingUser){
+        turns.push({
+          user:{role:'user',content:String(pendingUser.content??'')},
+          assistant:{role:'assistant',content:String(msg.content??'')}
+        });
+        pendingUser=null;
+      }
+    }
+    return turns;
+  }
+
+  _normalizeHistoryConfig(historyConfig){
+    if(!historyConfig)return {mode:'all'};
+    if(typeof historyConfig==='string')return {mode:historyConfig};
+    return historyConfig;
+  }
+
+  _selectTurns(turns,historyConfig){
+    const total=turns.length;
+    const config=this._normalizeHistoryConfig(historyConfig);
+    const rawMode=String(config.mode||'all').toLowerCase().replace(/\s+/g,' ').trim();
+    const mode=rawMode.includes('all')?'all':(rawMode.includes('none')||rawMode.includes('empty')?'none':(rawMode.includes('range')?'range':rawMode));
+    if(mode==='none')return [];
+    let start=1;
+    let end=total;
+    if(mode==='range'){
+      start=Number.isFinite(config.start)?Math.trunc(config.start):1;
+      end=Number.isFinite(config.end)?Math.trunc(config.end):total;
+    }
+    if(start<1||end<start||end>total){
+      throw new Error(`历史回合范围无效: ${start}..${end} (总回合=${total})`);
+    }
+    const selected=[];
+    for(let i=start;i<=end;i++){
+      const turn=turns[i-1];
+      selected.push({
+        index:i,
+        user:{...turn.user},
+        assistant:{...turn.assistant}
+      });
+    }
+    return selected;
+  }
+
+  _applyTurnEdits(selectedTurns,edits,replies,targetRole){
+    if(!Array.isArray(edits)||edits.length===0)return;
+    edits.forEach(edit=>{
+      const idx=Math.trunc(edit?.turn);
+      if(!Number.isInteger(idx))throw new Error('回合改写缺少 turn 索引');
+      const turn=selectedTurns.find(item=>item.index===idx);
+      if(!turn){
+        throw new Error(`回合改写目标不存在: turn ${idx}`);
+      }
+      const target=targetRole==='assistant'?turn.assistant:turn.user;
+      target.content=this._applyContentEdit(target.content,edit,replies);
+    });
+  }
+
+  _validateStepMessages(stepIndex,messages){
+    if(!Array.isArray(messages)||messages.length===0){
+      throw new Error(`Step ${stepIndex}: messages 为空`);
+    }
+    let start=0;
+    messages.forEach((msg,i)=>{
+      if(msg?.role==='system'&&i!==0){
+        throw new Error(`Step ${stepIndex}: messages[${i+1}] system 只能出现在第一条`);
+      }
+    });
+    if(messages[0]?.role==='system'){
+      start=1;
+      if(messages.length===1){
+        throw new Error(`Step ${stepIndex}: 仅有 system 消息，缺少 user 结尾`);
+      }
+    }
+    const expectedFirst=messages[start]?.role;
+    if(expectedFirst!=='user'){
+      throw new Error(`Step ${stepIndex}: messages[${start+1}] 必须是 user`);
+    }
+    for(let i=start;i<messages.length;i++){
+      const expected=(i-start)%2===0?'user':'assistant';
+      const actual=messages[i]?.role;
+      if(actual!==expected){
+        throw new Error(`Step ${stepIndex}: messages[${i+1}] 角色顺序错误，期望 ${expected} 实际 ${actual}`);
+      }
+    }
+    if(messages[messages.length-1]?.role!=='user'){
+      throw new Error(`Step ${stepIndex}: messages 必须以 user 结尾`);
+    }
+  }
+
+  _extractSystemMessage(messages){
+    if(messages[0]?.role==='system'){
+      return{system:String(messages[0].content??''),rest:messages.slice(1)};
+    }
+    return{system:'',rest:messages};
+  }
+
+  _toAnthropicMessages(messages){
+    const {system,rest}=this._extractSystemMessage(messages);
+    const converted=rest.map(msg=>({
+      role:msg.role,
+      content:[{type:'text',text:String(msg.content??'')}]
+    }));
+    return{system, messages:converted};
+  }
+
+  _toGeminiContents(messages){
+    const {system,rest}=this._extractSystemMessage(messages);
+    const contents=rest.map(msg=>({
+      role:msg.role==='assistant'?'model':'user',
+      parts:[{text:String(msg.content??'')}]
+    }));
+    return{system, contents};
+  }
+
+  _getLatestUserContent(session){
+    const history=session?.history||[];
+    for(let i=history.length-1;i>=0;i--){
+      if(history[i]?.role==='user')return String(history[i].content??'');
+    }
+    return '';
+  }
+
+  async runMultiStep(session,preset,onDelta){
+    const pc=this.state.getSessionPromptConfig(session);
+    const runner=pc?.multiStepRunner;
+    if(!runner?.enabled||!Array.isArray(runner.steps)||runner.steps.length===0){
+      throw new Error('多步编排器未配置 steps');
+    }
+
+    const baseTurns=this._buildTurns(session?.history||[]);
+    const baseSystem=pc.sysPrompt||'';
+    const baseUserRaw=this._getLatestUserContent(session);
+    const baseUser=pc.messagePrefix?pc.messagePrefix+baseUserRaw:baseUserRaw;
+    if(baseUser===''){
+      throw new Error('多步编排器需要最新 user 消息');
+    }
+
+    const replies=[];
+    let lastResult={content:'',thinking:''};
+    for(let i=0;i<runner.steps.length;i++){
+      const step=runner.steps[i]||{};
+      const stepIndex=i+1;
+      const isFinal=i===runner.steps.length-1;
+
+      let system=baseSystem;
+      if(step.system!==undefined){
+        system=this._applyContentEdit(system,step.system,replies);
+      }
+
+      const selectedTurns=this._selectTurns(baseTurns,step.history);
+
+      if(step.patches?.turnUsers){
+        this._applyTurnEdits(selectedTurns,step.patches.turnUsers,replies,'user');
+      }
+      if(step.patches?.turnAssistants){
+        this._applyTurnEdits(selectedTurns,step.patches.turnAssistants,replies,'assistant');
+      }
+
+      if(step.patches?.system!==undefined){
+        system=this._applyContentEdit(system,step.patches.system,replies);
+      }
+
+      let userContent=baseUser;
+      if(step.user!==undefined){
+        userContent=this._applyContentEdit(userContent,step.user,replies);
+      }
+      if(step.patches?.latestUser!==undefined){
+        userContent=this._applyContentEdit(userContent,step.patches.latestUser,replies);
+      }
+
+      const messages=[];
+      if(system){
+        messages.push({role:'system',content:system});
+      }
+      selectedTurns.forEach(turn=>{
+        messages.push({role:'user',content:turn.user.content});
+        messages.push({role:'assistant',content:turn.assistant.content});
+      });
+      messages.push({role:'user',content:userContent});
+
+      this._validateStepMessages(stepIndex,messages);
+
+      lastResult=await this.sendWithMessages(preset,messages,isFinal?onDelta:null);
+      replies.push(lastResult?.content??'');
+    }
+
+    return lastResult;
+  }
+
+  async sendWithMessages(preset,messages,onDelta){
+    if(!preset)throw new Error('无可用模型预设');
+    this.abortController=new AbortController();
+    this.activeReader=null;
+    const signal=this.abortController.signal;
+
+    if(preset.type==='anthropic'){
+      return await this.sendAnthropicWithMessages(messages,preset.config,onDelta,signal);
+    }
+    if(preset.type==='openai'||preset.type==='deepseek'||preset.type==='kimi'){
+      return await this.sendOpenAIWithMessages(messages,preset.config,onDelta,signal,preset.type==='deepseek',preset.type==='kimi');
+    }
+    return await this.sendGeminiWithMessages(messages,preset.config,preset.type==='gemini-proxy',onDelta,signal);
+  }
   
   async send(session,onDelta){
     const preset=this.state.getCurrentPreset();
     if(!preset)throw new Error('无可用模型预设');
+
+    const pc=this.state.getSessionPromptConfig(session);
+    if(pc?.multiStepRunner?.enabled){
+      return await this.runMultiStep(session,preset,onDelta);
+    }
 
     this.abortController=new AbortController();
     this.activeReader=null;
@@ -1956,7 +2217,7 @@ class APIManager{
     }
   }
 
-  async sendOpenAI(session,cfg,onDelta,signal,forceDeepSeek=false,forceKimi=false){
+  async sendOpenAIWithMessages(messages,cfg,onDelta,signal,forceDeepSeek=false,forceKimi=false){
     const isDeepSeek=forceDeepSeek||((cfg.base||'').includes('api.deepseek.com'));
     const isKimi=forceKimi||((cfg.base||'').includes('api.moonshot.cn'));
     let baseDefault='https://api.openai.com/v1';
@@ -1986,7 +2247,7 @@ class APIManager{
     };
     const body={
       model:cfg.model||modelDefault,
-      messages:this.buildMessages(session,{isDeepSeek,isKimi}),
+      messages,
       stream:!!cfg.stream
     };
     
@@ -2072,14 +2333,21 @@ class APIManager{
     }
   }
 
-  async sendAnthropic(session,cfg,onDelta,signal){
+  async sendOpenAI(session,cfg,onDelta,signal,forceDeepSeek=false,forceKimi=false){
+    const isDeepSeek=forceDeepSeek||((cfg.base||'').includes('api.deepseek.com'));
+    const isKimi=forceKimi||((cfg.base||'').includes('api.moonshot.cn'));
+    const messages=this.buildMessages(session,{isDeepSeek,isKimi});
+    return await this.sendOpenAIWithMessages(messages,cfg,onDelta,signal,forceDeepSeek,forceKimi);
+  }
+
+  async sendAnthropicWithMessages(messages,cfg,onDelta,signal){
     const base=(cfg.base||'https://api.anthropic.com/v1').replace(/\/+$/,'');
     const url=`${base}/messages`;
     const model=cfg.model||'claude-3-5-sonnet-20240620';
-    const {messages,system}=this.buildAnthropicMessages(session);
+    const {messages:converted,system}=this._toAnthropicMessages(messages);
     const body={
       model,
-      messages,
+      messages:converted,
       stream:!!cfg.stream,
       max_tokens:cfg.max_tokens||4096
     };
@@ -2168,8 +2436,13 @@ class APIManager{
       return{content,thinking};
     }
   }
+
+  async sendAnthropic(session,cfg,onDelta,signal){
+    const messages=this.buildMessages(session);
+    return await this.sendAnthropicWithMessages(messages,cfg,onDelta,signal);
+  }
   
-  async sendGemini(session,cfg,isProxy,onDelta,signal){
+  async sendGeminiWithMessages(messages,cfg,isProxy,onDelta,signal){
     const base=isProxy?
       (cfg.proxyUrl||'http://127.0.0.1:8889').replace(/\/+$/,''):
       (cfg.base||'https://generativelanguage.googleapis.com').replace(/\/+$/,'');
@@ -2182,21 +2455,7 @@ if (cfg.stream) qs.push('alt=sse');
 if (!isProxy && cfg.key) qs.push(`key=${encodeURIComponent(cfg.key)}`);
 if (qs.length) url += `?${qs.join('&')}`;
     
-    const contents=[];
-    const pc=this.state.getSessionPromptConfig(session);
-    
-    if(pc.firstUser)contents.push({role:'user',parts:[{text:pc.firstUser}]});
-    
-    const history=session.history||[];
-    history.forEach((m,i)=>{
-      const isLastUser=m.role==='user'&&i===history.length-1;
-      const content=(isLastUser&&pc.messagePrefix)?pc.messagePrefix+m.content:m.content;
-      
-      if(m.role==='assistant')contents.push({role:'model',parts:[{text:m.content}]});
-      if(m.role==='user')contents.push({role:'user',parts:[{text:content}]});
-    });
-    
-    if(pc.assistantPrefill)contents.push({role:'model',parts:[{text:pc.assistantPrefill}]});
+    const {system,contents}=this._toGeminiContents(messages);
     
     const generationConfig={};
     if(cfg.temperature!=null&&cfg.temperature!==0)generationConfig.temperature=cfg.temperature;
@@ -2220,9 +2479,9 @@ if (qs.length) url += `?${qs.join('&')}`;
     };
     
     // systemInstruction 应该在 contents 之后
-    if(pc.sysPrompt){
+    if(system){
       body.systemInstruction={
-        parts:[{text:pc.sysPrompt}]
+        parts:[{text:system}]
       };
     }
     
@@ -2296,6 +2555,11 @@ if (isProxy && cfg.proxyPass) headers.Authorization = `Bearer ${cfg.proxyPass}`;
       }
       return{content:content||'(空响应)',thinking};
     }
+  }
+
+  async sendGemini(session,cfg,isProxy,onDelta,signal){
+    const messages=this.buildMessages(session);
+    return await this.sendGeminiWithMessages(messages,cfg,isProxy,onDelta,signal);
   }
   
   abort(){
@@ -2395,7 +2659,8 @@ class UIManager{
       firstAssistant:'',
       messagePrefix:'',
       assistantPrefill:'',
-      regexRules:[]
+      regexRules:[],
+      multiStepRunner:{enabled:false,steps:[]}
     };
     try{
       if(typeof structuredClone==='function')return structuredClone(preset);
@@ -2410,6 +2675,10 @@ class UIManager{
         firstAssistant:preset.firstAssistant||'',
         messagePrefix:preset.messagePrefix||'',
         assistantPrefill:preset.assistantPrefill||'',
+        multiStepRunner:preset.multiStepRunner&&typeof preset.multiStepRunner==='object'?{
+          enabled:!!preset.multiStepRunner.enabled,
+          steps:Array.isArray(preset.multiStepRunner.steps)?preset.multiStepRunner.steps:[]
+        }:{enabled:false,steps:[]},
         regexRules:Array.isArray(preset.regexRules)?preset.regexRules.map(rule=>({
           name:rule?.name||'',
           pattern:rule?.pattern||'',
@@ -3762,6 +4031,13 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(Utils.$('#firstAssistant'))Utils.$('#firstAssistant').value=this.promptPresetDraft.firstAssistant||'';
     if(Utils.$('#messagePrefix'))Utils.$('#messagePrefix').value=this.promptPresetDraft.messagePrefix||'';
     if(Utils.$('#assistantPrefill'))Utils.$('#assistantPrefill').value=this.promptPresetDraft.assistantPrefill||'';
+    if(Utils.$('#multiStepRunnerEnabled')){
+      Utils.$('#multiStepRunnerEnabled').value=(this.promptPresetDraft.multiStepRunner?.enabled?'true':'false');
+    }
+    if(Utils.$('#multiStepRunnerSteps')){
+      const steps=this.promptPresetDraft.multiStepRunner?.steps;
+      Utils.$('#multiStepRunnerSteps').value=Array.isArray(steps)?JSON.stringify(steps,null,2):'';
+    }
 
     this.renderRegexRules(this.promptPresetDraft.regexRules||[]);
 
@@ -3867,6 +4143,22 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       })):
       [];
 
+    const runnerEnabled=Utils.$('#multiStepRunnerEnabled')?.value==='true';
+    const runnerRaw=Utils.$('#multiStepRunnerSteps')?.value.trim()||'';
+    let runnerSteps=[];
+    if(runnerRaw){
+      try{
+        runnerSteps=JSON.parse(runnerRaw);
+      }catch(_){
+        ErrorHandler.show('多步编排器配置 JSON 无效');
+        return;
+      }
+      if(!Array.isArray(runnerSteps)){
+        ErrorHandler.show('多步编排器配置必须为数组');
+        return;
+      }
+    }
+
     presets[key]={
       name:name,
       sysPrompt:Utils.$('#sysPrompt')?.value.trim()||'',
@@ -3874,6 +4166,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       firstAssistant:Utils.$('#firstAssistant')?.value.trim()||'',
       messagePrefix:Utils.$('#messagePrefix')?.value.trim()||'',
       assistantPrefill:Utils.$('#assistantPrefill')?.value.trim()||'',
+      multiStepRunner:{enabled:runnerEnabled,steps:runnerSteps},
       regexRules:regexRules
     };
 
@@ -3901,6 +4194,22 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const nameInput=Utils.$('#promptPresetName');
     const name=nameInput?.value.trim()||presets[editing].name;
 
+    const runnerEnabled=Utils.$('#multiStepRunnerEnabled')?.value==='true';
+    const runnerRaw=Utils.$('#multiStepRunnerSteps')?.value.trim()||'';
+    let runnerSteps=[];
+    if(runnerRaw){
+      try{
+        runnerSteps=JSON.parse(runnerRaw);
+      }catch(_){
+        ErrorHandler.show('多步编排器配置 JSON 无效');
+        return;
+      }
+      if(!Array.isArray(runnerSteps)){
+        ErrorHandler.show('多步编排器配置必须为数组');
+        return;
+      }
+    }
+
     presets[editing]={
       name:name,
       sysPrompt:Utils.$('#sysPrompt')?.value.trim()||'',
@@ -3908,6 +4217,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       firstAssistant:Utils.$('#firstAssistant')?.value.trim()||'',
       messagePrefix:Utils.$('#messagePrefix')?.value.trim()||'',
       assistantPrefill:Utils.$('#assistantPrefill')?.value.trim()||'',
+      multiStepRunner:{enabled:runnerEnabled,steps:runnerSteps},
       regexRules:(this.promptPresetDraft&&Array.isArray(this.promptPresetDraft.regexRules))?
         this.promptPresetDraft.regexRules.map(rule=>({
           name:rule?.name||'',
@@ -3950,6 +4260,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     Utils.$('#firstAssistant').value='';
     Utils.$('#messagePrefix').value='';
     Utils.$('#assistantPrefill').value='';
+    if(Utils.$('#multiStepRunnerEnabled'))Utils.$('#multiStepRunnerEnabled').value='false';
+    if(Utils.$('#multiStepRunnerSteps'))Utils.$('#multiStepRunnerSteps').value='';
 
     this.renderPromptPresetList();
     this.updatePromptEditingHint();
@@ -4216,7 +4528,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     
     this.state.set('promptPresets',{
       'default':{name:'默认预设',sysPrompt:'',firstUser:'',firstAssistant:'',
-        messagePrefix:'',assistantPrefill:'',regexRules:[]}
+        messagePrefix:'',assistantPrefill:'',regexRules:[],
+        multiStepRunner:{enabled:false,steps:[]}}
     });
     
     this.state.set('sessions',{});
