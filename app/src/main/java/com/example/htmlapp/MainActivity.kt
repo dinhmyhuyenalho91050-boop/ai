@@ -516,6 +516,9 @@ private class DownloadBridge(activity: MainActivity) {
                 return ""
             }
             getIoExecutor().execute {
+                if (isDisposed) {
+                    return@execute
+                }
                 val (success, location) = performSave(safeName, jsonText)
                 notify(success, location)
             }
@@ -527,6 +530,9 @@ private class DownloadBridge(activity: MainActivity) {
             }
             return try {
                 recovered.execute {
+                    if (isDisposed) {
+                        return@execute
+                    }
                     val (success, location) = performSave(safeName, jsonText)
                     notify(success, location)
                 }
@@ -646,6 +652,9 @@ private class DownloadBridge(activity: MainActivity) {
             return null
         }
         return synchronized(executorLock) {
+            if (isDisposed) {
+                return null
+            }
             if (ioExecutor.isShutdown || ioExecutor.isTerminated) {
                 ioExecutor = createIoExecutor()
             }
