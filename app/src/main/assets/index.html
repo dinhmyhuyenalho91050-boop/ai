@@ -964,7 +964,6 @@ class StorageManager{
   static _messagesObserverHandler=null;
   static _sessionCache=null;
   static _legacySnapshot=null;
-  static _signatureCache=typeof WeakMap==='function'?new WeakMap():null;
 
   static registerMessagesObserverHandler(handler){
     this._messagesObserverHandler=typeof handler==='function'?handler:null;
@@ -1151,8 +1150,6 @@ class StorageManager{
 
   static _messageSignature(msg){
     if(!msg||typeof msg!=='object')return String(msg??'');
-    const cached=this._signatureCache?.get(msg);
-    if(cached)return cached;
     const keys=Object.keys(msg).filter(k=>k!=='id').sort();
     let sig=msg.id||'';
     for(const key of keys){
@@ -1164,7 +1161,6 @@ class StorageManager{
         sig+=`|${key}:${String(value)}`;
       }
     }
-    this._signatureCache?.set(msg,sig);
     return sig;
   }
 
