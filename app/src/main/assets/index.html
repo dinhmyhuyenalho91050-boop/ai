@@ -2341,7 +2341,7 @@ class APIManager{
     const baseTurns=this._buildTurns(session?.history||[]);
     const baseSystem=pc.sysPrompt||'';
     const baseUserRaw=this._getLatestUserContent(session);
-    const baseUser=pc.messagePrefix?pc.messagePrefix+baseUserRaw:baseUserRaw;
+    const baseUser=baseUserRaw;
     if(baseUser===''){
       throw new Error('多步编排器需要最新 user 消息');
     }
@@ -4330,7 +4330,9 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(Utils.$('#messagePrefix'))Utils.$('#messagePrefix').value=this.promptPresetDraft.messagePrefix||'';
     if(Utils.$('#assistantPrefill'))Utils.$('#assistantPrefill').value=this.promptPresetDraft.assistantPrefill||'';
     if(Utils.$('#multiStepRunnerEnabled')){
-      Utils.$('#multiStepRunnerEnabled').value=(this.promptPresetDraft.multiStepRunner?.enabled?'true':'false');
+      const enabled=!!this.promptPresetDraft.multiStepRunner?.enabled;
+      Utils.$('#multiStepRunnerEnabled').value=enabled?'true':'false';
+      this.updateMultiStepInputState(enabled);
     }
     this.renderMultiStepSteps(this.promptPresetDraft.multiStepRunner?.steps||[]);
 
@@ -4367,7 +4369,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           <option value="prepend"${(edit?.mode||'replace')==='prepend'?' selected':''}>前置</option>
         </select>
         <textarea rows="2" data-field="content" placeholder="支持 {{reply1}} 变量" style="width:100%;border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.4rem .6rem;resize:vertical">${edit?.content??''}</textarea>
-        <button class="btn small warn" data-action="remove-turn-edit" data-role="${role}" data-step-idx="${stepIdx}" data-edit-idx="${idx}">×</button>
+        <button type="button" class="btn small warn" data-action="remove-turn-edit" data-role="${role}" data-step-idx="${stepIdx}" data-edit-idx="${idx}">×</button>
       </div>
     `).join('');
   }
@@ -4380,7 +4382,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:.5rem;align-items:center;margin-bottom:.5rem" data-reply-regex-idx="${idx}">
         <input type="text" data-field="replyRegexPattern" placeholder="正则表达式" value="${rule?.pattern||''}" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem;font-family:'Consolas','Monaco','Courier New',monospace;font-size:12px"/>
         <input type="text" data-field="replyRegexReplacement" placeholder="替换为" value="${rule?.replacement||''}" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem"/>
-        <button class="btn small warn" data-action="remove-reply-regex" data-step-idx="${stepIdx}" data-regex-idx="${idx}">×</button>
+        <button type="button" class="btn small warn" data-action="remove-reply-regex" data-step-idx="${stepIdx}" data-regex-idx="${idx}">×</button>
       </div>
     `).join('');
   }
@@ -4412,7 +4414,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
               <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:.3rem">
                 <input type="checkbox" data-field="isFinal"${step?.isFinal?' checked':''}/> 作为最终输出
               </label>
-              <button class="btn small warn" data-action="remove-step" data-step-idx="${idx}">删除</button>
+              <button type="button" class="btn small warn" data-action="remove-step" data-step-idx="${idx}">删除</button>
             </div>
           </div>
           <div style="display:grid;gap:.6rem">
@@ -4637,6 +4639,22 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(rangeEl)rangeEl.style.display=mode==='range'?'grid':'none';
     if(latestEl)latestEl.style.display=mode==='latest'?'block':'none';
   }
+
+  updateMultiStepInputState(enabled){
+    const prefixEl=Utils.$('#messagePrefix');
+    const prefillEl=Utils.$('#assistantPrefill');
+    [prefixEl,prefillEl].forEach(el=>{
+      if(!el)return;
+      el.disabled=!!enabled;
+      if(enabled){
+        el.dataset.prevPlaceholder=el.placeholder||'';
+        el.placeholder='多步编排启用时不生效';
+      }else if(el.dataset.prevPlaceholder){
+        el.placeholder=el.dataset.prevPlaceholder;
+        delete el.dataset.prevPlaceholder;
+      }
+    });
+  }
   
   renderRegexRules(rules){
     const container=Utils.$('#regexRulesContainer');
@@ -4791,7 +4809,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         this.api.validateMultiStepRunnerSteps(runnerSteps,{
           baseSystem:Utils.$('#sysPrompt')?.value.trim()||'',
           baseUser:'示例用户输入',
-          messagePrefix:Utils.$('#messagePrefix')?.value.trim()||''
+          messagePrefix:''
         });
       }catch(err){
         ErrorHandler.show(`多步编排配置错误: ${err.message||err}`);
@@ -4841,7 +4859,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         this.api.validateMultiStepRunnerSteps(runnerSteps,{
           baseSystem:Utils.$('#sysPrompt')?.value.trim()||'',
           baseUser:'示例用户输入',
-          messagePrefix:Utils.$('#messagePrefix')?.value.trim()||''
+          messagePrefix:''
         });
       }catch(err){
         ErrorHandler.show(`多步编排配置错误: ${err.message||err}`);
@@ -4900,6 +4918,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     Utils.$('#messagePrefix').value='';
     Utils.$('#assistantPrefill').value='';
     if(Utils.$('#multiStepRunnerEnabled'))Utils.$('#multiStepRunnerEnabled').value='false';
+    this.updateMultiStepInputState(false);
     this.renderMultiStepSteps([]);
 
     this.renderPromptPresetList();
@@ -5781,11 +5800,21 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const btnAddMultiStepStep=Utils.$('#btnAddMultiStepStep');
     if(btnAddMultiStepStep)this.events.on(btnAddMultiStepStep,'click',()=>this.addMultiStepStep());
 
+    const multiStepEnabled=Utils.$('#multiStepRunnerEnabled');
+    if(multiStepEnabled){
+      this.events.on(multiStepEnabled,'change',()=>{
+        const enabled=multiStepEnabled.value==='true';
+        this.updateMultiStepInputState(enabled);
+      });
+    }
+
     const multiStepContainer=Utils.$('#multiStepRunnerStepsContainer');
     if(multiStepContainer){
       this.events.on(multiStepContainer,'click',(e)=>{
         const actionBtn=e.target.closest('[data-action]');
         if(!actionBtn)return;
+        e.preventDefault();
+        e.stopPropagation();
         const action=actionBtn.dataset.action;
         const stepHolder=actionBtn.closest('[data-step-idx]');
         const stepIdx=parseInt(actionBtn.dataset.stepIdx ?? stepHolder?.dataset.stepIdx,10);
