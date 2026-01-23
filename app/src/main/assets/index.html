@@ -1921,10 +1921,8 @@ class APIManager{
                 delta=deltaPayload?.content||'';
               }
               if(thinkDelta)thinking+=thinkDelta;
-              if(delta){
-                full+=delta;
-                if(!signal?.aborted)onDelta&&onDelta(full,thinking);
-              }
+              if(delta)full+=delta;
+              if((delta||thinkDelta) && !signal?.aborted)onDelta&&onDelta(full,thinking);
             }catch{}
           }
         }
@@ -4349,6 +4347,10 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     });
 
     this.events.on(messages,'scroll',()=>{
+      if(!this.isNearBottom(messages)){
+        this._pendingStick=false;
+        this._pendingStickWasNearBottom=false;
+      }
       if(this._pendingFoldCheck)return;
       this._pendingFoldCheck=true;
       requestAnimationFrame(()=>{
