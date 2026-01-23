@@ -5798,7 +5798,14 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
 
     const btnAddMultiStepStep=Utils.$('#btnAddMultiStepStep');
-    if(btnAddMultiStepStep)this.events.on(btnAddMultiStepStep,'click',()=>this.addMultiStepStep());
+    if(btnAddMultiStepStep&&!btnAddMultiStepStep.dataset.bound){
+      btnAddMultiStepStep.dataset.bound='true';
+      this.events.on(btnAddMultiStepStep,'click',(e)=>{
+        e.preventDefault();
+        e.stopPropagation();
+        this.addMultiStepStep();
+      });
+    }
 
     const multiStepEnabled=Utils.$('#multiStepRunnerEnabled');
     if(multiStepEnabled){
@@ -5809,7 +5816,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
 
     const multiStepContainer=Utils.$('#multiStepRunnerStepsContainer');
-    if(multiStepContainer){
+    if(multiStepContainer&&!multiStepContainer.dataset.bound){
+      multiStepContainer.dataset.bound='true';
       this.events.on(multiStepContainer,'click',(e)=>{
         const actionBtn=e.target.closest('[data-action]');
         if(!actionBtn)return;
