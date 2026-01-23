@@ -16,6 +16,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.content.pm.PackageManager
 import android.util.Log
 import android.view.View
 import android.webkit.JavascriptInterface
@@ -126,7 +127,28 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
         } else {
-            webView.loadUrl("https://appassets.androidplatform.net/assets/index.html")
+            val versionToken = getAppVersionToken()
+            webView.loadUrl("https://appassets.androidplatform.net/assets/index.html?v=$versionToken")
+        }
+    }
+
+    private fun getAppVersionToken(): String {
+        return try {
+            val pkgInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(packageName, 0)
+            }
+            val version = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                pkgInfo.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                pkgInfo.versionCode.toLong()
+            }
+            version.toString()
+        } catch (_: Throwable) {
+            System.currentTimeMillis().toString()
         }
     }
 
