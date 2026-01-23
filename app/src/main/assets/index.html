@@ -2012,6 +2012,7 @@ class APIManager{
     const rawMode=String(config.mode||'all').toLowerCase().replace(/\s+/g,' ').trim();
     const mode=rawMode.includes('all')?'all':(rawMode.includes('none')||rawMode.includes('empty')?'none':(rawMode.includes('range')?'range':rawMode));
     if(mode==='none')return [];
+    if(total===0)return [];
     let start=1;
     let end=total;
     if(mode==='range'){
