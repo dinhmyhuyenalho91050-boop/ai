@@ -2929,6 +2929,7 @@ class UIManager{
     this.typingElement=null;
     this._scrollRAF=null;
     this._settingsRendered=false;
+    this._settingsEventsBound=false;
     this.isLoadingEarlier=false;
     this._pendingAutoLoad=false;
     this._regexInputDebounced=null;
@@ -4487,7 +4488,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     container.innerHTML=html;
   }
 
-  collectMultiStepStepsFromDOM(){
+  collectMultiStepStepsFromDOM(options={}){
+    const includeEmptyEdits=!!options.includeEmptyEdits;
     const container=Utils.$('#multiStepRunnerStepsContainer');
     if(!container)return [];
     const stepEls=container.querySelectorAll('[data-step-idx]');
@@ -4528,8 +4530,10 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         const turn=parseInt(editEl.querySelector('[data-field="turn"]')?.value,10);
         const mode=editEl.querySelector('[data-field="mode"]')?.value||'replace';
         const content=editEl.querySelector('[data-field="content"]')?.value??'';
-        if(mode!=='keep'&&Number.isFinite(turn)&&content.trim()!==''){
-          userEdits.push({turn,mode,content});
+        if(Number.isFinite(turn)){
+          if(includeEmptyEdits||(mode!=='keep'&&content.trim()!=='')){
+            userEdits.push({turn,mode,content});
+          }
         }
       });
       const assistantEdits=[];
@@ -4537,8 +4541,10 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         const turn=parseInt(editEl.querySelector('[data-field="turn"]')?.value,10);
         const mode=editEl.querySelector('[data-field="mode"]')?.value||'replace';
         const content=editEl.querySelector('[data-field="content"]')?.value??'';
-        if(mode!=='keep'&&Number.isFinite(turn)&&content.trim()!==''){
-          assistantEdits.push({turn,mode,content});
+        if(Number.isFinite(turn)){
+          if(includeEmptyEdits||(mode!=='keep'&&content.trim()!=='')){
+            assistantEdits.push({turn,mode,content});
+          }
         }
       });
       if(userEdits.length||assistantEdits.length){
@@ -4550,7 +4556,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       stepEl.querySelectorAll('[data-reply-regex-idx]').forEach(ruleEl=>{
         const pattern=ruleEl.querySelector('[data-field="replyRegexPattern"]')?.value.trim()||'';
         const replacement=ruleEl.querySelector('[data-field="replyRegexReplacement"]')?.value??'';
-        if(pattern){
+        if(pattern||includeEmptyEdits){
           replyRegexRules.push({pattern,replacement});
         }
       });
@@ -4573,13 +4579,13 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
     this._multiStepAddLocked=true;
     setTimeout(()=>{ this._multiStepAddLocked=false; },150);
-    const steps=this.collectMultiStepStepsFromDOM();
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
     steps.push({history:{mode:'all'},patches:{turnUsers:[],turnAssistants:[]}});
     this.renderMultiStepSteps(steps);
   }
 
   removeMultiStepStep(idx){
-    const steps=this.collectMultiStepStepsFromDOM();
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
     if(idx>=0&&idx<steps.length){
       steps.splice(idx,1);
       this.renderMultiStepSteps(steps);
@@ -4587,7 +4593,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   }
 
   addMultiStepTurnEdit(stepIdx,role){
-    const steps=this.collectMultiStepStepsFromDOM();
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
     if(!steps[stepIdx])return;
     if(!steps[stepIdx].patches)steps[stepIdx].patches={};
     const list=role==='assistant'?'turnAssistants':'turnUsers';
@@ -4597,7 +4603,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   }
 
   addMultiStepReplyRegex(stepIdx){
-    const steps=this.collectMultiStepStepsFromDOM();
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
     if(!steps[stepIdx])return;
     if(!Array.isArray(steps[stepIdx].replyRegexRules)){
       steps[stepIdx].replyRegexRules=[];
@@ -4607,7 +4613,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   }
 
   removeMultiStepTurnEdit(stepIdx,role,editIdx){
-    const steps=this.collectMultiStepStepsFromDOM();
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
     const list=role==='assistant'?'turnAssistants':'turnUsers';
     const edits=steps[stepIdx]?.patches?.[list];
     if(Array.isArray(edits)&&editIdx>=0&&editIdx<edits.length){
@@ -4617,7 +4623,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   }
 
   removeMultiStepReplyRegex(stepIdx,ruleIdx){
-    const steps=this.collectMultiStepStepsFromDOM();
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
     const rules=steps[stepIdx]?.replyRegexRules;
     if(Array.isArray(rules)&&ruleIdx>=0&&ruleIdx<rules.length){
       rules.splice(ruleIdx,1);
@@ -5658,6 +5664,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   }
   
   bindSettingsEvents(){
+    if(this._settingsEventsBound)return;
+    this._settingsEventsBound=true;
     const tabs=Utils.$('#dlgSettings .tabs');
     if(tabs){
       this.events.on(tabs,'click',(e)=>{
