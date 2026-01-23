@@ -4930,9 +4930,9 @@ if(document.readyState==='loading'){
   function __maybeStickToBottom(box,thresholdPx){
     try{
       if(!box)return;
-      const thr=typeof thresholdPx==='number'?thresholdPx:60;
-      const nearBottom=(box.scrollHeight-(box.scrollTop+box.clientHeight))<=thr;
-      if(nearBottom){
+      const thr=typeof thresholdPx==='number'?thresholdPx:1;
+      const atBottom=Math.abs(box.scrollHeight-(box.scrollTop+box.clientHeight))<=thr;
+      if(atBottom){
         ScrollScheduler.write(()=>{box.scrollTop=box.scrollHeight;});
       }
     }catch(e){}
