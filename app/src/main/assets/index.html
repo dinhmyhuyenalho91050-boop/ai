@@ -2385,13 +2385,11 @@ class UIManager{
   restoreScrollState(state){
     if(!state||!state.box)return;
     const box=state.box;
-    const newHeight=box.scrollHeight;
     if(state.atBottom){
       box.scrollTop=box.scrollHeight;
-      return;
+    }else{
+      box.scrollTop=state.top;
     }
-    const delta=newHeight-state.height;
-    box.scrollTop=Math.max(0,state.top+delta);
   }
   finalizeTypingAndAppend(typing,msg){
     const scrollState=this.captureScrollState();
