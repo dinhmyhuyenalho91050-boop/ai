@@ -251,7 +251,7 @@
 */
 
 /* === Performance patch (strict, no fallback) === */
-.msg{
+.msg:not([data-streaming="1"]){
   contain: content;             /* layout+paint+style isolation to reduce reflow/paint */
   content-visibility: auto;     /* skip layout/paint when offscreen */
   contain-intrinsic-size: 0 140px; /* estimated height to avoid scroll jump on first reveal */
@@ -2205,7 +2205,7 @@ class UIManager{
     const doStick = this._pendingStick;
     this._suppressAutoStick=false;
     this._pendingStick=false;
-    if(doStick && box && this.isNearBottom(box)){
+    if(doStick && box && this.isAtBottom(box)){
       requestAnimationFrame(()=>{ box.scrollTop = box.scrollHeight; });
     }
   }
@@ -2353,7 +2353,7 @@ class UIManager{
     if(forceStick){
       try{
         const box=Utils.$('#messages');
-        if(box&&this.isNearBottom(box)){
+        if(box&&this.isAtBottom(box)){
           requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
         }
       }catch(e){}
@@ -2371,6 +2371,34 @@ class UIManager{
     requestAnimationFrame(()=>{
       box.scrollTop = Math.max(0, box.scrollHeight - box.clientHeight - gap);
     });
+  }
+  captureScrollState(){
+    const box=Utils.$('#messages');
+    if(!box)return null;
+    return{
+      box,
+      top: box.scrollTop,
+      height: box.scrollHeight,
+      atBottom: this.isAtBottom(box)
+    };
+  }
+  restoreScrollState(state){
+    if(!state||!state.box)return;
+    const box=state.box;
+    if(state.atBottom){
+      box.scrollTop=box.scrollHeight;
+    }else{
+      box.scrollTop=state.top;
+    }
+  }
+  finalizeTypingAndAppend(typing,msg){
+    const scrollState=this.captureScrollState();
+    if(typing){
+      this.removeTyping(typing);
+    }
+    this.appendMessage(msg);
+    if(typeof this.flushUpdates==='function') this.flushUpdates();
+    this.restoreScrollState(scrollState);
   }
   renumberMessagesFrom(startIdx=0){
     const session=this.state.getActiveSession();
@@ -2877,6 +2905,7 @@ class UIManager{
     if(!box)return;
 
     const isNearBottom=this.isNearBottom(box);
+    const isAtBottom=this.isAtBottom(box);
     const prevScrollHeight=box.scrollHeight;
     const prevScrollTop=box.scrollTop;
 
@@ -2939,7 +2968,7 @@ class UIManager{
     const scrollAdjust=prevScrollHeight-box.scrollHeight;
     if(scrollAdjust>0 && !isNearBottom){
       box.scrollTop=Math.max(0,prevScrollTop-scrollAdjust);
-    }else if(isNearBottom){
+    }else if(isAtBottom){
       if(!this._suppressAutoStick){
         requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
       }else{
@@ -3093,7 +3122,6 @@ class UIManager{
       });
 
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
-      if(typing){ const __delay=Math.max(0,240-(performance.now()-__typingStart)); setTimeout(()=>this.removeTyping(typing), __delay);}
       
       // ✅ 处理返回的content和thinking
       const content=typeof result==='string'?result:result.content;
@@ -3109,7 +3137,7 @@ class UIManager{
       }
       
       (function(){ try{ if (this.typingElement) this.typingElement.removeAttribute('data-streaming'); }catch(_){} }).call(this);
-this.appendMessage({
+      this.finalizeTypingAndAppend(typing,{
         role:'assistant',
         content:finalContent,
         thinking:thinking||'',
@@ -3118,7 +3146,6 @@ this.appendMessage({
       sessionDirty=true;
     }catch(error){
       if(__typingTimer){ clearTimeout(__typingTimer); __typingTimer=null; }
-      if(typing){ const __delay=Math.max(0,240-(performance.now()-__typingStart)); setTimeout(()=>this.removeTyping(typing), __delay);}
 
       const isAbort=error?.name==='AbortError';
       if(isAbort&&isStream&&partial){
@@ -3130,7 +3157,7 @@ this.appendMessage({
           }
         }
         (function(){ try{ if (this.typingElement) this.typingElement.removeAttribute('data-streaming'); }catch(_){} }).call(this);
-this.appendMessage({
+        this.finalizeTypingAndAppend(typing,{
           role:'assistant',
           content:finalPartial,
           thinking:partialThinking||'',
@@ -3139,7 +3166,7 @@ this.appendMessage({
         sessionDirty=true;
       }else if(!isAbort){
         (function(){ try{ if (this.typingElement) this.typingElement.removeAttribute('data-streaming'); }catch(_){} }).call(this);
-this.appendMessage({
+        this.finalizeTypingAndAppend(typing,{
           role:'assistant',
           content:`【错误】${error.message}`,
           modelName:preset?.name
@@ -3189,7 +3216,7 @@ this.appendMessage({
     requestAnimationFrame(()=>{
   this.dom.batchUpdate(()=>{
 box.appendChild(el);
-      if(this.isNearBottom(box))box.scrollTop=box.scrollHeight;
+      if(this.isAtBottom(box))box.scrollTop=box.scrollHeight;
     
   });
 });
@@ -3209,7 +3236,7 @@ box.appendChild(el);
     this._pendingTypingUpdate=null;
 
     const box=Utils.$('#messages');
-    const shouldStick=box?this.isNearBottom(box):false;
+    const shouldStick=box?this.isAtBottom(box):false;
 
     // ✅ 使用缓存的body元素
     const body=this.typingBodyCache;
@@ -3367,6 +3394,9 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   
   isNearBottom(box){
     return(box.scrollHeight-(box.scrollTop+box.clientHeight))<=CONFIG.AUTO_FOLLOW_PX;
+  }
+  isAtBottom(box){
+    return Math.abs(box.scrollHeight-(box.scrollTop+box.clientHeight))<=1;
   }
   
   // ... (其余方法保持不变，包括settings相关方法)
@@ -4732,14 +4762,14 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(input){
       this.events.on(input, 'focus', ()=>{
         this._ime.active = true;
-        this._ime.wasNearBottom = this.isNearBottom(box);
+        this._ime.wasNearBottom = this.isAtBottom(box);
         updatePad();
       });
       this.events.on(input, 'blur', ()=>{
         this._ime.active = false;
         setTimeout(()=>{
           updatePad();
-          if(this.isNearBottom(box)) this._smoothStickBottom(180);
+          if(this.isAtBottom(box)) this._smoothStickBottom(180);
         }, 60);
       });
     }
@@ -4900,9 +4930,9 @@ if(document.readyState==='loading'){
   function __maybeStickToBottom(box,thresholdPx){
     try{
       if(!box)return;
-      const thr=typeof thresholdPx==='number'?thresholdPx:60;
-      const nearBottom=(box.scrollHeight-(box.scrollTop+box.clientHeight))<=thr;
-      if(nearBottom){
+      const thr=typeof thresholdPx==='number'?thresholdPx:1;
+      const atBottom=Math.abs(box.scrollHeight-(box.scrollTop+box.clientHeight))<=thr;
+      if(atBottom){
         ScrollScheduler.write(()=>{box.scrollTop=box.scrollHeight;});
       }
     }catch(e){}
