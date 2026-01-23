@@ -964,6 +964,26 @@ class StorageManager{
   static _messagesObserverHandler=null;
   static _sessionCache=null;
   static _legacySnapshot=null;
+  static _signatureCache=typeof WeakMap==='function'?new WeakMap():null;
+
+  static _getSignatureVersion(msg){
+    return (msg&&typeof msg==='object'&&Number.isInteger(msg.__sigVersion))?msg.__sigVersion:0;
+  }
+
+  static bumpMessageSignature(msg){
+    if(!msg||typeof msg!=='object')return;
+    const next=this._getSignatureVersion(msg)+1;
+    try{
+      Object.defineProperty(msg,'__sigVersion',{
+        value:next,
+        writable:true,
+        configurable:true
+      });
+    }catch(_){
+      msg.__sigVersion=next;
+    }
+    this._signatureCache?.delete(msg);
+  }
 
   static registerMessagesObserverHandler(handler){
     this._messagesObserverHandler=typeof handler==='function'?handler:null;
@@ -1150,7 +1170,10 @@ class StorageManager{
 
   static _messageSignature(msg){
     if(!msg||typeof msg!=='object')return String(msg??'');
-    const keys=Object.keys(msg).filter(k=>k!=='id').sort();
+    const version=this._getSignatureVersion(msg);
+    const cached=this._signatureCache?.get(msg);
+    if(cached&&cached.version===version)return cached.sig;
+    const keys=Object.keys(msg).filter(k=>k!=='id'&&k!=='__sigVersion').sort();
     let sig=msg.id||'';
     for(const key of keys){
       const value=msg[key];
@@ -1161,6 +1184,7 @@ class StorageManager{
         sig+=`|${key}:${String(value)}`;
       }
     }
+    this._signatureCache?.set(msg,{version,sig});
     return sig;
   }
 
@@ -1370,18 +1394,69 @@ class StorageManager{
     const cachedHistory=Array.isArray(entry.data.history)?entry.data.history:(entry.data.history=[]);
     const prevSignatures=entry.signatures||new Map();
     const nextSignatures=new Map();
+    const sourceLength=sourceHistory.length;
+    const prevLength=Number.isInteger(entry.historyLength)?entry.historyLength:cachedHistory.length;
+    const signatureCache=new Array(sourceLength);
     let changed=false;
     let divergeIndex=-1;
 
-    for(let i=0;i<sourceHistory.length;i++){
+    const getSignature=(index,msg)=>{
+      if(signatureCache[index]!==undefined)return signatureCache[index];
+      const sig=this._messageSignature(msg);
+      signatureCache[index]=sig;
+      return sig;
+    };
+
+    let canAppend=sourceLength>=prevLength;
+    if(canAppend){
+      for(let i=0;i<prevLength;i++){
+        const srcMsg=sourceHistory[i];
+        const cachedMsg=cachedHistory[i];
+        const msgId=srcMsg?.id?srcMsg.id:`__idx_${i}`;
+        if(!cachedMsg||cachedMsg.id!==srcMsg?.id){
+          canAppend=false;
+          divergeIndex=i;
+          break;
+        }
+        const sig=getSignature(i,srcMsg);
+        if(prevSignatures.get(msgId)!==sig){
+          canAppend=false;
+          break;
+        }
+        nextSignatures.set(msgId,prevSignatures.get(msgId)??sig);
+      }
+    }
+
+    if(canAppend){
+      if(cachedHistory.length>prevLength){
+        cachedHistory.splice(prevLength);
+        changed=true;
+      }
+      for(let i=prevLength;i<sourceLength;i++){
+        const msg=sourceHistory[i];
+        const cloned=this._cloneMessage(msg);
+        cachedHistory.push(cloned);
+        const key=msg?.id?msg.id:`__idx_${i}`;
+        nextSignatures.set(key,getSignature(i,msg));
+        changed=true;
+      }
+      if(sourceLength===0){
+        nextSignatures.clear();
+      }
+      entry.signatures=nextSignatures;
+      entry.historyLength=sourceLength;
+      return changed;
+    }
+
+    for(let i=0;i<sourceLength;i++){
       const srcMsg=sourceHistory[i];
       const cachedMsg=cachedHistory[i];
       const msgId=srcMsg?.id?srcMsg.id:`__idx_${i}`;
       if(!cachedMsg||cachedMsg.id!==srcMsg?.id){
-        divergeIndex=i;
+        if(divergeIndex===-1)divergeIndex=i;
         break;
       }
-      const sig=this._messageSignature(srcMsg);
+      const sig=getSignature(i,srcMsg);
       nextSignatures.set(msgId,sig);
       if(prevSignatures.get(msgId)!==sig){
         cachedHistory[i]=this._cloneMessage(srcMsg);
@@ -1391,48 +1466,38 @@ class StorageManager{
 
     if(divergeIndex!==-1){
       cachedHistory.splice(divergeIndex);
-      for(let j=divergeIndex;j<sourceHistory.length;j++){
+      for(let j=divergeIndex;j<sourceLength;j++){
         const msg=sourceHistory[j];
         const cloned=this._cloneMessage(msg);
         cachedHistory.push(cloned);
         const key=msg?.id?msg.id:`__idx_${j}`;
-        nextSignatures.set(key,this._messageSignature(msg));
+        nextSignatures.set(key,getSignature(j,msg));
       }
       changed=true;
     }
 
-    if(cachedHistory.length>sourceHistory.length){
-      cachedHistory.splice(sourceHistory.length);
+    if(cachedHistory.length>sourceLength){
+      cachedHistory.splice(sourceLength);
       changed=true;
     }
 
-    if(cachedHistory.length<sourceHistory.length){
-      for(let k=cachedHistory.length;k<sourceHistory.length;k++){
+    if(cachedHistory.length<sourceLength){
+      for(let k=cachedHistory.length;k<sourceLength;k++){
         const msg=sourceHistory[k];
         const cloned=this._cloneMessage(msg);
         cachedHistory.push(cloned);
         const key=msg?.id?msg.id:`__idx_${k}`;
-        nextSignatures.set(key,this._messageSignature(msg));
+        nextSignatures.set(key,getSignature(k,msg));
       }
       changed=true;
     }
 
-    if(divergeIndex===-1){
-      for(let i=0;i<sourceHistory.length;i++){
-        const msg=sourceHistory[i];
-        const key=msg?.id?msg.id:`__idx_${i}`;
-        if(!nextSignatures.has(key)){
-          nextSignatures.set(key,this._messageSignature(msg));
-        }
-      }
-    }
-
-    if(sourceHistory.length===0){
+    if(sourceLength===0){
       nextSignatures.clear();
     }
 
     entry.signatures=nextSignatures;
-    entry.historyLength=sourceHistory.length;
+    entry.historyLength=sourceLength;
     return changed;
   }
 }
@@ -2256,7 +2321,6 @@ class UIManager{
 
     window._sanitizer=this.sanitizer;
 
-    StorageManager.registerMessagesObserverHandler((el)=>this.animateIn(el));
     this.events.on(document,'visibilitychange',()=>{
       this._handleVisibilityChange(document.hidden);
     });
@@ -4460,6 +4524,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }
     
     msg.content=finalContent;
+    StorageManager.bumpMessageSignature(msg);
     
     const bodyEl=textarea.closest('.body');
     bodyEl.innerHTML=this.sanitizer.sanitize(finalContent);
@@ -4551,6 +4616,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         finalContent=newContent;
       }
       msg.content=finalContent;
+      StorageManager.bumpMessageSignature(msg);
       this.state.markSessionsDirty(this.state.get('currentId'));
     }
     
