@@ -631,6 +631,9 @@ private class DownloadBridge(activity: MainActivity) {
 
     private fun getIoExecutor(): ExecutorService {
         return synchronized(executorLock) {
+            if (isDisposed) {
+                throw RejectedExecutionException("DownloadBridge disposed")
+            }
             if (ioExecutor.isShutdown || ioExecutor.isTerminated) {
                 ioExecutor = createIoExecutor()
             }
