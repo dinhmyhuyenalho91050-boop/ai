@@ -449,6 +449,9 @@ const CONFIG={
     promptPresets:'chat.promptPresets',
     sessionIndex:'chat.sessions.index',
     sessionPrefix:'chat.session.'
+  },
+  STORAGE_LEGACY:{
+    sessionsSnapshot:'migration'
   }
 };
 
@@ -964,6 +967,7 @@ class StorageManager{
   static _messagesObserverHandler=null;
   static _sessionCache=null;
   static _legacySnapshot=null;
+  static _legacySnapshotWritable=false;
   static _signatureCache=typeof WeakMap==='function'?new WeakMap():null;
 
   static _getSignatureVersion(msg){
@@ -1150,6 +1154,23 @@ class StorageManager{
     return CONFIG.STORAGE_KEYS.sessionIndex||'chat.sessions.index';
   }
 
+  static _legacySnapshotMode(){
+    return (CONFIG.STORAGE_LEGACY&&CONFIG.STORAGE_LEGACY.sessionsSnapshot)||'migration';
+  }
+
+  static _shouldWriteLegacySnapshot(){
+    const mode=this._legacySnapshotMode();
+    if(mode==='always')return true;
+    if(mode==='migration')return this._legacySnapshotWritable;
+    return false;
+  }
+
+  static async _finalizeLegacySnapshotMigration(){
+    if(this._legacySnapshotMode()!=='migration')return;
+    this._legacySnapshotWritable=false;
+    await this._executeDelete(CONFIG.STORAGE_KEYS.sessions);
+  }
+
   static _sessionKey(id){
     return (CONFIG.STORAGE_KEYS.sessionPrefix||'chat.session.')+id;
   }
@@ -1282,6 +1303,10 @@ class StorageManager{
     const index=await this.load(indexKey,null);
 
     if(Array.isArray(index)&&index.length){
+      this._legacySnapshotWritable=false;
+      if(this._legacySnapshotMode()==='migration'){
+        await this._executeDelete(CONFIG.STORAGE_KEYS.sessions);
+      }
       const entries=await Promise.all(index.map(async id=>{
         const data=await this.load(this._sessionKey(id),undefined);
         return[data,id];
@@ -1298,7 +1323,9 @@ class StorageManager{
     const legacy=await this.load(CONFIG.STORAGE_KEYS.sessions,fallback);
     this.seedSessionsCache(legacy);
     if(legacy&&Object.keys(legacy).length){
+      this._legacySnapshotWritable=true;
       await this.saveSessionsSnapshot(legacy);
+      await this._finalizeLegacySnapshotMigration();
     }
     return legacy||fallback;
   }
@@ -1327,7 +1354,9 @@ class StorageManager{
     this._legacySnapshot=legacySnapshot;
 
     writePromises.push(this.save(indexKey,ids));
-    writePromises.push(this.save(CONFIG.STORAGE_KEYS.sessions,this._legacySnapshot));
+    if(this._shouldWriteLegacySnapshot()){
+      writePromises.push(this.save(CONFIG.STORAGE_KEYS.sessions,this._legacySnapshot));
+    }
 
     return Promise.all([...writePromises,...deletePromises]);
   }
@@ -1385,7 +1414,9 @@ class StorageManager{
 
     if(!changed)return Promise.resolve();
     writes.push(this.save(this._sessionIndexKey(),Array.from(this._sessionCache.keys())));
-    writes.push(this.save(CONFIG.STORAGE_KEYS.sessions,legacySnapshot));
+    if(this._shouldWriteLegacySnapshot()){
+      writes.push(this.save(CONFIG.STORAGE_KEYS.sessions,legacySnapshot));
+    }
     return Promise.all(writes);
   }
 

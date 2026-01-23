@@ -495,14 +495,14 @@ private class DownloadBridge(activity: MainActivity) {
     private val activityRef = WeakReference(activity)
     private val appContext = activity.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "bg-io").apply {
-            priority = Thread.MIN_PRIORITY
-            isDaemon = true
-        }
-    }
+    private val executorLock = Any()
+    @Volatile
+    private var ioExecutor: ExecutorService = createIoExecutor()
+    @Volatile
+    private var isDisposed = false
 
     fun dispose() {
+        isDisposed = true
         ioExecutor.shutdownNow()
         activityRef.clear()
     }
@@ -511,15 +511,36 @@ private class DownloadBridge(activity: MainActivity) {
     fun saveFile(filename: String, jsonText: String): String {
         val safeName = filename.ifBlank { "backup-${UUID.randomUUID()}.json" }
         return try {
-            ioExecutor.execute {
+            if (isDisposed) {
+                notify(false, null)
+                return ""
+            }
+            getIoExecutor().execute {
+                if (isDisposed) {
+                    return@execute
+                }
                 val (success, location) = performSave(safeName, jsonText)
                 notify(success, location)
             }
             SAVE_PENDING
         } catch (e: RejectedExecutionException) {
-            val (success, location) = performSave(safeName, jsonText)
-            notify(success, location)
-            location ?: ""
+            val recovered = recoverIoExecutor() ?: run {
+                notify(false, null)
+                return ""
+            }
+            return try {
+                recovered.execute {
+                    if (isDisposed) {
+                        return@execute
+                    }
+                    val (success, location) = performSave(safeName, jsonText)
+                    notify(success, location)
+                }
+                SAVE_PENDING
+            } catch (_: RejectedExecutionException) {
+                notify(false, null)
+                ""
+            }
         }
     }
 
@@ -602,6 +623,42 @@ private class DownloadBridge(activity: MainActivity) {
                 "保存备份失败"
             }
             Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun createIoExecutor(): ExecutorService {
+        return Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "bg-io").apply {
+                priority = Thread.MIN_PRIORITY
+                isDaemon = true
+            }
+        }
+    }
+
+    private fun getIoExecutor(): ExecutorService {
+        return synchronized(executorLock) {
+            if (isDisposed) {
+                throw RejectedExecutionException("DownloadBridge disposed")
+            }
+            if (ioExecutor.isShutdown || ioExecutor.isTerminated) {
+                ioExecutor = createIoExecutor()
+            }
+            ioExecutor
+        }
+    }
+
+    private fun recoverIoExecutor(): ExecutorService? {
+        if (isDisposed) {
+            return null
+        }
+        return synchronized(executorLock) {
+            if (isDisposed) {
+                return null
+            }
+            if (ioExecutor.isShutdown || ioExecutor.isTerminated) {
+                ioExecutor = createIoExecutor()
+            }
+            ioExecutor
         }
     }
 
