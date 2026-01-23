@@ -2518,12 +2518,18 @@ class UIManager{
   }
   finalizeTypingAndAppend(typing,msg){
     const scrollState=this.captureScrollState();
+    const box=scrollState?.box;
     if(typing){
       this.removeTyping(typing);
     }
     this.appendMessage(msg);
     if(typeof this.flushUpdates==='function') this.flushUpdates();
-    this.restoreScrollState(scrollState);
+    if(!box||!scrollState)return;
+    if(scrollState.atBottom){
+      requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
+    }else{
+      box.scrollTop=scrollState.top;
+    }
   }
   renumberMessagesFrom(startIdx=0){
     const session=this.state.getActiveSession();
@@ -3289,6 +3295,20 @@ class UIManager{
           modelName:preset?.name
         });
         sessionDirty=true;
+      }else if(isAbort){
+        (function(){ try{ if (this.typingElement) this.typingElement.removeAttribute('data-streaming'); }catch(_){} }).call(this);
+        const scrollState=this.captureScrollState();
+        const box=scrollState?.box;
+        if(typing){
+          this.removeTyping(typing);
+        }
+        if(box&&scrollState){
+          if(scrollState.atBottom){
+            requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
+          }else{
+            box.scrollTop=scrollState.top;
+          }
+        }
       }else if(!isAbort){
         (function(){ try{ if (this.typingElement) this.typingElement.removeAttribute('data-streaming'); }catch(_){} }).call(this);
         this.finalizeTypingAndAppend(typing,{
