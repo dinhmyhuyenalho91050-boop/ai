@@ -137,8 +137,12 @@
   @keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
   @keyframes slideOut{to{transform:translateX(100%);opacity:0}}
   @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
-  .load-older{position:sticky;top:0;z-index:5;margin:0 auto 1rem;max-width:900px;display:flex;align-items:center;justify-content:space-between;
-    padding:.5rem .75rem;border:1px dashed var(--border);border-radius:.75rem;background:rgba(0,0,0,.25)}
+  .load-older{
+    position:relative;top:auto;z-index:5;margin:0 auto 1rem;max-width:900px;
+    display:none;align-items:center;justify-content:space-between;
+    padding:.5rem .75rem;border:1px dashed var(--border);border-radius:.75rem;background:rgba(0,0,0,.25)
+  }
+  .load-older.is-show{display:flex}
   .load-older .info{font-size:12px;color:var(--muted)}
   .sentinel{height:1px;pointer-events:none;visibility:hidden}
   @media (min-width:821px){
@@ -3375,13 +3379,32 @@ class UIManager{
   }
   
   updateLoadOlderButton(box){
-    const tipEl=box.querySelector('.load-older');
-    if(tipEl)tipEl.remove();
-    if(this._renderStartIndex<=0)return;
-    const tip=document.createElement('div');
-    tip.className='load-older';
-    tip.innerHTML=`<div class="info">还有 ${this._renderStartIndex} 条更早消息</div><button class="btn small" type="button" data-act="load-older">查看更早消息</button>`;
-    box.insertBefore(tip,box.firstChild);
+    if(!box) return;
+
+    // 1) 顶部哨兵：用于判断是否滚到最顶部
+    let sentinel = box.querySelector('.sentinel[data-top="1"]');
+    if(!sentinel){
+      sentinel = document.createElement('div');
+      sentinel.className = 'sentinel';
+      sentinel.dataset.top = '1';
+      box.insertBefore(sentinel, box.firstChild);
+    }
+
+    // 2) 先移除旧的提示条（保留 sentinel）
+    const tipEl = box.querySelector('.load-older');
+    if(tipEl) tipEl.remove();
+
+    // 3) 没有更早消息：不需要提示条
+    if(this._renderStartIndex<=0) return;
+
+    // 4) 重新创建提示条：默认隐藏（不加 is-show）
+    const tip = document.createElement('div');
+    tip.className = 'load-older';
+    tip.innerHTML = `<div class="info">还有 ${this._renderStartIndex} 条更早消息</div>
+      <button class="btn small" type="button" data-act="load-older">查看更早消息</button>`;
+
+    // 放在 sentinel 后面（保证 sentinel 永远在最顶）
+    box.insertBefore(tip, sentinel.nextSibling);
   }
 
   loadEarlierMessages(){
@@ -3434,9 +3457,36 @@ class UIManager{
   }
   
   setupTopObserver(){
-    const box=Utils.$('#messages');
-    if(!box)return;
+    const box = Utils.$('#messages');
+    if(!box) return;
+
+    // 先确保 DOM 顶部有 sentinel + load-older（如果有更早消息）
     this.updateLoadOlderButton(box);
+
+    // 清理旧 observer（避免重复绑定导致 bug）
+    if(this._topObserver){
+      try{ this._topObserver.disconnect(); }catch(_){}
+      this._topObserver = null;
+    }
+
+    const sentinel = box.querySelector('.sentinel[data-top="1"]');
+    if(!sentinel) return;
+
+    // 观察顶部哨兵：可见 => 已在顶部 => 显示；不可见 => 下滑了 => 隐藏
+    this._topObserver = new IntersectionObserver((entries)=>{
+      const entry = entries && entries[0];
+      // 自动加载：滚动到顶部哨兵可见时，直接加载更早消息（不需要手动点按钮）
+      if(!entry || !entry.isIntersecting) return;
+      if(this._renderStartIndex<=0) return;
+      this.loadEarlierMessages();
+    }, {
+      root: box, // 滚动容器是 #messages，不是 window
+      threshold: 0.01
+    });
+
+    try{
+      this._topObserver.observe(sentinel);
+    }catch(_){}
   }
 
   pruneOldMessages(){
