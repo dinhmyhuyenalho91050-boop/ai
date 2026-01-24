@@ -137,8 +137,12 @@
   @keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
   @keyframes slideOut{to{transform:translateX(100%);opacity:0}}
   @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
-  .load-older{position:sticky;top:0;z-index:5;margin:0 auto 1rem;max-width:900px;display:flex;align-items:center;justify-content:space-between;
-    padding:.5rem .75rem;border:1px dashed var(--border);border-radius:.75rem;background:rgba(0,0,0,.25)}
+  .load-older{
+    position:relative;top:auto;z-index:5;margin:0 auto 1rem;max-width:900px;
+    display:none;align-items:center;justify-content:space-between;
+    padding:.5rem .75rem;border:1px dashed var(--border);border-radius:.75rem;background:rgba(0,0,0,.25)
+  }
+  .load-older.is-show{display:flex}
   .load-older .info{font-size:12px;color:var(--muted)}
   .sentinel{height:1px;pointer-events:none;visibility:hidden}
   @media (min-width:821px){
@@ -3375,13 +3379,50 @@ class UIManager{
   }
   
   updateLoadOlderButton(box){
-    const tipEl=box.querySelector('.load-older');
-    if(tipEl)tipEl.remove();
-    if(this._renderStartIndex<=0)return;
-    const tip=document.createElement('div');
-    tip.className='load-older';
-    tip.innerHTML=`<div class="info">还有 ${this._renderStartIndex} 条更早消息</div><button class="btn small" type="button" data-act="load-older">查看更早消息</button>`;
-    box.insertBefore(tip,box.firstChild);
+    if(!box) return;
+
+    // Top sentinel: used by IntersectionObserver to detect when user reaches top
+    let sentinel = box.querySelector('.sentinel[data-top="1"]');
+    if(!sentinel){
+      sentinel = document.createElement('div');
+      sentinel.className = 'sentinel';
+      sentinel.dataset.top = '1';
+      box.insertBefore(sentinel, box.firstChild);
+    }
+
+    // Remove old tip (keep sentinel)
+    const tipEl = box.querySelector('.load-older');
+    if(tipEl) tipEl.remove();
+
+    // No earlier messages => no tip
+    if(this._renderStartIndex <= 0){
+      // Still ensure observer tracks current sentinel (after re-render)
+      if(this._topObserver){
+        try{
+          this._topObserver.disconnect();
+          this._topObserver.observe(sentinel);
+        }catch(_){}
+      }
+      return;
+    }
+
+    // Recreate tip: stays hidden by default (auto-load will handle fetching)
+    const tip = document.createElement('div');
+    tip.className = 'load-older';
+    tip.innerHTML = `
+      <div class="info">还有 ${this._renderStartIndex} 条更早消息</div>
+      <button class="btn small" type="button" data-act="load-older">查看更早消息</button>
+    `;
+
+    box.insertBefore(tip, sentinel.nextSibling);
+
+    // If observer exists, re-observe the current sentinel (renderMessages clears DOM)
+    if(this._topObserver){
+      try{
+        this._topObserver.disconnect();
+        this._topObserver.observe(sentinel);
+      }catch(_){}
+    }
   }
 
   loadEarlierMessages(){
@@ -3434,9 +3475,45 @@ class UIManager{
   }
   
   setupTopObserver(){
-    const box=Utils.$('#messages');
-    if(!box)return;
+    const box = Utils.$('#messages');
+    if(!box) return;
+
+    // Ensure DOM top sentinel exists (and load-older if needed)
     this.updateLoadOlderButton(box);
+
+    // (Re)create observer once
+    if(!this._topObserver){
+      // Arm/disarm to prevent repeated triggers while staying at top
+      this._autoLoadArmed = true;
+
+      this._topObserver = new IntersectionObserver((entries)=>{
+        const entry = entries && entries[0];
+        if(!entry) return;
+
+        if(entry.isIntersecting){
+          if(!this._autoLoadArmed) return;
+          if(this.isLoadingEarlier) return;
+          if(this._renderStartIndex<=0) return;
+
+          this._autoLoadArmed = false;
+          this.loadEarlierMessages();
+        }else{
+          // Rearm when user scrolls away from the very top
+          this._autoLoadArmed = true;
+        }
+      }, {
+        root: box,
+        threshold: 0.01
+      });
+    }
+
+    // Always observe the CURRENT sentinel (renderMessages clears DOM)
+    const sentinel = box.querySelector('.sentinel[data-top="1"]');
+    if(!sentinel) return;
+    try{
+      this._topObserver.disconnect();
+      this._topObserver.observe(sentinel);
+    }catch(_){}
   }
 
   pruneOldMessages(){
