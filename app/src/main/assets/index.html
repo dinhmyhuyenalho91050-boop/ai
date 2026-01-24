@@ -215,7 +215,7 @@
   }
   /* During viewport freeze, lock height and disable scroll anchoring that can cause jumps */
   body.vp-freeze #app{height:var(--vp-lock-h,100dvh)}
-  #messages{overflow-anchor:auto}
+  #messages{overflow-anchor:none}
   body.vp-freeze #messages{overflow-anchor:none}
   /* Avoid transitions fighting during viewport changes */
   body.vp-freeze *{scroll-behavior:auto !important}
@@ -251,11 +251,6 @@
 */
 
 /* === Performance patch (strict, no fallback) === */
-.msg:not([data-streaming="1"]){
-  contain: content;             /* layout+paint+style isolation to reduce reflow/paint */
-  content-visibility: auto;     /* skip layout/paint when offscreen */
-  contain-intrinsic-size: 0 140px; /* estimated height to avoid scroll jump on first reveal */
-}
 /* === End of performance patch === */
 </style>
 <style>
@@ -372,9 +367,44 @@
             <div class="field" style="grid-template-columns:1fr"><label>助手预填充</label><textarea id="assistantPrefill" rows="3" placeholder="引导助手回复开头(可选)"></textarea></div>
             <div class="sep"></div>
             <div style="margin-bottom:1rem">
+              <div style="font-weight:600;font-size:13px;margin-bottom:.5rem;color:var(--muted)">多步任务编排器（后台执行）</div>
+              <div class="field" style="grid-template-columns:1fr">
+                <label>启用多步编排</label>
+                <select id="multiStepRunnerEnabled">
+                  <option value="true">是</option>
+                  <option value="false">否</option>
+                </select>
+              </div>
+              <div class="field" style="grid-template-columns:1fr">
+                <label>步骤配置</label>
+                <div id="multiStepRunnerStepsContainer" style="display:flex;flex-direction:column;gap:.75rem"></div>
+                <button type="button" class="btn small" id="btnAddMultiStepStep" style="justify-self:start;margin-top:.35rem">+ 添加步骤</button>
+                <div style="font-size:11px;color:var(--muted);margin-top:.4rem;line-height:1.4">
+                  提示：每一步可以指定系统提示、历史楼层范围与最新用户消息改写；从第 2 步开始可使用 {{reply1}}/{{reply2}} 引用前序回复。
+                </div>
+              </div>
+            </div>
+            <div class="sep"></div>
+            <div style="margin-bottom:1rem">
               <div style="font-weight:600;font-size:13px;margin-bottom:.5rem;color:var(--muted)">正则替换规则(生成后处理)</div>
               <div id="regexRulesContainer"></div>
               <button type="button" class="btn small" id="btnAddRegexRule" style="margin-top:.5rem">+ 添加规则</button>
+            </div>
+            <div class="sep"></div>
+            <div style="margin-bottom:1rem">
+              <div style="font-weight:600;font-size:13px;margin-bottom:.5rem;color:var(--muted)">调试日志</div>
+              <div class="field" style="grid-template-columns:1fr">
+                <label>启用 API 日志(内存)</label>
+                <select id="apiLogEnabled">
+                  <option value="false">否</option>
+                  <option value="true">是</option>
+                </select>
+              </div>
+              <div style="display:flex;gap:.6rem;align-items:center;margin-top:.5rem">
+                <button type="button" class="btn small" id="btnShowApiLogs">查看日志</button>
+                <button type="button" class="btn small warn" id="btnClearApiLogs">清空日志</button>
+                <span style="font-size:11px;color:var(--muted)">关闭日志会立即清空记录</span>
+              </div>
             </div>
             <div class="sep"></div>
             <div style="display:flex;gap:.75rem">
@@ -455,6 +485,18 @@
       </div>
     </div>
   </dialog>
+  <dialog id="dlgApiLogs">
+    <div style="padding:0;min-width:min(860px,92vw)">
+      <div style="padding:1.2rem 1.4rem;border-bottom:1px solid var(--border);background:rgba(0,0,0,.2)">
+        <h2 style="font-size:18px;font-weight:600;margin:0">API 调试日志</h2>
+        <p style="font-size:12px;color:var(--muted);margin-top:.4rem">仅保存在内存中，关闭日志会自动清空。</p>
+      </div>
+      <div style="padding:1rem 1.4rem;max-height:65vh;overflow-y:auto" id="apiLogsContainer"></div>
+      <div style="padding:1rem 1.4rem;border-top:1px solid var(--border);background:rgba(0,0,0,.18);display:flex;gap:.6rem;justify-content:flex-end">
+        <button class="btn" type="button" id="btnCloseApiLogs">关闭</button>
+      </div>
+    </div>
+  </dialog>
 </div>
 <script>
 (function(){'use strict';
@@ -484,6 +526,10 @@ const CONFIG={
     sessionsSnapshot:'migration'
   }
 };
+
+const KEEP_LAST=10;
+const LOAD_BATCH=10;
+const BOTTOM_THRESHOLD=6;
 
 const RX_PATTERNS={
   quote:/[""\u201C\u201D\uFF02]([^""\u201C\u201D\uFF02]+?)[""\u201C\u201D\uFF02]/g,
@@ -1709,7 +1755,8 @@ class StateManager{
       currentId:null,
       promptPresets:{
         'default':{name:'默认预设',sysPrompt:'',firstUser:'',firstAssistant:'',
-          messagePrefix:'',assistantPrefill:'',regexRules:[]}
+          messagePrefix:'',assistantPrefill:'',regexRules:[],
+          multiStepRunner:{enabled:false,steps:[]}}
       },
       currentModelIndex:0,
       editingPromptPreset:null
@@ -1824,7 +1871,8 @@ class StateManager{
   getCurrentPromptConfig(){
     // 返回default预设作为后备
     return this.state.promptPresets['default']||
-      {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[]};
+      {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[],
+        multiStepRunner:{enabled:false,steps:[]}};
   }
   
   getSessionPromptConfig(session){
@@ -1832,7 +1880,8 @@ class StateManager{
     const presetName=session.promptPresetName||'default';
     return this.state.promptPresets[presetName]||
       this.state.promptPresets['default']||
-      {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[]};
+      {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[],
+        multiStepRunner:{enabled:false,steps:[]}};
   }
 }
 
@@ -1884,6 +1933,63 @@ class APIManager{
     this.state=state;
     this.abortController=null;
     this.activeReader=null;
+    this.debugLogs=[];
+    this.debugLogEnabled=false;
+    this.debugLogLimit=200;
+    this.regexProcessor=new RegexProcessor();
+  }
+
+  isDebugLoggingEnabled(){
+    return !!this.debugLogEnabled;
+  }
+
+  setDebugLogging(enabled){
+    this.debugLogEnabled=!!enabled;
+    if(!this.debugLogEnabled){
+      this.clearDebugLogs();
+    }
+  }
+
+  clearDebugLogs(){
+    this.debugLogs=[];
+  }
+
+  _enqueueDebugLog(entry){
+    if(!this.debugLogEnabled)return null;
+    this.debugLogs.push(entry);
+    if(this.debugLogs.length>this.debugLogLimit){
+      this.debugLogs.splice(0,this.debugLogs.length-this.debugLogLimit);
+    }
+    return entry;
+  }
+
+  _startApiLog(meta){
+    if(!this.debugLogEnabled)return null;
+    const entry={
+      id:`log_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+      startedAt:new Date().toISOString(),
+      status:'pending',
+      ...meta
+    };
+    return this._enqueueDebugLog(entry);
+  }
+
+  _finishApiLog(entry,response){
+    if(!entry)return;
+    entry.status='ok';
+    entry.finishedAt=new Date().toISOString();
+    entry.response=response;
+  }
+
+  _failApiLog(entry,error){
+    if(!entry)return;
+    entry.status='error';
+    entry.finishedAt=new Date().toISOString();
+    entry.error=error instanceof Error?error.message:String(error);
+  }
+
+  getDebugLogs(){
+    return this.debugLogs.slice().reverse();
   }
   
   buildMessages(session,options={}){
@@ -1937,10 +2043,390 @@ class APIManager{
 
     return{messages,system};
   }
+
+  _interpolateReplies(text,replies){
+    if(text==null)return '';
+    return String(text).replace(/\{\{\s*reply(\d+)\s*\}\}/g,(match,num)=>{
+      const idx=Number(num)-1;
+      if(!Number.isInteger(idx)||idx<0||idx>=replies.length){
+        throw new Error(`引用了不存在的回复变量 ${match}`);
+      }
+      return replies[idx];
+    });
+  }
+
+  _applyContentEdit(base,edit,replies){
+    if(edit==null)return base;
+    if(typeof edit==='string'){
+      return this._interpolateReplies(edit,replies);
+    }
+    const mode=(edit.mode||'replace').toLowerCase();
+    const rawContent=edit.content!=null?edit.content:edit.text;
+    const content=this._interpolateReplies(rawContent??'',replies);
+    const prev=String(base??'');
+    if(mode==='keep'||mode==='none'||mode==='unchanged')return prev;
+    if(mode==='append')return prev+content;
+    if(mode==='prepend')return content+prev;
+    return content;
+  }
+
+  _applyReplyRegex(content,rules){
+    if(!content||!Array.isArray(rules)||rules.length===0)return content;
+    const compiled=this.regexProcessor?.compileRules?.(rules);
+    if(!compiled)return content;
+    return this.regexProcessor?.process?.(content,compiled)??content;
+  }
+
+  _buildTurns(history){
+    const turns=[];
+    let pendingUser=null;
+    for(const msg of history||[]){
+      if(msg?.role==='user'){
+        pendingUser=msg;
+        continue;
+      }
+      if(msg?.role==='assistant'&&pendingUser){
+        turns.push({
+          user:{role:'user',content:String(pendingUser.content??'')},
+          assistant:{role:'assistant',content:String(msg.content??'')}
+        });
+        pendingUser=null;
+      }
+    }
+    return turns;
+  }
+
+  _normalizeHistoryConfig(historyConfig){
+    if(!historyConfig)return {mode:'all'};
+    if(typeof historyConfig==='string')return {mode:historyConfig};
+    return historyConfig;
+  }
+
+  _selectTurns(turns,historyConfig){
+    const total=turns.length;
+    const config=this._normalizeHistoryConfig(historyConfig);
+    const rawMode=String(config.mode||'all').toLowerCase().replace(/\s+/g,' ').trim();
+    const mode=rawMode.includes('all')?'all':(rawMode.includes('none')||rawMode.includes('empty')?'none':(rawMode.includes('range')?'range':(rawMode.includes('last')||rawMode.includes('latest')||rawMode.includes('recent')?'latest':rawMode)));
+    if(mode==='none')return [];
+    if(total===0)return [];
+    let start=1;
+    let end=total;
+    if(mode==='range'){
+      start=Number.isFinite(config.start)?Math.trunc(config.start):1;
+      end=Number.isFinite(config.end)?Math.trunc(config.end):total;
+    }else if(mode==='latest'){
+      const countRaw=Number.isFinite(config.count)?Math.trunc(config.count):Math.trunc(config.latest);
+      const count=Number.isFinite(countRaw)?Math.max(1,countRaw):1;
+      start=Math.max(1,total-count+1);
+      end=total;
+    }
+    if(start<1||end<start||end>total){
+      throw new Error(`历史回合范围无效: ${start}..${end} (总回合=${total})`);
+    }
+    const selected=[];
+    for(let i=start;i<=end;i++){
+      const turn=turns[i-1];
+      selected.push({
+        index:i,
+        user:{...turn.user},
+        assistant:{...turn.assistant}
+      });
+    }
+    return selected;
+  }
+
+  _applyTurnEdits(selectedTurns,edits,replies,targetRole){
+    if(!Array.isArray(edits)||edits.length===0)return;
+    edits.forEach(edit=>{
+      const idx=Math.trunc(edit?.turn);
+      if(!Number.isInteger(idx))throw new Error('回合改写缺少 turn 索引');
+      const turn=selectedTurns.find(item=>item.index===idx);
+      if(!turn){
+        throw new Error(`回合改写目标不存在: turn ${idx}`);
+      }
+      const target=targetRole==='assistant'?turn.assistant:turn.user;
+      target.content=this._applyContentEdit(target.content,edit,replies);
+    });
+  }
+
+  _validateStepMessages(stepIndex,messages){
+    if(!Array.isArray(messages)||messages.length===0){
+      throw new Error(`Step ${stepIndex}: messages 为空`);
+    }
+    let start=0;
+    messages.forEach((msg,i)=>{
+      if(msg?.role==='system'&&i!==0){
+        throw new Error(`Step ${stepIndex}: messages[${i+1}] system 只能出现在第一条`);
+      }
+    });
+    if(messages[0]?.role==='system'){
+      start=1;
+      if(messages.length===1){
+        throw new Error(`Step ${stepIndex}: 仅有 system 消息，缺少 user 结尾`);
+      }
+    }
+    const expectedFirst=messages[start]?.role;
+    if(expectedFirst!=='user'){
+      throw new Error(`Step ${stepIndex}: messages[${start+1}] 必须是 user`);
+    }
+    for(let i=start;i<messages.length;i++){
+      const expected=(i-start)%2===0?'user':'assistant';
+      const actual=messages[i]?.role;
+      if(actual!==expected){
+        throw new Error(`Step ${stepIndex}: messages[${i+1}] 角色顺序错误，期望 ${expected} 实际 ${actual}`);
+      }
+    }
+    if(messages[messages.length-1]?.role!=='user'){
+      throw new Error(`Step ${stepIndex}: messages 必须以 user 结尾`);
+    }
+  }
+
+  _extractSystemMessage(messages){
+    if(messages[0]?.role==='system'){
+      return{system:String(messages[0].content??''),rest:messages.slice(1)};
+    }
+    return{system:'',rest:messages};
+  }
+
+  _toAnthropicMessages(messages){
+    const {system,rest}=this._extractSystemMessage(messages);
+    const converted=rest.map(msg=>({
+      role:msg.role,
+      content:[{type:'text',text:String(msg.content??'')}]
+    }));
+    return{system, messages:converted};
+  }
+
+  _toGeminiContents(messages){
+    const {system,rest}=this._extractSystemMessage(messages);
+    const contents=rest.map(msg=>({
+      role:msg.role==='assistant'?'model':'user',
+      parts:[{text:String(msg.content??'')}]
+    }));
+    return{system, contents};
+  }
+
+  _getLatestUserContent(session){
+    const history=session?.history||[];
+    for(let i=history.length-1;i>=0;i--){
+      if(history[i]?.role==='user')return String(history[i].content??'');
+    }
+    return '';
+  }
+
+  _resolveStepPreset(step,defaultPreset){
+    if(!step)return defaultPreset;
+    const presets=this.state.getActivePresets();
+    const presetName=typeof step.preset==='string'?step.preset:(typeof step.presetName==='string'?step.presetName:'');
+    if(presetName){
+      const match=presets.find(p=>String(p.name||'').trim()===String(presetName).trim());
+      if(!match)throw new Error(`Step 预设不存在或未启用: ${presetName}`);
+      return match;
+    }
+    if(Number.isFinite(step.presetIndex)){
+      const idx=Math.trunc(step.presetIndex);
+      const resolved=idx>=0?idx:presets.length+idx;
+      if(resolved<0||resolved>=presets.length){
+        throw new Error(`Step 预设索引无效: ${step.presetIndex}`);
+      }
+      return presets[resolved];
+    }
+    return defaultPreset;
+  }
+
+  _resolveFinalStepIndex(steps){
+    const finalIndices=steps.map((step,idx)=>step?.isFinal?idx:null).filter(idx=>idx!==null);
+    if(finalIndices.length>1){
+      throw new Error('多步编排只能有一个最终步骤');
+    }
+    if(finalIndices.length===1){
+      const idx=finalIndices[0];
+      if(idx!==steps.length-1){
+        throw new Error('最终步骤必须为最后一步');
+      }
+      return idx;
+    }
+    return Math.max(0,steps.length-1);
+  }
+
+  _estimateValidationTurnCount(steps){
+    let maxTurns=0;
+    steps.forEach(step=>{
+      const config=this._normalizeHistoryConfig(step?.history);
+      const rawMode=String(config.mode||'all').toLowerCase();
+      const mode=rawMode.includes('range')?'range':(rawMode.includes('last')||rawMode.includes('latest')||rawMode.includes('recent')?'latest':rawMode);
+      if(mode==='range'){
+        const end=Number.isFinite(config.end)?Math.trunc(config.end):0;
+        if(end>maxTurns)maxTurns=end;
+      }else if(mode==='latest'){
+        const countRaw=Number.isFinite(config.count)?Math.trunc(config.count):Math.trunc(config.latest);
+        const count=Number.isFinite(countRaw)?Math.max(1,countRaw):1;
+        if(count>maxTurns)maxTurns=count;
+      }
+      const turnEdits=[...(step?.patches?.turnUsers||[]),...(step?.patches?.turnAssistants||[])];
+      turnEdits.forEach(edit=>{
+        const idx=Math.trunc(edit?.turn);
+        if(Number.isInteger(idx)&&idx>maxTurns)maxTurns=idx;
+      });
+    });
+    return Math.max(0,maxTurns);
+  }
+
+  validateMultiStepRunnerSteps(steps,options={}){
+    if(!Array.isArray(steps))throw new Error('多步编排 steps 必须为数组');
+    if(steps.length===0)throw new Error('多步编排 steps 不能为空');
+    this._resolveFinalStepIndex(steps);
+    const baseSystem=options.baseSystem??'';
+    const baseUserRaw=options.baseUser??'示例用户输入';
+    const baseUser=options.messagePrefix?options.messagePrefix+baseUserRaw:baseUserRaw;
+    if(!baseUser)throw new Error('多步编排需要最新 user 消息');
+    const totalTurns=this._estimateValidationTurnCount(steps);
+    const baseTurns=[];
+    for(let i=1;i<=totalTurns;i++){
+      baseTurns.push({
+        user:{role:'user',content:`用户示例${i}`},
+        assistant:{role:'assistant',content:`助手示例${i}`}
+      });
+    }
+
+    const replies=[];
+    for(let i=0;i<steps.length;i++){
+      const step=steps[i]||{};
+      const stepIndex=i+1;
+      this._resolveStepPreset(step,this.state.getCurrentPreset());
+      let system=baseSystem;
+      if(step.system!==undefined){
+        system=this._applyContentEdit(system,step.system,replies);
+      }
+      const selectedTurns=this._selectTurns(baseTurns,step.history);
+      if(step.patches?.turnUsers){
+        this._applyTurnEdits(selectedTurns,step.patches.turnUsers,replies,'user');
+      }
+      if(step.patches?.turnAssistants){
+        this._applyTurnEdits(selectedTurns,step.patches.turnAssistants,replies,'assistant');
+      }
+      if(step.patches?.system!==undefined){
+        system=this._applyContentEdit(system,step.patches.system,replies);
+      }
+      let userContent=baseUser;
+      if(step.user!==undefined){
+        userContent=this._applyContentEdit(userContent,step.user,replies);
+      }
+      if(step.patches?.latestUser!==undefined){
+        userContent=this._applyContentEdit(userContent,step.patches.latestUser,replies);
+      }
+      const messages=[];
+      if(system){
+        messages.push({role:'system',content:system});
+      }
+      selectedTurns.forEach(turn=>{
+        messages.push({role:'user',content:turn.user.content});
+        messages.push({role:'assistant',content:turn.assistant.content});
+      });
+      messages.push({role:'user',content:userContent});
+      this._validateStepMessages(stepIndex,messages);
+      replies.push(`reply${stepIndex}`);
+    }
+  }
+
+  async runMultiStep(session,preset,onDelta){
+    const pc=this.state.getSessionPromptConfig(session);
+    const runner=pc?.multiStepRunner;
+    if(!runner?.enabled||!Array.isArray(runner.steps)||runner.steps.length===0){
+      throw new Error('多步编排器未配置 steps');
+    }
+
+    const finalIndex=this._resolveFinalStepIndex(runner.steps);
+    const baseTurns=this._buildTurns(session?.history||[]);
+    const baseSystem=pc.sysPrompt||'';
+    const baseUserRaw=this._getLatestUserContent(session);
+    const baseUser=baseUserRaw;
+    if(baseUser===''){
+      throw new Error('多步编排器需要最新 user 消息');
+    }
+
+    const replies=[];
+    let lastResult={content:'',thinking:''};
+    for(let i=0;i<runner.steps.length;i++){
+      const step=runner.steps[i]||{};
+      const stepIndex=i+1;
+      const isFinal=i===finalIndex;
+      const stepPreset=this._resolveStepPreset(step,preset);
+
+      let system=baseSystem;
+      if(step.system!==undefined){
+        system=this._applyContentEdit(system,step.system,replies);
+      }
+
+      const selectedTurns=this._selectTurns(baseTurns,step.history);
+
+      if(step.patches?.turnUsers){
+        this._applyTurnEdits(selectedTurns,step.patches.turnUsers,replies,'user');
+      }
+      if(step.patches?.turnAssistants){
+        this._applyTurnEdits(selectedTurns,step.patches.turnAssistants,replies,'assistant');
+      }
+
+      if(step.patches?.system!==undefined){
+        system=this._applyContentEdit(system,step.patches.system,replies);
+      }
+
+      let userContent=baseUser;
+      if(step.user!==undefined){
+        userContent=this._applyContentEdit(userContent,step.user,replies);
+      }
+      if(step.patches?.latestUser!==undefined){
+        userContent=this._applyContentEdit(userContent,step.patches.latestUser,replies);
+      }
+
+      const messages=[];
+      if(system){
+        messages.push({role:'system',content:system});
+      }
+      selectedTurns.forEach(turn=>{
+        messages.push({role:'user',content:turn.user.content});
+        messages.push({role:'assistant',content:turn.assistant.content});
+      });
+      messages.push({role:'user',content:userContent});
+
+      this._validateStepMessages(stepIndex,messages);
+
+      const stepResult=await this.sendWithMessages(stepPreset,messages,isFinal?onDelta:null);
+      const rawContent=stepResult?.content??'';
+      const processedContent=this._applyReplyRegex(rawContent,step.replyRegexRules);
+      replies.push(processedContent);
+      if(processedContent!==rawContent){
+        stepResult.content=processedContent;
+      }
+      if(isFinal)lastResult=stepResult;
+    }
+
+    return lastResult;
+  }
+
+  async sendWithMessages(preset,messages,onDelta){
+    if(!preset)throw new Error('无可用模型预设');
+    this.abortController=new AbortController();
+    this.activeReader=null;
+    const signal=this.abortController.signal;
+
+    if(preset.type==='anthropic'){
+      return await this.sendAnthropicWithMessages(messages,preset.config,onDelta,signal);
+    }
+    if(preset.type==='openai'||preset.type==='deepseek'||preset.type==='kimi'){
+      return await this.sendOpenAIWithMessages(messages,preset.config,onDelta,signal,preset.type==='deepseek',preset.type==='kimi');
+    }
+    return await this.sendGeminiWithMessages(messages,preset.config,preset.type==='gemini-proxy',onDelta,signal);
+  }
   
   async send(session,onDelta){
     const preset=this.state.getCurrentPreset();
     if(!preset)throw new Error('无可用模型预设');
+
+    const pc=this.state.getSessionPromptConfig(session);
+    if(pc?.multiStepRunner?.enabled){
+      return await this.runMultiStep(session,preset,onDelta);
+    }
 
     this.abortController=new AbortController();
     this.activeReader=null;
@@ -1956,7 +2442,7 @@ class APIManager{
     }
   }
 
-  async sendOpenAI(session,cfg,onDelta,signal,forceDeepSeek=false,forceKimi=false){
+  async sendOpenAIWithMessages(messages,cfg,onDelta,signal,forceDeepSeek=false,forceKimi=false){
     const isDeepSeek=forceDeepSeek||((cfg.base||'').includes('api.deepseek.com'));
     const isKimi=forceKimi||((cfg.base||'').includes('api.moonshot.cn'));
     let baseDefault='https://api.openai.com/v1';
@@ -1986,7 +2472,7 @@ class APIManager{
     };
     const body={
       model:cfg.model||modelDefault,
-      messages:this.buildMessages(session,{isDeepSeek,isKimi}),
+      messages,
       stream:!!cfg.stream
     };
     
@@ -2002,19 +2488,34 @@ class APIManager{
       body.reasoning_effort='medium';
     }
     
-    const res=await fetch(url,{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'Authorization':`Bearer ${cfg.key}`
-      },
-      body:JSON.stringify(body),
-      signal
+    const logEntry=this._startApiLog({
+      provider:isDeepSeek?'deepseek':(isKimi?'kimi':'openai'),
+      url,
+      request:{
+        model:body.model,
+        messages,
+        stream:!!body.stream,
+        temperature:body.temperature,
+        top_p:body.top_p,
+        max_tokens:body.max_tokens,
+        reasoning_effort:body.reasoning_effort
+      }
     });
-    
-    if(!res.ok)throw new Error(`HTTP ${res.status}`);
-    
-    if(cfg.stream){
+
+    try{
+      const res=await fetch(url,{
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'Authorization':`Bearer ${cfg.key}`
+        },
+        body:JSON.stringify(body),
+        signal
+      });
+      
+      if(!res.ok)throw new Error(`HTTP ${res.status}`);
+      
+      if(cfg.stream){
       const reader=res.body.getReader();
       this.activeReader=reader;
       const decoder=new TextDecoder();
@@ -2055,31 +2556,46 @@ class APIManager{
       }finally{
         if(this.activeReader===reader)this.activeReader=null;
       }
-      return{content:full||'(空响应)',thinking};
-    }else{
-      const data=await res.json();
-      const message=data?.choices?.[0]?.message||{};
-      let content='(空响应)';
-      let thinking=message?.reasoning_content||'';
-      if(Array.isArray(message?.content)){
-        const partResult=extractContentParts(message.content);
-        content=partResult.text||'(空响应)';
-        if(partResult.thinking)thinking+=partResult.thinking;
+        const result={content:full||'(空响应)',thinking};
+        this._finishApiLog(logEntry,{content:result.content,thinking:result.thinking});
+        return result;
       }else{
-        content=message?.content||'(空响应)';
+        const data=await res.json();
+        const message=data?.choices?.[0]?.message||{};
+        let content='(空响应)';
+        let thinking=message?.reasoning_content||'';
+        if(Array.isArray(message?.content)){
+          const partResult=extractContentParts(message.content);
+          content=partResult.text||'(空响应)';
+          if(partResult.thinking)thinking+=partResult.thinking;
+        }else{
+          content=message?.content||'(空响应)';
+        }
+        const result={content,thinking};
+        this._finishApiLog(logEntry,{content,thinking});
+        return result;
       }
-      return{content,thinking};
+    }catch(err){
+      this._failApiLog(logEntry,err);
+      throw err;
     }
   }
 
-  async sendAnthropic(session,cfg,onDelta,signal){
+  async sendOpenAI(session,cfg,onDelta,signal,forceDeepSeek=false,forceKimi=false){
+    const isDeepSeek=forceDeepSeek||((cfg.base||'').includes('api.deepseek.com'));
+    const isKimi=forceKimi||((cfg.base||'').includes('api.moonshot.cn'));
+    const messages=this.buildMessages(session,{isDeepSeek,isKimi});
+    return await this.sendOpenAIWithMessages(messages,cfg,onDelta,signal,forceDeepSeek,forceKimi);
+  }
+
+  async sendAnthropicWithMessages(messages,cfg,onDelta,signal){
     const base=(cfg.base||'https://api.anthropic.com/v1').replace(/\/+$/,'');
     const url=`${base}/messages`;
     const model=cfg.model||'claude-3-5-sonnet-20240620';
-    const {messages,system}=this.buildAnthropicMessages(session);
+    const {messages:converted,system}=this._toAnthropicMessages(messages);
     const body={
       model,
-      messages,
+      messages:converted,
       stream:!!cfg.stream,
       max_tokens:cfg.max_tokens||4096
     };
@@ -2088,20 +2604,35 @@ class APIManager{
     if(cfg.temperature!=null&&cfg.temperature!==0)body.temperature=cfg.temperature;
     if(cfg.top_p!=null&&cfg.top_p!==0)body.top_p=cfg.top_p;
 
-    const res=await fetch(url,{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'x-api-key':cfg.key||'',
-        'anthropic-version':'2023-06-01'
-      },
-      body:JSON.stringify(body),
-      signal
+    const logEntry=this._startApiLog({
+      provider:'anthropic',
+      url,
+      request:{
+        model,
+        messages:converted,
+        system,
+        stream:!!cfg.stream,
+        max_tokens:body.max_tokens,
+        temperature:body.temperature,
+        top_p:body.top_p
+      }
     });
 
-    if(!res.ok)throw new Error(`HTTP ${res.status}`);
+    try{
+      const res=await fetch(url,{
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'x-api-key':cfg.key||'',
+          'anthropic-version':'2023-06-01'
+        },
+        body:JSON.stringify(body),
+        signal
+      });
 
-    if(cfg.stream){
+      if(!res.ok)throw new Error(`HTTP ${res.status}`);
+
+      if(cfg.stream){
       const reader=res.body.getReader();
       this.activeReader=reader;
       const decoder=new TextDecoder();
@@ -2149,27 +2680,40 @@ class APIManager{
       }finally{
         if(this.activeReader===reader)this.activeReader=null;
       }
-      return{content:full||'(空响应)',thinking};
-    }else{
-      const data=await res.json();
-      let content='(空响应)';
-      let thinking='';
-      if(Array.isArray(data?.content)){
-        const textParts=[];
-        data.content.forEach((part)=>{
-          if(part?.type==='text'&&part?.text)textParts.push(part.text);
-          if(part?.type==='thinking'){
-            if(part?.thinking)thinking+=part.thinking;
-            if(part?.text)thinking+=part.text;
-          }
-        });
-        if(textParts.length)content=textParts.join('');
+        const result={content:full||'(空响应)',thinking};
+        this._finishApiLog(logEntry,{content:result.content,thinking:result.thinking});
+        return result;
+      }else{
+        const data=await res.json();
+        let content='(空响应)';
+        let thinking='';
+        if(Array.isArray(data?.content)){
+          const textParts=[];
+          data.content.forEach((part)=>{
+            if(part?.type==='text'&&part?.text)textParts.push(part.text);
+            if(part?.type==='thinking'){
+              if(part?.thinking)thinking+=part.thinking;
+              if(part?.text)thinking+=part.text;
+            }
+          });
+          if(textParts.length)content=textParts.join('');
+        }
+        const result={content,thinking};
+        this._finishApiLog(logEntry,{content,thinking});
+        return result;
       }
-      return{content,thinking};
+    }catch(err){
+      this._failApiLog(logEntry,err);
+      throw err;
     }
   }
+
+  async sendAnthropic(session,cfg,onDelta,signal){
+    const messages=this.buildMessages(session);
+    return await this.sendAnthropicWithMessages(messages,cfg,onDelta,signal);
+  }
   
-  async sendGemini(session,cfg,isProxy,onDelta,signal){
+  async sendGeminiWithMessages(messages,cfg,isProxy,onDelta,signal){
     const base=isProxy?
       (cfg.proxyUrl||'http://127.0.0.1:8889').replace(/\/+$/,''):
       (cfg.base||'https://generativelanguage.googleapis.com').replace(/\/+$/,'');
@@ -2182,21 +2726,7 @@ if (cfg.stream) qs.push('alt=sse');
 if (!isProxy && cfg.key) qs.push(`key=${encodeURIComponent(cfg.key)}`);
 if (qs.length) url += `?${qs.join('&')}`;
     
-    const contents=[];
-    const pc=this.state.getSessionPromptConfig(session);
-    
-    if(pc.firstUser)contents.push({role:'user',parts:[{text:pc.firstUser}]});
-    
-    const history=session.history||[];
-    history.forEach((m,i)=>{
-      const isLastUser=m.role==='user'&&i===history.length-1;
-      const content=(isLastUser&&pc.messagePrefix)?pc.messagePrefix+m.content:m.content;
-      
-      if(m.role==='assistant')contents.push({role:'model',parts:[{text:m.content}]});
-      if(m.role==='user')contents.push({role:'user',parts:[{text:content}]});
-    });
-    
-    if(pc.assistantPrefill)contents.push({role:'model',parts:[{text:pc.assistantPrefill}]});
+    const {system,contents}=this._toGeminiContents(messages);
     
     const generationConfig={};
     if(cfg.temperature!=null&&cfg.temperature!==0)generationConfig.temperature=cfg.temperature;
@@ -2220,9 +2750,9 @@ if (qs.length) url += `?${qs.join('&')}`;
     };
     
     // systemInstruction 应该在 contents 之后
-    if(pc.sysPrompt){
+    if(system){
       body.systemInstruction={
-        parts:[{text:pc.sysPrompt}]
+        parts:[{text:system}]
       };
     }
     
@@ -2238,16 +2768,29 @@ if (qs.length) url += `?${qs.join('&')}`;
 if (!isProxy && cfg.key) headers['X-Goog-Api-Key'] = cfg.key;
 if (isProxy && cfg.proxyPass) headers.Authorization = `Bearer ${cfg.proxyPass}`;
     
-    const res=await fetch(url,{
-      method:'POST',
-      headers,
-      body:JSON.stringify(body),
-      signal
+    const logEntry=this._startApiLog({
+      provider:isProxy?'gemini-proxy':'gemini',
+      url,
+      request:{
+        model,
+        system,
+        contents,
+        stream:!!cfg.stream,
+        generationConfig
+      }
     });
-    
-    if(!res.ok)throw new Error(`HTTP ${res.status}`);
-    
-    if(cfg.stream){
+
+    try{
+      const res=await fetch(url,{
+        method:'POST',
+        headers,
+        body:JSON.stringify(body),
+        signal
+      });
+      
+      if(!res.ok)throw new Error(`HTTP ${res.status}`);
+      
+      if(cfg.stream){
       const reader = res.body.getReader();
       this.activeReader=reader;
       const decoder = new TextDecoder();
@@ -2282,20 +2825,33 @@ if (isProxy && cfg.proxyPass) headers.Authorization = `Bearer ${cfg.proxyPass}`;
       }finally{
         if(this.activeReader===reader)this.activeReader=null;
       }
-      return { content: full || '(空响应)', thinking };
-    }else{
-      const data=await res.json();
-      const parts=data?.candidates?.[0]?.content?.parts||[];
-      let content='',thinking='';
-      for(const part of parts){
-        if(part.thought){
-          thinking+=part.text||'';
-        }else if(part.text){
-          content+=part.text;
+        const result={content:full||'(空响应)',thinking};
+        this._finishApiLog(logEntry,{content:result.content,thinking:result.thinking});
+        return result;
+      }else{
+        const data=await res.json();
+        const parts=data?.candidates?.[0]?.content?.parts||[];
+        let content='',thinking='';
+        for(const part of parts){
+          if(part.thought){
+            thinking+=part.text||'';
+          }else if(part.text){
+            content+=part.text;
+          }
         }
+        const result={content:content||'(空响应)',thinking};
+        this._finishApiLog(logEntry,{content:result.content,thinking:result.thinking});
+        return result;
       }
-      return{content:content||'(空响应)',thinking};
+    }catch(err){
+      this._failApiLog(logEntry,err);
+      throw err;
     }
+  }
+
+  async sendGemini(session,cfg,isProxy,onDelta,signal){
+    const messages=this.buildMessages(session);
+    return await this.sendGeminiWithMessages(messages,cfg,isProxy,onDelta,signal);
   }
   
   abort(){
@@ -2372,6 +2928,7 @@ class UIManager{
     this.typingElement=null;
     this._scrollRAF=null;
     this._settingsRendered=false;
+    this._settingsEventsBound=false;
     this.isLoadingEarlier=false;
     this._pendingAutoLoad=false;
     this._regexInputDebounced=null;
@@ -2379,6 +2936,9 @@ class UIManager{
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
     this._currentBatcher=null;
     this._pendingFoldCheck=false;
+    this.followBottom=true;
+    this._pendingMutate=false;
+    this._renderStartIndex=0;
 
     window._sanitizer=this.sanitizer;
 
@@ -2395,7 +2955,8 @@ class UIManager{
       firstAssistant:'',
       messagePrefix:'',
       assistantPrefill:'',
-      regexRules:[]
+      regexRules:[],
+      multiStepRunner:{enabled:false,steps:[]}
     };
     try{
       if(typeof structuredClone==='function')return structuredClone(preset);
@@ -2410,6 +2971,10 @@ class UIManager{
         firstAssistant:preset.firstAssistant||'',
         messagePrefix:preset.messagePrefix||'',
         assistantPrefill:preset.assistantPrefill||'',
+        multiStepRunner:preset.multiStepRunner&&typeof preset.multiStepRunner==='object'?{
+          enabled:!!preset.multiStepRunner.enabled,
+          steps:Array.isArray(preset.multiStepRunner.steps)?preset.multiStepRunner.steps:[]
+        }:{enabled:false,steps:[]},
         regexRules:Array.isArray(preset.regexRules)?preset.regexRules.map(rule=>({
           name:rule?.name||'',
           pattern:rule?.pattern||'',
@@ -2517,18 +3082,25 @@ class UIManager{
     }
   }
   finalizeTypingAndAppend(typing,msg){
-    const scrollState=this.captureScrollState();
-    const box=scrollState?.box;
-    if(typing){
-      this.removeTyping(typing);
+    const box=Utils.$('#messages');
+    const shouldStick=!!this.followBottom;
+    const applyChange=()=>{
+      if(typing){
+        this.removeTyping(typing);
+      }
+      this.appendMessage(msg);
+      if(typeof this.flushUpdates==='function') this.flushUpdates();
+      this.onMessagesMutated();
+    };
+    if(!box){
+      applyChange();
+      return;
     }
-    this.appendMessage(msg);
-    if(typeof this.flushUpdates==='function') this.flushUpdates();
-    if(!box||!scrollState)return;
-    if(scrollState.atBottom){
+    if(shouldStick){
+      applyChange();
       requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
     }else{
-      box.scrollTop=scrollState.top;
+      this.preserveScroll(applyChange);
     }
   }
   renumberMessagesFrom(startIdx=0){
@@ -2700,78 +3272,34 @@ class UIManager{
     
     const history=session.history||[];
     const total=history.length;
-    this.windowManager.evaluate(total);
-    
-    const win=this.windowManager.window;
+    if(scrollToBottom) this.followBottom=true;
 
-    // 预先建立当前窗口内消息id到索引的映射，避免在遍历节点时重复扫描history
-    const idToIndex=new Map();
-    if(win&&Number.isInteger(win.start)&&Number.isInteger(win.end)){
-      for(let i=win.start;i<=win.end;i++){
-        const msg=history[i];
-        if(msg&&msg.id)idToIndex.set(msg.id,i);
-      }
-    }
-
-    // ✅ 移除窗口外的元素 - 使用msgId遍历
-    const toRemove=[];
-    for(let[msgId,el]of this.messageElements){
-      // Find the index of this message in current history
-      const msgIdx=idToIndex.has(msgId)?idToIndex.get(msgId):-1;
-      if(msgIdx===-1||msgIdx<win.start||msgIdx>win.end){
-        toRemove.push({msgId,el});
-      }
-    }
-    
-    const prevScrollHeight=box.scrollHeight;
-    const prevScrollTop=box.scrollTop;
-    
-    // ✅ 检查要移除的消息中是否有正在编辑的
     if(this.editingState){
-      const isEditingBeingRemoved=toRemove.some(({msgId})=>msgId===this.editingState.msgId);
-      if(isEditingBeingRemoved){
-        this.autoSaveEditingMessage();
-      }
+      this.autoSaveEditingMessage();
     }
-    
-    toRemove.forEach(({msgId,el})=>{
+
+    box.innerHTML='';
+    for(const [msgId,el] of this.messageElements){
       this.domPool.release('article',el);
-      el.remove();
-      this.messageElements.delete(msgId);
-    });
-    
-    const scrollAdjust=prevScrollHeight-box.scrollHeight;
-    if(scrollAdjust>0&&!scrollToBottom){
-      box.scrollTop=Math.max(0,prevScrollTop-scrollAdjust);
     }
-    
-    // 添加新元素 - 使用msgId检查是否已存在
+    this.messageElements.clear();
+
+    const start=Math.max(0,total-KEEP_LAST);
+    this._renderStartIndex=start;
+
     const fragment=document.createDocumentFragment();
-    const __addedEls=[];
-    for(let i=win.start;i<=win.end;i++){
+    for(let i=start;i<total;i++){
       const msg=history[i];
-      if(msg&&!this.messageElements.has(msg.id)){
-        const el=this.buildMessageElement(msg,i);
-        this.messageElements.set(msg.id,el);
-        fragment.appendChild(el);
-        __addedEls.push(el);
-      }
+      if(!msg)continue;
+      const el=this.buildMessageElement(msg,i);
+      this.messageElements.set(msg.id,el);
+      fragment.appendChild(el);
     }
-    
-    if(fragment.childNodes.length){
-      box.appendChild(fragment);
-      __addedEls.forEach(el=>this.animateIn(el));
-    }
-    
-    this.updateLoadTip(box,win);
-    
-    if(scrollToBottom){
-      if(!this._suppressAutoStick){
-        requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
-        this.ensureBottom(1, 140);
-      }else{
-        this._pendingStick=true;
-      }
+    box.appendChild(fragment);
+    this.updateLoadOlderButton(box);
+
+    if(scrollToBottom||this.followBottom){
+      requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
     }
   }
   
@@ -2846,90 +3374,38 @@ class UIManager{
     return el;
   }
   
-  updateLoadTip(box,win){
+  updateLoadOlderButton(box){
     const tipEl=box.querySelector('.load-older');
     if(tipEl)tipEl.remove();
-
-    if(win.enabled&&win.start>0&&!this.isLoadingEarlier&&!this._pendingAutoLoad&&!this.isNearBottom(box)){
-      this._pendingAutoLoad=true;
-      requestAnimationFrame(()=>{
-        this._pendingAutoLoad=false;
-        this.loadEarlierMessages();
-      });
-    }
-  }
-
-  maybeCollapseEarlierOnScroll(box){
-    if(!box||this.isLoadingEarlier)return;
-
-    const win=this.windowManager?.window;
-    if(!win||!win.enabled)return;
-    if(!this.isNearBottom(box))return;
-
-    const session=this.state.getActiveSession();
-    const history=session?.history||[];
-    const total=history.length;
-    if(!total)return;
-
-    const prevStart=win.start;
-    this.windowManager.appendNew(total,true);
-    const targetStart=this.windowManager.window.start;
-    if(targetStart<=prevStart)return;
-
-    if(this.editingState){
-      const editingIdx=history.findIndex(m=>m.id===this.editingState.msgId);
-      if(editingIdx>-1&&editingIdx<targetStart){
-        this.windowManager.window.start=prevStart;
-        return;
-      }
-    }
-
-    let removed=false;
-    for(let i=0;i<targetStart;i++){
-      const msg=history[i];
-      if(!msg)continue;
-      const el=this.messageElements.get(msg.id);
-      if(!el)continue;
-      this.domPool.release('article',el);
-      el.remove();
-      this.messageElements.delete(msg.id);
-      removed=true;
-    }
-
-    if(removed){
-      const sentinel=box.querySelector('.top-sentinel');
-      if(sentinel){
-        box.insertBefore(sentinel,box.firstChild);
-      }
-      requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
-    }
-
-    this.updateLoadTip(box,this.windowManager.window);
+    if(this._renderStartIndex<=0)return;
+    const tip=document.createElement('div');
+    tip.className='load-older';
+    tip.innerHTML=`<div class="info">还有 ${this._renderStartIndex} 条更早消息</div><button class="btn small" type="button" data-act="load-older">查看更早消息</button>`;
+    box.insertBefore(tip,box.firstChild);
   }
 
   loadEarlierMessages(){
     if(this.isLoadingEarlier)return;
     this.isLoadingEarlier=true;
-    
+
     const session=this.state.getActiveSession();
     const box=Utils.$('#messages');
     if(!session||!box){
       this.isLoadingEarlier=false;
       return;
     }
-    
-    const info=this.windowManager.loadEarlier();
-    if(!info){
+
+    const history=session.history||[];
+    if(this._renderStartIndex<=0){
       this.isLoadingEarlier=false;
       return;
     }
-    
-    const{newStart,oldStart}=info;
-    const history=session.history;
-    
+
+    const oldStart=this._renderStartIndex;
+    const newStart=Math.max(0,oldStart-LOAD_BATCH);
+
     const prevHeight=box.scrollHeight;
-    const prevTop=box.scrollTop;
-    
+
     const fragment=document.createDocumentFragment();
     for(let i=newStart;i<oldStart;i++){
       const msg=history[i];
@@ -2939,67 +3415,64 @@ class UIManager{
         fragment.appendChild(el);
       }
     }
-    
-    const sentinel=box.querySelector('.top-sentinel');
-    if(sentinel){
-      const anchor=sentinel.nextSibling;
-      if(anchor){
-        box.insertBefore(fragment,anchor);
-      }else{
-        box.appendChild(fragment);
-      }
-      box.insertBefore(sentinel,box.firstChild);
+
+    const tip=box.querySelector('.load-older');
+    const anchor=tip?tip.nextSibling:box.firstChild;
+    if(anchor){
+      box.insertBefore(fragment,anchor);
     }else{
-      const anchor=box.firstChild;
-      if(anchor){
-        box.insertBefore(fragment,anchor);
-      }else{
-        box.appendChild(fragment);
-      }
+      box.appendChild(fragment);
     }
 
     const delta=box.scrollHeight-prevHeight;
-    box.scrollTop=prevTop+delta;
+    box.scrollTop+=delta;
 
+    this._renderStartIndex=newStart;
+    this.followBottom=this.isAtBottom(box);
     this.isLoadingEarlier=false;
-    this.updateLoadTip(box,this.windowManager.window);
+    this.updateLoadOlderButton(box);
   }
   
   setupTopObserver(){
     const box=Utils.$('#messages');
-    if(!box||!('IntersectionObserver'in window))return;
-    
-    let sentinel=box.querySelector('.top-sentinel');
-    if(!sentinel){
-      sentinel=document.createElement('div');
-      sentinel.className='top-sentinel sentinel';
-    }
-    
-    this.observerMgr.cleanup('message-top');
-    const observer=this.observerMgr.create('message-top',box,(entry)=>{
-      if(!entry.isIntersecting)return;
-      
-      const win=this.windowManager.window;
-      if(!win.enabled||win.start<=0||this.isLoadingEarlier)return;
-      
-      this.loadEarlierMessages();
-      
-      const tip=box.querySelector('.load-older');
-      const anchor=tip?tip.nextElementSibling:box.firstChild;
-      if(sentinel.nextSibling!==anchor&&anchor){
-        box.insertBefore(sentinel,anchor);
+    if(!box)return;
+    this.updateLoadOlderButton(box);
+  }
+
+  pruneOldMessages(){
+    const box=Utils.$('#messages');
+    if(!box)return;
+    if(!this.followBottom||!this.isAtBottom(box))return;
+    const nodes=Array.from(box.querySelectorAll('.msg'));
+    if(nodes.length<=KEEP_LAST)return;
+    const removeCount=nodes.length-KEEP_LAST;
+    for(let i=0;i<removeCount;i++){
+      const el=nodes[i];
+      const msgId=el?.dataset?.msgId;
+      if(msgId&&this.messageElements.has(msgId)){
+        this.messageElements.delete(msgId);
       }
-    },{threshold:0,rootMargin:'50px'});
-    
-    const tip=box.querySelector('.load-older');
-    const anchor=tip?tip.nextElementSibling:box.firstChild;
-    if(anchor){
-      box.insertBefore(sentinel,anchor);
-    }else{
-      box.insertBefore(sentinel,box.firstChild);
+      this.domPool.release('article',el);
+      el.remove();
     }
-    
-    this.observerMgr.observe('message-top',sentinel);
+    const session=this.state.getActiveSession();
+    const history=session?.history||[];
+    this._renderStartIndex=Math.max(0,history.length-KEEP_LAST);
+    box.scrollTop=box.scrollHeight;
+    this.updateLoadOlderButton(box);
+  }
+
+  onMessagesMutated(){
+    if(this._pendingMutate)return;
+    this._pendingMutate=true;
+    requestAnimationFrame(()=>{
+      this._pendingMutate=false;
+      const box=Utils.$('#messages');
+      if(box&&this.followBottom){
+        box.scrollTop=box.scrollHeight;
+      }
+      requestAnimationFrame(()=>this.pruneOldMessages());
+    });
   }
   
   // ✅ 核心改进：批量更新
@@ -3031,60 +3504,16 @@ class UIManager{
     if(!session)return;
 
     const history=session.history;
-    const total=history.length;
     const box=Utils.$('#messages');
     if(!box)return;
-
-    const isNearBottom=this.isNearBottom(box);
-    const isAtBottom=this.isAtBottom(box);
-    const prevScrollHeight=box.scrollHeight;
-    const prevScrollTop=box.scrollTop;
-
-    this.windowManager.appendNew(total,isNearBottom);
-
-    const win=this.windowManager.window;
     const fragment=document.createDocumentFragment();
     const __addedEls=[];
 
-    const start=Math.max(0,win.start|0);
-    const end=Math.min(total-1,win.end|0);
-    const visibleIndexMap=new Map();
-
-    for(let i=start;i<=end;i++){
-      const msg=history[i];
-      if(msg&&msg.id){
-        visibleIndexMap.set(msg.id,i);
-      }
-    }
-
-    const toRemove=[];
-    for(const[msgId,el]of this.messageElements){
-      const idx=visibleIndexMap.get(msgId);
-      if(idx===undefined){
-        toRemove.push({msgId,el});
-      }
-    }
-
-    if(this.editingState){
-      const isEditingBeingRemoved=toRemove.some(({msgId})=>msgId===this.editingState.msgId);
-      if(isEditingBeingRemoved){
-        this.autoSaveEditingMessage();
-      }
-    }
-
-    toRemove.forEach(({msgId,el})=>{
-      this.domPool.release('article',el);
-      el.remove();
-      this.messageElements.delete(msgId);
-    });
-
     for(const msgId of this.pendingUpdates){
-      const idx=visibleIndexMap.get(msgId);
-      if(idx===undefined)continue;
-
+      const idx=history.findIndex(m=>m.id===msgId);
+      if(idx===-1)continue;
       const msg=history[idx];
       if(!msg||this.messageElements.has(msgId))continue;
-
       const el=this.buildMessageElement(msg,idx);
       this.messageElements.set(msgId,el);
       fragment.appendChild(el);
@@ -3096,19 +3525,9 @@ class UIManager{
       __addedEls.forEach(el=>this.animateIn(el));
     }
 
-    const scrollAdjust=prevScrollHeight-box.scrollHeight;
-    if(scrollAdjust>0 && !isNearBottom){
-      box.scrollTop=Math.max(0,prevScrollTop-scrollAdjust);
-    }else if(isAtBottom){
-      if(!this._suppressAutoStick){
-        requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
-      }else{
-        this._pendingStick=true;
-      }
-    }
-
-    this.updateLoadTip(box,win);
     this.pendingUpdates.clear();
+    this.updateLoadOlderButton(box);
+    this.onMessagesMutated();
   }
   
   renderSidebar(){
@@ -3471,6 +3890,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           });
         }
       }
+      this.onMessagesMutated();
     }
   }
   
@@ -3541,7 +3961,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     return(box.scrollHeight-(box.scrollTop+box.clientHeight))<=CONFIG.AUTO_FOLLOW_PX;
   }
   isAtBottom(box){
-    return Math.abs(box.scrollHeight-(box.scrollTop+box.clientHeight))<=1;
+    return (box.scrollHeight-box.scrollTop-box.clientHeight)<=BOTTOM_THRESHOLD;
   }
   
   // ... (其余方法保持不变，包括settings相关方法)
@@ -3568,6 +3988,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     
     this.renderPromptPresetList();
     this.updatePromptEditingHint();
+    const apiLogEnabled=Utils.$('#apiLogEnabled');
+    if(apiLogEnabled)apiLogEnabled.value=this.api?.isDebugLoggingEnabled?.()?'true':'false';
     
     this._settingsRendered=true;
   }
@@ -3589,6 +4011,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     });
     
     this.renderPromptPresetList();
+    const apiLogEnabled=Utils.$('#apiLogEnabled');
+    if(apiLogEnabled)apiLogEnabled.value=this.api?.isDebugLoggingEnabled?.()?'true':'false';
   }
   
   renderModelConfig(index,type,config={}){
@@ -3762,12 +4186,331 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     if(Utils.$('#firstAssistant'))Utils.$('#firstAssistant').value=this.promptPresetDraft.firstAssistant||'';
     if(Utils.$('#messagePrefix'))Utils.$('#messagePrefix').value=this.promptPresetDraft.messagePrefix||'';
     if(Utils.$('#assistantPrefill'))Utils.$('#assistantPrefill').value=this.promptPresetDraft.assistantPrefill||'';
+    if(Utils.$('#multiStepRunnerEnabled')){
+      const enabled=!!this.promptPresetDraft.multiStepRunner?.enabled;
+      Utils.$('#multiStepRunnerEnabled').value=enabled?'true':'false';
+      this.updateMultiStepInputState(enabled);
+    }
+    this.renderMultiStepSteps(this.promptPresetDraft.multiStepRunner?.steps||[]);
 
     this.renderRegexRules(this.promptPresetDraft.regexRules||[]);
 
     this.state.state.editingPromptPreset=key;
     this.renderPromptPresetList();
     this.updatePromptEditingHint();
+  }
+
+  _getStepPresetOptions(stepPresetName=''){
+    const presets=this.state.getActivePresets();
+    const options=[{value:'',label:'默认(当前会话)'}];
+    presets.forEach(preset=>{
+      options.push({value:preset.name,label:preset.name});
+    });
+    if(stepPresetName&&stepPresetName!==''&&!options.some(opt=>opt.value===stepPresetName)){
+      options.push({value:stepPresetName,label:`未启用: ${stepPresetName}`});
+    }
+    return options;
+  }
+
+  _renderTurnEditList(edits,role,stepIdx){
+    if(!Array.isArray(edits)||edits.length===0){
+      return `<div style="color:var(--muted);font-size:11px;padding:.35rem 0">暂无${role==='assistant'?'助手':'用户'}楼层改写。</div>`;
+    }
+    return edits.map((edit,idx)=>`
+      <div style="display:grid;grid-template-columns:80px 120px 1fr auto;gap:.5rem;align-items:center;margin-bottom:.5rem" data-edit-idx="${idx}" data-edit-role="${role}">
+        <input type="number" min="1" step="1" placeholder="楼层" data-field="turn" value="${Number.isFinite(edit?.turn)?edit.turn:''}" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem"/>
+        <select data-field="mode" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem">
+          <option value="keep"${(edit?.mode||'replace')==='keep'?' selected':''}>不变</option>
+          <option value="replace"${(edit?.mode||'replace')==='replace'?' selected':''}>替换</option>
+          <option value="append"${(edit?.mode||'replace')==='append'?' selected':''}>追加</option>
+          <option value="prepend"${(edit?.mode||'replace')==='prepend'?' selected':''}>前置</option>
+        </select>
+        <textarea rows="2" data-field="content" placeholder="支持 {{reply1}} 变量" style="width:100%;border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.4rem .6rem;resize:vertical">${edit?.content??''}</textarea>
+        <button type="button" class="btn small warn" data-action="remove-turn-edit" data-role="${role}" data-step-idx="${stepIdx}" data-edit-idx="${idx}">×</button>
+      </div>
+    `).join('');
+  }
+
+  _renderStepReplyRegexRules(rules,stepIdx){
+    if(!Array.isArray(rules)||rules.length===0){
+      return `<div style="color:var(--muted);font-size:11px;padding:.35rem 0">暂无回复正则规则。</div>`;
+    }
+    return rules.map((rule,idx)=>`
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:.5rem;align-items:center;margin-bottom:.5rem" data-reply-regex-idx="${idx}">
+        <input type="text" data-field="replyRegexPattern" placeholder="正则表达式" value="${rule?.pattern||''}" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem;font-family:'Consolas','Monaco','Courier New',monospace;font-size:12px"/>
+        <input type="text" data-field="replyRegexReplacement" placeholder="替换为" value="${rule?.replacement||''}" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem"/>
+        <button type="button" class="btn small warn" data-action="remove-reply-regex" data-step-idx="${stepIdx}" data-regex-idx="${idx}">×</button>
+      </div>
+    `).join('');
+  }
+
+  renderMultiStepSteps(steps){
+    const container=Utils.$('#multiStepRunnerStepsContainer');
+    if(!container)return;
+    const safeSteps=Array.isArray(steps)?steps:[];
+    if(safeSteps.length===0){
+      container.innerHTML='<div style="color:var(--muted);font-size:11px;padding:.4rem 0">暂无步骤。点击下方按钮添加。</div>';
+      return;
+    }
+    const html=safeSteps.map((step,idx)=>{
+      const presetName=step?.presetName||step?.preset||'';
+      const presetOptions=this._getStepPresetOptions(presetName).map(opt=>`<option value="${opt.value}"${opt.value===presetName?' selected':''}>${opt.label}</option>`).join('');
+      const rawHistoryMode=String(step?.history?.mode||'all');
+      const historyMode=rawHistoryMode.includes('last')||rawHistoryMode.includes('latest')||rawHistoryMode.includes('recent')?'latest':rawHistoryMode;
+      const rangeStart=Number.isFinite(step?.history?.start)?step.history.start:'';
+      const rangeEnd=Number.isFinite(step?.history?.end)?step.history.end:'';
+      const latestCount=Number.isFinite(step?.history?.count)?step.history.count:(Number.isFinite(step?.history?.latest)?step.history.latest:'');
+      const systemEdit=typeof step?.system==='string'?{mode:'replace',content:step.system}:{mode:step?.system?.mode||'keep',content:step?.system?.content??step?.system?.text??''};
+      const userEdit=typeof step?.user==='string'?{mode:'replace',content:step.user}:{mode:step?.user?.mode||'keep',content:step?.user?.content??step?.user?.text??''};
+      const replyRegexRules=Array.isArray(step?.replyRegexRules)?step.replyRegexRules:[];
+      return `
+        <div style="border:1px solid var(--border);border-radius:.75rem;padding:.8rem;background:rgba(18,20,27,.75)" data-step-card data-step-idx="${idx}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem">
+            <div style="font-weight:600;font-size:13px">步骤 ${idx+1}</div>
+            <div style="display:flex;gap:.5rem;align-items:center">
+              <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:.3rem">
+                <input type="checkbox" data-field="isFinal"${step?.isFinal?' checked':''}/> 作为最终输出
+              </label>
+              <button type="button" class="btn small warn" data-action="remove-step" data-step-idx="${idx}">删除</button>
+            </div>
+          </div>
+          <div style="display:grid;gap:.6rem">
+            <div class="field" style="grid-template-columns:1fr">
+              <label>步骤名称(可选)</label>
+              <input data-field="name" placeholder="如: 方案生成" value="${step?.name||''}"/>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>使用模型预设</label>
+              <select data-field="presetName">${presetOptions}</select>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>系统提示(可选)</label>
+              <textarea rows="3" data-field="systemContent" placeholder="可留空，支持 {{reply1}}">${systemEdit.content||''}</textarea>
+              <div style="display:flex;gap:.5rem;margin-top:.35rem">
+                <label style="font-size:11px;color:var(--muted)">系统提示模式</label>
+                <select data-field="systemMode">
+                  <option value="keep"${systemEdit.mode==='keep'?' selected':''}>不变</option>
+                  <option value="replace"${systemEdit.mode==='replace'?' selected':''}>替换</option>
+                  <option value="append"${systemEdit.mode==='append'?' selected':''}>追加</option>
+                  <option value="prepend"${systemEdit.mode==='prepend'?' selected':''}>前置</option>
+                </select>
+              </div>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>楼层选择</label>
+              <select data-field="historyMode">
+                <option value="all"${historyMode==='all'?' selected':''}>全部楼层</option>
+                <option value="range"${historyMode==='range'?' selected':''}>指定范围</option>
+                <option value="latest"${historyMode==='latest'?' selected':''}>最新 N 楼</option>
+                <option value="none"${historyMode==='none'?' selected':''}>不带历史</option>
+              </select>
+              <div data-history-range style="display:${historyMode==='range'?'grid':'none'};grid-template-columns:1fr 1fr;gap:.5rem;margin-top:.4rem">
+                <input type="number" min="1" step="1" placeholder="起始楼层" data-field="rangeStart" value="${rangeStart}"/>
+                <input type="number" min="1" step="1" placeholder="结束楼层" data-field="rangeEnd" value="${rangeEnd}"/>
+              </div>
+              <div data-history-latest style="display:${historyMode==='latest'?'block':'none'};margin-top:.4rem">
+                <input type="number" min="1" step="1" placeholder="最新楼层数" data-field="latestCount" value="${latestCount}" style="width:100%"/>
+              </div>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>最新用户消息改写</label>
+              <div style="display:grid;gap:.5rem">
+                <select data-field="userMode">
+                  <option value="keep"${userEdit.mode==='keep'?' selected':''}>不变</option>
+                  <option value="replace"${userEdit.mode==='replace'?' selected':''}>替换</option>
+                  <option value="append"${userEdit.mode==='append'?' selected':''}>追加</option>
+                  <option value="prepend"${userEdit.mode==='prepend'?' selected':''}>前置</option>
+                </select>
+                <textarea rows="2" data-field="userContent" placeholder="支持 {{reply1}}">${userEdit.content||''}</textarea>
+              </div>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>用户楼层改写</label>
+              <div data-edit-list="user">${this._renderTurnEditList(step?.patches?.turnUsers||[],'user',idx)}</div>
+              <button type="button" class="btn small" data-action="add-turn-edit" data-role="user" data-step-idx="${idx}">+ 添加用户楼层改写</button>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>助手楼层改写</label>
+              <div data-edit-list="assistant">${this._renderTurnEditList(step?.patches?.turnAssistants||[],'assistant',idx)}</div>
+              <button type="button" class="btn small" data-action="add-turn-edit" data-role="assistant" data-step-idx="${idx}">+ 添加助手楼层改写</button>
+            </div>
+            <div class="field" style="grid-template-columns:1fr">
+              <label>步骤回复正则处理</label>
+              <div data-reply-regex-list="step">${this._renderStepReplyRegexRules(replyRegexRules,idx)}</div>
+              <button type="button" class="btn small" data-action="add-reply-regex" data-step-idx="${idx}">+ 添加回复正则</button>
+              <div style="font-size:11px;color:var(--muted);margin-top:.35rem">仅处理该步骤的输出内容，可与全局正则叠加。</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+    container.innerHTML=html;
+  }
+
+  collectMultiStepStepsFromDOM(options={}){
+    const includeEmptyEdits=!!options.includeEmptyEdits;
+    const container=Utils.$('#multiStepRunnerStepsContainer');
+    if(!container)return [];
+    const stepEls=container.querySelectorAll('[data-step-card]');
+    const steps=[];
+    stepEls.forEach(stepEl=>{
+      const step={};
+      const name=stepEl.querySelector('[data-field="name"]')?.value.trim();
+      if(name)step.name=name;
+      const presetName=stepEl.querySelector('[data-field="presetName"]')?.value.trim();
+      if(presetName)step.presetName=presetName;
+      const isFinal=stepEl.querySelector('[data-field="isFinal"]')?.checked;
+      if(isFinal)step.isFinal=true;
+      const systemContent=stepEl.querySelector('[data-field="systemContent"]')?.value??'';
+      const systemMode=stepEl.querySelector('[data-field="systemMode"]')?.value||'replace';
+      if(systemMode!=='keep'&&systemContent.trim()!==''){
+        step.system={mode:systemMode,content:systemContent};
+      }
+      const historyMode=stepEl.querySelector('[data-field="historyMode"]')?.value||'all';
+      if(historyMode!=='all'){
+        step.history={mode:historyMode};
+        if(historyMode==='range'){
+          const start=parseInt(stepEl.querySelector('[data-field="rangeStart"]')?.value,10);
+          const end=parseInt(stepEl.querySelector('[data-field="rangeEnd"]')?.value,10);
+          if(Number.isFinite(start))step.history.start=start;
+          if(Number.isFinite(end))step.history.end=end;
+        }else if(historyMode==='latest'){
+          const count=parseInt(stepEl.querySelector('[data-field="latestCount"]')?.value,10);
+          if(Number.isFinite(count))step.history.count=count;
+        }
+      }
+      const userContent=stepEl.querySelector('[data-field="userContent"]')?.value??'';
+      const userMode=stepEl.querySelector('[data-field="userMode"]')?.value||'replace';
+      if(userMode!=='keep'&&userContent.trim()!==''){
+        step.user={mode:userMode,content:userContent};
+      }
+      const userEdits=[];
+      stepEl.querySelectorAll('[data-edit-role="user"]').forEach(editEl=>{
+        const turn=parseInt(editEl.querySelector('[data-field="turn"]')?.value,10);
+        const mode=editEl.querySelector('[data-field="mode"]')?.value||'replace';
+        const content=editEl.querySelector('[data-field="content"]')?.value??'';
+        if(Number.isFinite(turn)){
+          if(includeEmptyEdits||(mode!=='keep'&&content.trim()!=='')){
+            userEdits.push({turn,mode,content});
+          }
+        }
+      });
+      const assistantEdits=[];
+      stepEl.querySelectorAll('[data-edit-role="assistant"]').forEach(editEl=>{
+        const turn=parseInt(editEl.querySelector('[data-field="turn"]')?.value,10);
+        const mode=editEl.querySelector('[data-field="mode"]')?.value||'replace';
+        const content=editEl.querySelector('[data-field="content"]')?.value??'';
+        if(Number.isFinite(turn)){
+          if(includeEmptyEdits||(mode!=='keep'&&content.trim()!=='')){
+            assistantEdits.push({turn,mode,content});
+          }
+        }
+      });
+      if(userEdits.length||assistantEdits.length){
+        step.patches={};
+        if(userEdits.length)step.patches.turnUsers=userEdits;
+        if(assistantEdits.length)step.patches.turnAssistants=assistantEdits;
+      }
+      const replyRegexRules=[];
+      stepEl.querySelectorAll('[data-reply-regex-idx]').forEach(ruleEl=>{
+        const pattern=ruleEl.querySelector('[data-field="replyRegexPattern"]')?.value.trim()||'';
+        const replacement=ruleEl.querySelector('[data-field="replyRegexReplacement"]')?.value??'';
+        if(pattern||includeEmptyEdits){
+          replyRegexRules.push({pattern,replacement});
+        }
+      });
+      if(replyRegexRules.length){
+        step.replyRegexRules=replyRegexRules;
+      }
+      steps.push(step);
+    });
+    return steps;
+  }
+
+  addMultiStepStep(){
+    const editing=this.state.get('editingPromptPreset');
+    if(!editing){
+      ErrorHandler.show('请先选择一个提示词预设');
+      return;
+    }
+    if(this._multiStepAddLocked){
+      return;
+    }
+    this._multiStepAddLocked=true;
+    setTimeout(()=>{ this._multiStepAddLocked=false; },150);
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
+    steps.push({history:{mode:'all'},patches:{turnUsers:[],turnAssistants:[]}});
+    this.renderMultiStepSteps(steps);
+  }
+
+  removeMultiStepStep(idx){
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
+    if(idx>=0&&idx<steps.length){
+      steps.splice(idx,1);
+      this.renderMultiStepSteps(steps);
+    }
+  }
+
+  addMultiStepTurnEdit(stepIdx,role){
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
+    if(!steps[stepIdx])return;
+    if(!steps[stepIdx].patches)steps[stepIdx].patches={};
+    const list=role==='assistant'?'turnAssistants':'turnUsers';
+    if(!Array.isArray(steps[stepIdx].patches[list]))steps[stepIdx].patches[list]=[];
+    steps[stepIdx].patches[list].push({turn:1,mode:'replace',content:''});
+    this.renderMultiStepSteps(steps);
+  }
+
+  addMultiStepReplyRegex(stepIdx){
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
+    if(!steps[stepIdx])return;
+    if(!Array.isArray(steps[stepIdx].replyRegexRules)){
+      steps[stepIdx].replyRegexRules=[];
+    }
+    steps[stepIdx].replyRegexRules.push({pattern:'',replacement:''});
+    this.renderMultiStepSteps(steps);
+  }
+
+  removeMultiStepTurnEdit(stepIdx,role,editIdx){
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
+    const list=role==='assistant'?'turnAssistants':'turnUsers';
+    const edits=steps[stepIdx]?.patches?.[list];
+    if(Array.isArray(edits)&&editIdx>=0&&editIdx<edits.length){
+      edits.splice(editIdx,1);
+      this.renderMultiStepSteps(steps);
+    }
+  }
+
+  removeMultiStepReplyRegex(stepIdx,ruleIdx){
+    const steps=this.collectMultiStepStepsFromDOM({includeEmptyEdits:true});
+    const rules=steps[stepIdx]?.replyRegexRules;
+    if(Array.isArray(rules)&&ruleIdx>=0&&ruleIdx<rules.length){
+      rules.splice(ruleIdx,1);
+      this.renderMultiStepSteps(steps);
+    }
+  }
+
+  updateHistoryFieldsForStep(stepEl,mode){
+    const rangeEl=stepEl.querySelector('[data-history-range]');
+    const latestEl=stepEl.querySelector('[data-history-latest]');
+    if(rangeEl)rangeEl.style.display=mode==='range'?'grid':'none';
+    if(latestEl)latestEl.style.display=mode==='latest'?'block':'none';
+  }
+
+  updateMultiStepInputState(enabled){
+    const prefixEl=Utils.$('#messagePrefix');
+    const prefillEl=Utils.$('#assistantPrefill');
+    [prefixEl,prefillEl].forEach(el=>{
+      if(!el)return;
+      el.disabled=!!enabled;
+      if(enabled){
+        el.dataset.prevPlaceholder=el.placeholder||'';
+        el.placeholder='多步编排启用时不生效';
+      }else if(el.dataset.prevPlaceholder){
+        el.placeholder=el.dataset.prevPlaceholder;
+        delete el.dataset.prevPlaceholder;
+      }
+    });
   }
   
   renderRegexRules(rules){
@@ -3785,6 +4528,55 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
 
     container.innerHTML=html;
 
+  }
+
+  renderApiLogs(){
+    const container=Utils.$('#apiLogsContainer');
+    if(!container)return;
+    const logs=this.api?.getDebugLogs?.()||[];
+    if(logs.length===0){
+      container.innerHTML='<div style="color:var(--muted);font-size:12px">暂无日志。</div>';
+      return;
+    }
+    container.innerHTML='';
+    const fragment=document.createDocumentFragment();
+    logs.forEach(entry=>{
+      const details=document.createElement('details');
+      details.style.cssText='border:1px solid var(--border);border-radius:.65rem;padding:.7rem .8rem;margin-bottom:.6rem;background:rgba(18,20,27,.7)';
+      const summary=document.createElement('summary');
+      summary.style.cssText='cursor:pointer;font-size:12px;font-weight:600;color:var(--fg);display:flex;justify-content:space-between;gap:.5rem';
+      const left=document.createElement('span');
+      const provider=entry?.provider||'api';
+      const status=entry?.status||'unknown';
+      const start=entry?.startedAt?new Date(entry.startedAt).toLocaleString():'';
+      left.textContent=`${provider} · ${status.toUpperCase()}${start?` · ${start}`:''}`;
+      summary.appendChild(left);
+      details.appendChild(summary);
+
+      const reqBlock=document.createElement('pre');
+      reqBlock.style.cssText='white-space:pre-wrap;font-size:11px;color:var(--muted);margin:.6rem 0 0';
+      const requestPayload={url:entry?.url||'',...(entry?.request||{})};
+      reqBlock.textContent=`请求:\n${JSON.stringify(requestPayload,null,2)}`;
+
+      const resBlock=document.createElement('pre');
+      resBlock.style.cssText='white-space:pre-wrap;font-size:11px;color:var(--muted);margin:.6rem 0 0';
+      const responsePayload=entry?.response??(entry?.error?{error:entry.error}:null);
+      resBlock.textContent=`响应:\n${JSON.stringify(responsePayload??{},null,2)}`;
+
+      details.appendChild(reqBlock);
+      details.appendChild(resBlock);
+      fragment.appendChild(details);
+    });
+    container.appendChild(fragment);
+  }
+
+  setApiLogEnabled(enabled){
+    this.api?.setDebugLogging?.(enabled);
+    const select=Utils.$('#apiLogEnabled');
+    if(select)select.value=enabled?'true':'false';
+    if(!enabled){
+      this.renderApiLogs();
+    }
   }
 
   addRegexRule(){
@@ -3867,6 +4659,21 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       })):
       [];
 
+    const runnerEnabled=Utils.$('#multiStepRunnerEnabled')?.value==='true';
+    const runnerSteps=this.collectMultiStepStepsFromDOM();
+    if(runnerEnabled){
+      try{
+        this.api.validateMultiStepRunnerSteps(runnerSteps,{
+          baseSystem:Utils.$('#sysPrompt')?.value.trim()||'',
+          baseUser:'示例用户输入',
+          messagePrefix:''
+        });
+      }catch(err){
+        ErrorHandler.show(`多步编排配置错误: ${err.message||err}`);
+        return;
+      }
+    }
+
     presets[key]={
       name:name,
       sysPrompt:Utils.$('#sysPrompt')?.value.trim()||'',
@@ -3874,6 +4681,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       firstAssistant:Utils.$('#firstAssistant')?.value.trim()||'',
       messagePrefix:Utils.$('#messagePrefix')?.value.trim()||'',
       assistantPrefill:Utils.$('#assistantPrefill')?.value.trim()||'',
+      multiStepRunner:{enabled:runnerEnabled,steps:runnerSteps},
       regexRules:regexRules
     };
 
@@ -3901,6 +4709,21 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const nameInput=Utils.$('#promptPresetName');
     const name=nameInput?.value.trim()||presets[editing].name;
 
+    const runnerEnabled=Utils.$('#multiStepRunnerEnabled')?.value==='true';
+    const runnerSteps=this.collectMultiStepStepsFromDOM();
+    if(runnerEnabled){
+      try{
+        this.api.validateMultiStepRunnerSteps(runnerSteps,{
+          baseSystem:Utils.$('#sysPrompt')?.value.trim()||'',
+          baseUser:'示例用户输入',
+          messagePrefix:''
+        });
+      }catch(err){
+        ErrorHandler.show(`多步编排配置错误: ${err.message||err}`);
+        return;
+      }
+    }
+
     presets[editing]={
       name:name,
       sysPrompt:Utils.$('#sysPrompt')?.value.trim()||'',
@@ -3908,6 +4731,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       firstAssistant:Utils.$('#firstAssistant')?.value.trim()||'',
       messagePrefix:Utils.$('#messagePrefix')?.value.trim()||'',
       assistantPrefill:Utils.$('#assistantPrefill')?.value.trim()||'',
+      multiStepRunner:{enabled:runnerEnabled,steps:runnerSteps},
       regexRules:(this.promptPresetDraft&&Array.isArray(this.promptPresetDraft.regexRules))?
         this.promptPresetDraft.regexRules.map(rule=>({
           name:rule?.name||'',
@@ -3950,6 +4774,9 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     Utils.$('#firstAssistant').value='';
     Utils.$('#messagePrefix').value='';
     Utils.$('#assistantPrefill').value='';
+    if(Utils.$('#multiStepRunnerEnabled'))Utils.$('#multiStepRunnerEnabled').value='false';
+    this.updateMultiStepInputState(false);
+    this.renderMultiStepSteps([]);
 
     this.renderPromptPresetList();
     this.updatePromptEditingHint();
@@ -4216,7 +5043,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     
     this.state.set('promptPresets',{
       'default':{name:'默认预设',sysPrompt:'',firstUser:'',firstAssistant:'',
-        messagePrefix:'',assistantPrefill:'',regexRules:[]}
+        messagePrefix:'',assistantPrefill:'',regexRules:[],
+        multiStepRunner:{enabled:false,steps:[]}}
     });
     
     this.state.set('sessions',{});
@@ -4425,10 +5253,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   bindMessageEvents(){
     const messages=Utils.$('#messages');
     if(!messages)return;
+    this.followBottom=this.isAtBottom(messages);
     
     this.events.on(messages,'click',(e)=>{
       const btn=e.target.closest('button[data-act]');
       if(!btn)return;
+
+      if(btn.dataset.act==='load-older'){
+        this.loadEarlierMessages();
+        return;
+      }
       
       if(this.isSending&&btn.dataset.act!=='cancel-edit'){
         ErrorHandler.show('请等待当前消息发送完成');
@@ -4451,6 +5285,9 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         
         this.preserveScroll(()=>{
           session.history.splice(msgIdx,1);
+          if(msgIdx<this._renderStartIndex){
+            this._renderStartIndex=Math.max(0,this._renderStartIndex-1);
+          }
           const el=this.messageElements.get(msgId);
           if(el){
             this.animateOut(el).then(()=>{
@@ -4459,10 +5296,12 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
               this.messageElements.delete(msgId);
               this.renumberMessagesFrom(Math.max(0,msgIdx));
               const box=Utils.$('#messages');
-              if(box){ this.updateLoadTip(box,this.windowManager.window); }
+              if(box){
+                this.updateLoadOlderButton(box);
+                this.onMessagesMutated();
+              }
             });
           }
-          this.windowManager.evaluate(session.history.length);
           this.state.markSessionsDirty(this.state.get('currentId'));
         });
 
@@ -4512,8 +5351,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
             this.messageElements.delete(msg.id);
           }
         });
-        
-        this.windowManager.evaluate(session.history.length);
+
+        if(actualIdx<this._renderStartIndex){
+          const removedCount=removedMsgs.length;
+          this._renderStartIndex=Math.max(0,this._renderStartIndex-removedCount);
+        }
+        const box=Utils.$('#messages');
+        if(box){
+          this.updateLoadOlderButton(box);
+          this.onMessagesMutated();
+        }
         this.state.markSessionsDirty(this.state.get('currentId'));
         this.sendMessage();
         
@@ -4527,7 +5374,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       this._pendingFoldCheck=true;
       requestAnimationFrame(()=>{
         this._pendingFoldCheck=false;
-        this.maybeCollapseEarlierOnScroll(messages);
+        this.followBottom=this.isAtBottom(messages);
       });
     },{passive:true});
   }
@@ -4712,6 +5559,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   }
   
   bindSettingsEvents(){
+    if(this._settingsEventsBound)return;
+    this._settingsEventsBound=true;
     const tabs=Utils.$('#dlgSettings .tabs');
     if(tabs){
       this.events.on(tabs,'click',(e)=>{
@@ -4791,6 +5640,92 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     
     const btnAddRegexRule=Utils.$('#btnAddRegexRule');
     if(btnAddRegexRule)this.events.on(btnAddRegexRule,'click',()=>this.addRegexRule());
+
+    const apiLogEnabled=Utils.$('#apiLogEnabled');
+    if(apiLogEnabled){
+      this.events.on(apiLogEnabled,'change',()=>{
+        const enabled=apiLogEnabled.value==='true';
+        this.setApiLogEnabled(enabled);
+      });
+    }
+
+    const btnShowApiLogs=Utils.$('#btnShowApiLogs');
+    if(btnShowApiLogs){
+      this.events.on(btnShowApiLogs,'click',()=>{
+        this.renderApiLogs();
+        Utils.$('#dlgApiLogs')?.showModal();
+      });
+    }
+
+    const btnClearApiLogs=Utils.$('#btnClearApiLogs');
+    if(btnClearApiLogs){
+      this.events.on(btnClearApiLogs,'click',()=>{
+        this.api?.clearDebugLogs?.();
+        this.renderApiLogs();
+        ErrorHandler.show('日志已清空',2000);
+      });
+    }
+
+    const btnCloseApiLogs=Utils.$('#btnCloseApiLogs');
+    if(btnCloseApiLogs){
+      this.events.on(btnCloseApiLogs,'click',()=>{
+        Utils.$('#dlgApiLogs')?.close();
+      });
+    }
+
+    const btnAddMultiStepStep=Utils.$('#btnAddMultiStepStep');
+    if(btnAddMultiStepStep&&!btnAddMultiStepStep.dataset.bound){
+      btnAddMultiStepStep.dataset.bound='true';
+      this.events.on(btnAddMultiStepStep,'click',(e)=>{
+        e.preventDefault();
+        e.stopPropagation();
+        this.addMultiStepStep();
+      });
+    }
+
+    const multiStepEnabled=Utils.$('#multiStepRunnerEnabled');
+    if(multiStepEnabled){
+      this.events.on(multiStepEnabled,'change',()=>{
+        const enabled=multiStepEnabled.value==='true';
+        this.updateMultiStepInputState(enabled);
+      });
+    }
+
+    const multiStepContainer=Utils.$('#multiStepRunnerStepsContainer');
+    if(multiStepContainer&&!multiStepContainer.dataset.bound){
+      multiStepContainer.dataset.bound='true';
+      this.events.on(multiStepContainer,'click',(e)=>{
+        const actionBtn=e.target.closest('[data-action]');
+        if(!actionBtn)return;
+        e.preventDefault();
+        e.stopPropagation();
+        const action=actionBtn.dataset.action;
+        const stepHolder=actionBtn.closest('[data-step-card]');
+        const stepIdx=parseInt(actionBtn.dataset.stepIdx ?? stepHolder?.dataset.stepIdx,10);
+        if(action==='remove-step'){
+          if(!isNaN(stepIdx))this.removeMultiStepStep(stepIdx);
+        }else if(action==='add-turn-edit'){
+          const role=actionBtn.dataset.role;
+          if(!isNaN(stepIdx)&&role)this.addMultiStepTurnEdit(stepIdx,role);
+        }else if(action==='remove-turn-edit'){
+          const role=actionBtn.dataset.role;
+          const editIdx=parseInt(actionBtn.dataset.editIdx,10);
+          if(!isNaN(stepIdx)&&!isNaN(editIdx)&&role)this.removeMultiStepTurnEdit(stepIdx,role,editIdx);
+        }else if(action==='add-reply-regex'){
+          if(!isNaN(stepIdx))this.addMultiStepReplyRegex(stepIdx);
+        }else if(action==='remove-reply-regex'){
+          const ruleIdx=parseInt(actionBtn.dataset.regexIdx,10);
+          if(!isNaN(stepIdx)&&!isNaN(ruleIdx))this.removeMultiStepReplyRegex(stepIdx,ruleIdx);
+        }
+      });
+
+      this.events.on(multiStepContainer,'change',(e)=>{
+        if(e.target.matches('[data-field="historyMode"]')){
+          const stepEl=e.target.closest('[data-step-card]');
+          if(stepEl)this.updateHistoryFieldsForStep(stepEl,e.target.value);
+        }
+      });
+    }
     
     const regexContainer=Utils.$('#regexRulesContainer');
     if(regexContainer){
