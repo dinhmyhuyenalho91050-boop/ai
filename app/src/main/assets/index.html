@@ -215,7 +215,7 @@
   }
   /* During viewport freeze, lock height and disable scroll anchoring that can cause jumps */
   body.vp-freeze #app{height:var(--vp-lock-h,100dvh)}
-  #messages{overflow-anchor:auto}
+  #messages{overflow-anchor:none}
   body.vp-freeze #messages{overflow-anchor:none}
   /* Avoid transitions fighting during viewport changes */
   body.vp-freeze *{scroll-behavior:auto !important}
@@ -251,11 +251,6 @@
 */
 
 /* === Performance patch (strict, no fallback) === */
-.msg:not([data-streaming="1"]){
-  contain: content;             /* layout+paint+style isolation to reduce reflow/paint */
-  content-visibility: auto;     /* skip layout/paint when offscreen */
-  contain-intrinsic-size: 0 140px; /* estimated height to avoid scroll jump on first reveal */
-}
 /* === End of performance patch === */
 </style>
 <style>
@@ -531,6 +526,10 @@ const CONFIG={
     sessionsSnapshot:'migration'
   }
 };
+
+const KEEP_LAST=10;
+const LOAD_BATCH=10;
+const BOTTOM_THRESHOLD=6;
 
 const RX_PATTERNS={
   quote:/[""\u201C\u201D\uFF02]([^""\u201C\u201D\uFF02]+?)[""\u201C\u201D\uFF02]/g,
@@ -2937,6 +2936,9 @@ class UIManager{
     this._appHidden=(window.__APP_VISIBILITY__==='background')||!!document.hidden;
     this._currentBatcher=null;
     this._pendingFoldCheck=false;
+    this.followBottom=true;
+    this._pendingMutate=false;
+    this._renderStartIndex=0;
 
     window._sanitizer=this.sanitizer;
 
@@ -3081,13 +3083,14 @@ class UIManager{
   }
   finalizeTypingAndAppend(typing,msg){
     const box=Utils.$('#messages');
-    const shouldStick=box?this.isAtBottom(box):false;
+    const shouldStick=!!this.followBottom;
     const applyChange=()=>{
       if(typing){
         this.removeTyping(typing);
       }
       this.appendMessage(msg);
       if(typeof this.flushUpdates==='function') this.flushUpdates();
+      this.onMessagesMutated();
     };
     if(!box){
       applyChange();
@@ -3269,78 +3272,34 @@ class UIManager{
     
     const history=session.history||[];
     const total=history.length;
-    this.windowManager.evaluate(total);
-    
-    const win=this.windowManager.window;
+    if(scrollToBottom) this.followBottom=true;
 
-    // 预先建立当前窗口内消息id到索引的映射，避免在遍历节点时重复扫描history
-    const idToIndex=new Map();
-    if(win&&Number.isInteger(win.start)&&Number.isInteger(win.end)){
-      for(let i=win.start;i<=win.end;i++){
-        const msg=history[i];
-        if(msg&&msg.id)idToIndex.set(msg.id,i);
-      }
-    }
-
-    // ✅ 移除窗口外的元素 - 使用msgId遍历
-    const toRemove=[];
-    for(let[msgId,el]of this.messageElements){
-      // Find the index of this message in current history
-      const msgIdx=idToIndex.has(msgId)?idToIndex.get(msgId):-1;
-      if(msgIdx===-1||msgIdx<win.start||msgIdx>win.end){
-        toRemove.push({msgId,el});
-      }
-    }
-    
-    const prevScrollHeight=box.scrollHeight;
-    const prevScrollTop=box.scrollTop;
-    
-    // ✅ 检查要移除的消息中是否有正在编辑的
     if(this.editingState){
-      const isEditingBeingRemoved=toRemove.some(({msgId})=>msgId===this.editingState.msgId);
-      if(isEditingBeingRemoved){
-        this.autoSaveEditingMessage();
-      }
+      this.autoSaveEditingMessage();
     }
-    
-    toRemove.forEach(({msgId,el})=>{
+
+    box.innerHTML='';
+    for(const [msgId,el] of this.messageElements){
       this.domPool.release('article',el);
-      el.remove();
-      this.messageElements.delete(msgId);
-    });
-    
-    const scrollAdjust=prevScrollHeight-box.scrollHeight;
-    if(scrollAdjust>0&&!scrollToBottom){
-      box.scrollTop=Math.max(0,prevScrollTop-scrollAdjust);
     }
-    
-    // 添加新元素 - 使用msgId检查是否已存在
+    this.messageElements.clear();
+
+    const start=Math.max(0,total-KEEP_LAST);
+    this._renderStartIndex=start;
+
     const fragment=document.createDocumentFragment();
-    const __addedEls=[];
-    for(let i=win.start;i<=win.end;i++){
+    for(let i=start;i<total;i++){
       const msg=history[i];
-      if(msg&&!this.messageElements.has(msg.id)){
-        const el=this.buildMessageElement(msg,i);
-        this.messageElements.set(msg.id,el);
-        fragment.appendChild(el);
-        __addedEls.push(el);
-      }
+      if(!msg)continue;
+      const el=this.buildMessageElement(msg,i);
+      this.messageElements.set(msg.id,el);
+      fragment.appendChild(el);
     }
-    
-    if(fragment.childNodes.length){
-      box.appendChild(fragment);
-      __addedEls.forEach(el=>this.animateIn(el));
-    }
-    
-    this.updateLoadTip(box,win);
-    
-    if(scrollToBottom){
-      if(!this._suppressAutoStick){
-        requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
-        this.ensureBottom(1, 140);
-      }else{
-        this._pendingStick=true;
-      }
+    box.appendChild(fragment);
+    this.updateLoadOlderButton(box);
+
+    if(scrollToBottom||this.followBottom){
+      requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
     }
   }
   
@@ -3415,90 +3374,38 @@ class UIManager{
     return el;
   }
   
-  updateLoadTip(box,win){
+  updateLoadOlderButton(box){
     const tipEl=box.querySelector('.load-older');
     if(tipEl)tipEl.remove();
-
-    if(win.enabled&&win.start>0&&!this.isLoadingEarlier&&!this._pendingAutoLoad&&!this.isNearBottom(box)){
-      this._pendingAutoLoad=true;
-      requestAnimationFrame(()=>{
-        this._pendingAutoLoad=false;
-        this.loadEarlierMessages();
-      });
-    }
-  }
-
-  maybeCollapseEarlierOnScroll(box){
-    if(!box||this.isLoadingEarlier)return;
-
-    const win=this.windowManager?.window;
-    if(!win||!win.enabled)return;
-    if(!this.isNearBottom(box))return;
-
-    const session=this.state.getActiveSession();
-    const history=session?.history||[];
-    const total=history.length;
-    if(!total)return;
-
-    const prevStart=win.start;
-    this.windowManager.appendNew(total,true);
-    const targetStart=this.windowManager.window.start;
-    if(targetStart<=prevStart)return;
-
-    if(this.editingState){
-      const editingIdx=history.findIndex(m=>m.id===this.editingState.msgId);
-      if(editingIdx>-1&&editingIdx<targetStart){
-        this.windowManager.window.start=prevStart;
-        return;
-      }
-    }
-
-    let removed=false;
-    for(let i=0;i<targetStart;i++){
-      const msg=history[i];
-      if(!msg)continue;
-      const el=this.messageElements.get(msg.id);
-      if(!el)continue;
-      this.domPool.release('article',el);
-      el.remove();
-      this.messageElements.delete(msg.id);
-      removed=true;
-    }
-
-    if(removed){
-      const sentinel=box.querySelector('.top-sentinel');
-      if(sentinel){
-        box.insertBefore(sentinel,box.firstChild);
-      }
-      requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
-    }
-
-    this.updateLoadTip(box,this.windowManager.window);
+    if(this._renderStartIndex<=0)return;
+    const tip=document.createElement('div');
+    tip.className='load-older';
+    tip.innerHTML=`<div class="info">还有 ${this._renderStartIndex} 条更早消息</div><button class="btn small" type="button" data-act="load-older">查看更早消息</button>`;
+    box.insertBefore(tip,box.firstChild);
   }
 
   loadEarlierMessages(){
     if(this.isLoadingEarlier)return;
     this.isLoadingEarlier=true;
-    
+
     const session=this.state.getActiveSession();
     const box=Utils.$('#messages');
     if(!session||!box){
       this.isLoadingEarlier=false;
       return;
     }
-    
-    const info=this.windowManager.loadEarlier();
-    if(!info){
+
+    const history=session.history||[];
+    if(this._renderStartIndex<=0){
       this.isLoadingEarlier=false;
       return;
     }
-    
-    const{newStart,oldStart}=info;
-    const history=session.history;
-    
+
+    const oldStart=this._renderStartIndex;
+    const newStart=Math.max(0,oldStart-LOAD_BATCH);
+
     const prevHeight=box.scrollHeight;
-    const prevTop=box.scrollTop;
-    
+
     const fragment=document.createDocumentFragment();
     for(let i=newStart;i<oldStart;i++){
       const msg=history[i];
@@ -3508,67 +3415,64 @@ class UIManager{
         fragment.appendChild(el);
       }
     }
-    
-    const sentinel=box.querySelector('.top-sentinel');
-    if(sentinel){
-      const anchor=sentinel.nextSibling;
-      if(anchor){
-        box.insertBefore(fragment,anchor);
-      }else{
-        box.appendChild(fragment);
-      }
-      box.insertBefore(sentinel,box.firstChild);
+
+    const tip=box.querySelector('.load-older');
+    const anchor=tip?tip.nextSibling:box.firstChild;
+    if(anchor){
+      box.insertBefore(fragment,anchor);
     }else{
-      const anchor=box.firstChild;
-      if(anchor){
-        box.insertBefore(fragment,anchor);
-      }else{
-        box.appendChild(fragment);
-      }
+      box.appendChild(fragment);
     }
 
     const delta=box.scrollHeight-prevHeight;
-    box.scrollTop=prevTop+delta;
+    box.scrollTop+=delta;
 
+    this._renderStartIndex=newStart;
+    this.followBottom=this.isAtBottom(box);
     this.isLoadingEarlier=false;
-    this.updateLoadTip(box,this.windowManager.window);
+    this.updateLoadOlderButton(box);
   }
   
   setupTopObserver(){
     const box=Utils.$('#messages');
-    if(!box||!('IntersectionObserver'in window))return;
-    
-    let sentinel=box.querySelector('.top-sentinel');
-    if(!sentinel){
-      sentinel=document.createElement('div');
-      sentinel.className='top-sentinel sentinel';
-    }
-    
-    this.observerMgr.cleanup('message-top');
-    const observer=this.observerMgr.create('message-top',box,(entry)=>{
-      if(!entry.isIntersecting)return;
-      
-      const win=this.windowManager.window;
-      if(!win.enabled||win.start<=0||this.isLoadingEarlier)return;
-      
-      this.loadEarlierMessages();
-      
-      const tip=box.querySelector('.load-older');
-      const anchor=tip?tip.nextElementSibling:box.firstChild;
-      if(sentinel.nextSibling!==anchor&&anchor){
-        box.insertBefore(sentinel,anchor);
+    if(!box)return;
+    this.updateLoadOlderButton(box);
+  }
+
+  pruneOldMessages(){
+    const box=Utils.$('#messages');
+    if(!box)return;
+    if(!this.followBottom||!this.isAtBottom(box))return;
+    const nodes=Array.from(box.querySelectorAll('.msg'));
+    if(nodes.length<=KEEP_LAST)return;
+    const removeCount=nodes.length-KEEP_LAST;
+    for(let i=0;i<removeCount;i++){
+      const el=nodes[i];
+      const msgId=el?.dataset?.msgId;
+      if(msgId&&this.messageElements.has(msgId)){
+        this.messageElements.delete(msgId);
       }
-    },{threshold:0,rootMargin:'50px'});
-    
-    const tip=box.querySelector('.load-older');
-    const anchor=tip?tip.nextElementSibling:box.firstChild;
-    if(anchor){
-      box.insertBefore(sentinel,anchor);
-    }else{
-      box.insertBefore(sentinel,box.firstChild);
+      this.domPool.release('article',el);
+      el.remove();
     }
-    
-    this.observerMgr.observe('message-top',sentinel);
+    const session=this.state.getActiveSession();
+    const history=session?.history||[];
+    this._renderStartIndex=Math.max(0,history.length-KEEP_LAST);
+    box.scrollTop=box.scrollHeight;
+    this.updateLoadOlderButton(box);
+  }
+
+  onMessagesMutated(){
+    if(this._pendingMutate)return;
+    this._pendingMutate=true;
+    requestAnimationFrame(()=>{
+      this._pendingMutate=false;
+      const box=Utils.$('#messages');
+      if(box&&this.followBottom){
+        box.scrollTop=box.scrollHeight;
+      }
+      requestAnimationFrame(()=>this.pruneOldMessages());
+    });
   }
   
   // ✅ 核心改进：批量更新
@@ -3600,60 +3504,16 @@ class UIManager{
     if(!session)return;
 
     const history=session.history;
-    const total=history.length;
     const box=Utils.$('#messages');
     if(!box)return;
-
-    const isNearBottom=this.isNearBottom(box);
-    const isAtBottom=this.isAtBottom(box);
-    const prevScrollHeight=box.scrollHeight;
-    const prevScrollTop=box.scrollTop;
-
-    this.windowManager.appendNew(total,isNearBottom);
-
-    const win=this.windowManager.window;
     const fragment=document.createDocumentFragment();
     const __addedEls=[];
 
-    const start=Math.max(0,win.start|0);
-    const end=Math.min(total-1,win.end|0);
-    const visibleIndexMap=new Map();
-
-    for(let i=start;i<=end;i++){
-      const msg=history[i];
-      if(msg&&msg.id){
-        visibleIndexMap.set(msg.id,i);
-      }
-    }
-
-    const toRemove=[];
-    for(const[msgId,el]of this.messageElements){
-      const idx=visibleIndexMap.get(msgId);
-      if(idx===undefined){
-        toRemove.push({msgId,el});
-      }
-    }
-
-    if(this.editingState){
-      const isEditingBeingRemoved=toRemove.some(({msgId})=>msgId===this.editingState.msgId);
-      if(isEditingBeingRemoved){
-        this.autoSaveEditingMessage();
-      }
-    }
-
-    toRemove.forEach(({msgId,el})=>{
-      this.domPool.release('article',el);
-      el.remove();
-      this.messageElements.delete(msgId);
-    });
-
     for(const msgId of this.pendingUpdates){
-      const idx=visibleIndexMap.get(msgId);
-      if(idx===undefined)continue;
-
+      const idx=history.findIndex(m=>m.id===msgId);
+      if(idx===-1)continue;
       const msg=history[idx];
       if(!msg||this.messageElements.has(msgId))continue;
-
       const el=this.buildMessageElement(msg,idx);
       this.messageElements.set(msgId,el);
       fragment.appendChild(el);
@@ -3665,19 +3525,9 @@ class UIManager{
       __addedEls.forEach(el=>this.animateIn(el));
     }
 
-    const scrollAdjust=prevScrollHeight-box.scrollHeight;
-    if(scrollAdjust>0 && !isNearBottom){
-      box.scrollTop=Math.max(0,prevScrollTop-scrollAdjust);
-    }else if(isAtBottom){
-      if(!this._suppressAutoStick){
-        requestAnimationFrame(()=>{ box.scrollTop=box.scrollHeight; });
-      }else{
-        this._pendingStick=true;
-      }
-    }
-
-    this.updateLoadTip(box,win);
     this.pendingUpdates.clear();
+    this.updateLoadOlderButton(box);
+    this.onMessagesMutated();
   }
   
   renderSidebar(){
@@ -4040,6 +3890,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           });
         }
       }
+      this.onMessagesMutated();
     }
   }
   
@@ -4110,7 +3961,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     return(box.scrollHeight-(box.scrollTop+box.clientHeight))<=CONFIG.AUTO_FOLLOW_PX;
   }
   isAtBottom(box){
-    return Math.abs(box.scrollHeight-(box.scrollTop+box.clientHeight))<=1;
+    return (box.scrollHeight-box.scrollTop-box.clientHeight)<=BOTTOM_THRESHOLD;
   }
   
   // ... (其余方法保持不变，包括settings相关方法)
@@ -4413,7 +4264,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       const userEdit=typeof step?.user==='string'?{mode:'replace',content:step.user}:{mode:step?.user?.mode||'keep',content:step?.user?.content??step?.user?.text??''};
       const replyRegexRules=Array.isArray(step?.replyRegexRules)?step.replyRegexRules:[];
       return `
-        <div style="border:1px solid var(--border);border-radius:.75rem;padding:.8rem;background:rgba(18,20,27,.75)" data-step-idx="${idx}">
+        <div style="border:1px solid var(--border);border-radius:.75rem;padding:.8rem;background:rgba(18,20,27,.75)" data-step-card data-step-idx="${idx}">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem">
             <div style="font-weight:600;font-size:13px">步骤 ${idx+1}</div>
             <div style="display:flex;gap:.5rem;align-items:center">
@@ -4500,7 +4351,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const includeEmptyEdits=!!options.includeEmptyEdits;
     const container=Utils.$('#multiStepRunnerStepsContainer');
     if(!container)return [];
-    const stepEls=container.querySelectorAll('[data-step-idx]');
+    const stepEls=container.querySelectorAll('[data-step-card]');
     const steps=[];
     stepEls.forEach(stepEl=>{
       const step={};
@@ -5402,10 +5253,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   bindMessageEvents(){
     const messages=Utils.$('#messages');
     if(!messages)return;
+    this.followBottom=this.isAtBottom(messages);
     
     this.events.on(messages,'click',(e)=>{
       const btn=e.target.closest('button[data-act]');
       if(!btn)return;
+
+      if(btn.dataset.act==='load-older'){
+        this.loadEarlierMessages();
+        return;
+      }
       
       if(this.isSending&&btn.dataset.act!=='cancel-edit'){
         ErrorHandler.show('请等待当前消息发送完成');
@@ -5428,6 +5285,9 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         
         this.preserveScroll(()=>{
           session.history.splice(msgIdx,1);
+          if(msgIdx<this._renderStartIndex){
+            this._renderStartIndex=Math.max(0,this._renderStartIndex-1);
+          }
           const el=this.messageElements.get(msgId);
           if(el){
             this.animateOut(el).then(()=>{
@@ -5436,10 +5296,12 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
               this.messageElements.delete(msgId);
               this.renumberMessagesFrom(Math.max(0,msgIdx));
               const box=Utils.$('#messages');
-              if(box){ this.updateLoadTip(box,this.windowManager.window); }
+              if(box){
+                this.updateLoadOlderButton(box);
+                this.onMessagesMutated();
+              }
             });
           }
-          this.windowManager.evaluate(session.history.length);
           this.state.markSessionsDirty(this.state.get('currentId'));
         });
 
@@ -5489,8 +5351,16 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
             this.messageElements.delete(msg.id);
           }
         });
-        
-        this.windowManager.evaluate(session.history.length);
+
+        if(actualIdx<this._renderStartIndex){
+          const removedCount=removedMsgs.length;
+          this._renderStartIndex=Math.max(0,this._renderStartIndex-removedCount);
+        }
+        const box=Utils.$('#messages');
+        if(box){
+          this.updateLoadOlderButton(box);
+          this.onMessagesMutated();
+        }
         this.state.markSessionsDirty(this.state.get('currentId'));
         this.sendMessage();
         
@@ -5504,7 +5374,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       this._pendingFoldCheck=true;
       requestAnimationFrame(()=>{
         this._pendingFoldCheck=false;
-        this.maybeCollapseEarlierOnScroll(messages);
+        this.followBottom=this.isAtBottom(messages);
       });
     },{passive:true});
   }
@@ -5830,7 +5700,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         e.preventDefault();
         e.stopPropagation();
         const action=actionBtn.dataset.action;
-        const stepHolder=actionBtn.closest('[data-step-idx]');
+        const stepHolder=actionBtn.closest('[data-step-card]');
         const stepIdx=parseInt(actionBtn.dataset.stepIdx ?? stepHolder?.dataset.stepIdx,10);
         if(action==='remove-step'){
           if(!isNaN(stepIdx))this.removeMultiStepStep(stepIdx);
@@ -5851,7 +5721,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
 
       this.events.on(multiStepContainer,'change',(e)=>{
         if(e.target.matches('[data-field="historyMode"]')){
-          const stepEl=e.target.closest('[data-step-idx]');
+          const stepEl=e.target.closest('[data-step-card]');
           if(stepEl)this.updateHistoryFieldsForStep(stepEl,e.target.value);
         }
       });
