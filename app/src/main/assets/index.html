@@ -307,48 +307,13 @@
         <button type="button" data-pane="backup">备份</button>
       </nav>
       <div class="pane" id="pane-models">
-        <h2 style="font-size:16px;margin-bottom:1rem">模型预设配置(最多启用2个，可配置6个)</h2>
-        <div class="model-preset-card">
-          <h3>预设1</h3>
-          <div class="field"><label>启用</label><select id="model1Enable"><option value="true">是</option><option value="false">否</option></select></div>
-          <div class="field"><label>显示名称</label><input id="model1Name" placeholder="如: GPT-4"/></div>
-          <div class="field"><label>模型类型</label><select id="model1Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
-          <div id="model1Config"></div>
-        </div>
-        <div class="model-preset-card">
-          <h3>预设2</h3>
-          <div class="field"><label>启用</label><select id="model2Enable"><option value="true">是</option><option value="false">否</option></select></div>
-          <div class="field"><label>显示名称</label><input id="model2Name" placeholder="如: Gemini"/></div>
-          <div class="field"><label>模型类型</label><select id="model2Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
-          <div id="model2Config"></div>
-        </div>
-        <div class="model-preset-card">
-          <h3>预设3</h3>
-          <div class="field"><label>启用</label><select id="model3Enable"><option value="true">是</option><option value="false">否</option></select></div>
-          <div class="field"><label>显示名称</label><input id="model3Name" placeholder="如: Claude"/></div>
-          <div class="field"><label>模型类型</label><select id="model3Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
-          <div id="model3Config"></div>
-        </div>
-        <div class="model-preset-card">
-          <h3>预设4</h3>
-          <div class="field"><label>启用</label><select id="model4Enable"><option value="true">是</option><option value="false">否</option></select></div>
-          <div class="field"><label>显示名称</label><input id="model4Name" placeholder="如: 自定义"/></div>
-          <div class="field"><label>模型类型</label><select id="model4Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
-          <div id="model4Config"></div>
-        </div>
-        <div class="model-preset-card">
-          <h3>预设5</h3>
-          <div class="field"><label>启用</label><select id="model5Enable"><option value="true">是</option><option value="false">否</option></select></div>
-          <div class="field"><label>显示名称</label><input id="model5Name" placeholder="如: 备用A"/></div>
-          <div class="field"><label>模型类型</label><select id="model5Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
-          <div id="model5Config"></div>
-        </div>
-        <div class="model-preset-card">
-          <h3>预设6</h3>
-          <div class="field"><label>启用</label><select id="model6Enable"><option value="true">是</option><option value="false">否</option></select></div>
-          <div class="field"><label>显示名称</label><input id="model6Name" placeholder="如: 备用B"/></div>
-          <div class="field"><label>模型类型</label><select id="model6Type"><option value="openai">OpenAI</option><option value="anthropic">Anthropic兼容</option><option value="deepseek">DeepSeek直连</option><option value="kimi">Kimi</option><option value="gemini">Gemini直连</option><option value="gemini-proxy">Gemini代理</option></select></div>
-          <div id="model6Config"></div>
+        <h2 style="font-size:16px;margin-bottom:1rem">模型预设配置(最多启用2个，数量不限)</h2>
+        <div id="modelPresetContainer" style="display:flex;flex-direction:column;gap:1rem"></div>
+        <div style="display:flex;gap:.75rem;align-items:center;margin-top:.85rem">
+          <button type="button" class="btn small" id="btnAddModelPreset">+ 新增预设</button>
+          <span style="font-size:11px;color:var(--muted);line-height:1.4">
+            提示：主界面仅显示“启用”的预设(仍最多启用2个)；多步编排中也可以选择未启用的预设。
+          </span>
         </div>
       </div>
       <div class="pane" id="pane-prompts" hidden>
@@ -384,7 +349,7 @@
                 <div id="multiStepRunnerStepsContainer" style="display:flex;flex-direction:column;gap:.75rem"></div>
                 <button type="button" class="btn small" id="btnAddMultiStepStep" style="justify-self:start;margin-top:.35rem">+ 添加步骤</button>
                 <div style="font-size:11px;color:var(--muted);margin-top:.4rem;line-height:1.4">
-                  提示：每一步可以指定系统提示、历史楼层范围与最新用户消息改写；从第 2 步开始可使用 {{reply1}}/{{reply2}} 引用前序回复。
+                  提示：楼层=对话列表里每条消息右上角显示的 #编号；回合=一次用户+一次助手(一来一回)。注意：若当前对话的提示词预设配置了「首条用户消息(firstUser)」且对话开头存在一条 assistant（通常是 firstAssistant），则它们也会计为第 1 回合，其中隐藏的 firstUser 记为楼层 #0（对话列表不显示）。多步编排中的「历史选择/回合改写」均按回合编号设置，并会提示对应楼层范围；从第 2 步开始可使用 {{reply1}}/{{reply2}} 引用前序回复。
                 </div>
               </div>
             </div>
@@ -516,7 +481,6 @@ const CONFIG={
   DEBOUNCE_DELAY:300,
   PERSIST_DELAY:800,
   IDLE_TIMEOUT:2000,
-  MODEL_PRESET_SLOTS:6,
   MODEL_ACTIVE_LIMIT:2,
   STORAGE_KEYS:{
     modelPresets:'chat.modelPresets',
@@ -1031,8 +995,19 @@ const Utils={
     if(id==null)return;
     if('cancelIdleCallback'in window)cancelIdleCallback(id);
     else clearTimeout(id);
+  },
+
+  escapeHTML(str){
+    return String(str).replace(/[&<>"']/g,(ch)=>({
+      '&':'&amp;',
+      '<':'&lt;',
+      '>':'&gt;',
+      '"':'&quot;',
+      "'":'&#39;'
+    }[ch]));
   }
 };
+
 
 // ===== StorageManager - ✅ IndexedDB版本：更大容量更好性能 =====
 class StorageManager{
@@ -2081,10 +2056,24 @@ class APIManager{
     return this.regexProcessor?.process?.(content,compiled)??content;
   }
 
-  _buildTurns(history){
+  _buildTurns(session,pc){
     const turns=[];
+    const history=session?.history||[];
+    let startIndex=0;
+
+    // ✅ 将隐藏的 firstUser + 对话开头的 assistant 也视为一个回合（firstUser 为隐藏楼层 #0）
+    const hasHiddenFirstUser=!!(pc?.firstUser && String(pc.firstUser).trim());
+    if(hasHiddenFirstUser && history.length>0 && history[0]?.role==='assistant'){
+      turns.push({
+        user:{role:'user',content:String(pc.firstUser??'')},
+        assistant:{role:'assistant',content:String(history[0].content??'')}
+      });
+      startIndex=1; // 跳过首条 assistant，避免后续配对重复
+    }
+
     let pendingUser=null;
-    for(const msg of history||[]){
+    for(let i=startIndex;i<history.length;i++){
+      const msg=history[i];
       if(msg?.role==='user'){
         pendingUser=msg;
         continue;
@@ -2099,6 +2088,7 @@ class APIManager{
     }
     return turns;
   }
+
 
   _normalizeHistoryConfig(historyConfig){
     if(!historyConfig)return {mode:'all'};
@@ -2220,13 +2210,19 @@ class APIManager{
 
   _resolveStepPreset(step,defaultPreset){
     if(!step)return defaultPreset;
-    const presets=this.state.getActivePresets();
-    const presetName=typeof step.preset==='string'?step.preset:(typeof step.presetName==='string'?step.presetName:'');
+
+    // ✅ 多步编排允许使用“未启用”的预设：这里从全部预设中查找
+    const presets=Array.isArray(this.state.get('modelPresets'))?this.state.get('modelPresets'):[];
+    const presetName=typeof step.preset==='string'
+      ?step.preset
+      :(typeof step.presetName==='string'?step.presetName:'');
+
     if(presetName){
-      const match=presets.find(p=>String(p.name||'').trim()===String(presetName).trim());
-      if(!match)throw new Error(`Step 预设不存在或未启用: ${presetName}`);
+      const match=presets.find(p=>String(p?.name||'').trim()===String(presetName).trim());
+      if(!match)throw new Error(`Step 预设不存在: ${presetName}`);
       return match;
     }
+
     if(Number.isFinite(step.presetIndex)){
       const idx=Math.trunc(step.presetIndex);
       const resolved=idx>=0?idx:presets.length+idx;
@@ -2235,8 +2231,10 @@ class APIManager{
       }
       return presets[resolved];
     }
+
     return defaultPreset;
   }
+
 
   _resolveFinalStepIndex(steps){
     const finalIndices=steps.map((step,idx)=>step?.isFinal?idx:null).filter(idx=>idx!==null);
@@ -2341,7 +2339,7 @@ class APIManager{
     }
 
     const finalIndex=this._resolveFinalStepIndex(runner.steps);
-    const baseTurns=this._buildTurns(session?.history||[]);
+    const baseTurns=this._buildTurns(session,pc);
     const baseSystem=pc.sysPrompt||'';
     const baseUserRaw=this._getLatestUserContent(session);
     const baseUser=baseUserRaw;
@@ -4049,55 +4047,230 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   }
   
   // ... (其余方法保持不变，包括settings相关方法)
-  
+
+  // ===== 模型预设(无限数量) =====
+  _modelTypeOptionsHTML(selected='openai'){
+    const types=[
+      ['openai','OpenAI'],
+      ['anthropic','Anthropic兼容'],
+      ['deepseek','DeepSeek直连'],
+      ['kimi','Kimi'],
+      ['gemini','Gemini直连'],
+      ['gemini-proxy','Gemini代理']
+    ];
+    return types.map(([value,label])=>`<option value="${value}"${value===selected?' selected':''}>${label}</option>`).join('');
+  }
+
+  _defaultModelPresetName(index){
+    return `预设${index}`;
+  }
+
+  renderModelPresetCards(presets){
+    const container=Utils.$('#modelPresetContainer');
+    if(!container)return;
+
+    const safe=Array.isArray(presets)?presets.filter(p=>p&&typeof p==='object'):[];
+    if(safe.length===0){
+      safe.push({
+        enabled:true,
+        name:'GPT-4',
+        type:'openai',
+        config:{
+          base:'https://api.openai.com/v1',
+          key:'',
+          model:'gpt-4o-mini',
+          temperature:1,
+          top_p:0.95,
+          max_tokens:65536,
+          stream:false
+        }
+      });
+    }
+
+    const cardsHTML=safe.map((preset,idx)=>{
+      const i=idx+1;
+      const enabled=!!preset.enabled;
+      const name=(preset.name??'').toString();
+      const type=(preset.type||'openai').toString();
+      return `
+        <div class="model-preset-card" data-model-card data-index="${i}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.25rem">
+            <h3 style="margin:0">预设${i}</h3>
+            <button type="button" class="btn small warn" data-action="remove-model-preset" data-index="${i}" title="删除该预设">删除</button>
+          </div>
+          <div class="field"><label>启用</label>
+            <select id="model${i}Enable" data-field="enabled">
+              <option value="true"${enabled?' selected':''}>是</option>
+              <option value="false"${!enabled?' selected':''}>否</option>
+            </select>
+          </div>
+          <div class="field"><label>显示名称</label><input id="model${i}Name" data-field="name" placeholder="如: GPT-4" value="${Utils.escapeHTML(name)}"/></div>
+          <div class="field"><label>模型类型</label>
+            <select id="model${i}Type" data-field="type">
+              ${this._modelTypeOptionsHTML(type)}
+            </select>
+          </div>
+          <div id="model${i}Config"></div>
+        </div>
+      `;
+    }).join('');
+
+    container.innerHTML=cardsHTML;
+
+    safe.forEach((preset,idx)=>{
+      const i=idx+1;
+      const type=(preset.type||'openai').toString();
+      const config=(preset.config&&typeof preset.config==='object')?preset.config:{};
+      this.renderModelConfig(i,type,config);
+    });
+  }
+
+  _readModelConfigFromCard(card,type,index){
+    if(!card)return {};
+    const q=(sel)=>card.querySelector(sel);
+    const config={};
+
+    if(type==='openai'){
+      config.base=q(`#m${index}_base`)?.value.trim()||'https://api.openai.com/v1';
+      config.key=q(`#m${index}_key`)?.value.trim()||'';
+      config.model=q(`#m${index}_model`)?.value.trim()||'gpt-4o-mini';
+      config.temperature=Utils.numOrNull(q(`#m${index}_temp`)?.value);
+      config.top_p=Utils.numOrNull(q(`#m${index}_topP`)?.value);
+      config.max_tokens=Utils.intOrNull(q(`#m${index}_maxTokens`)?.value);
+      config.stream=q(`#m${index}_stream`)?.value==='true';
+      config.useThinking=q(`#m${index}_useThinking`)?.value==='true';
+      config.thinkingEffort=q(`#m${index}_thinkingEffort`)?.value||'';
+    }else if(type==='anthropic'){
+      config.base=q(`#m${index}_base`)?.value.trim()||'https://api.anthropic.com/v1';
+      config.key=q(`#m${index}_key`)?.value.trim()||'';
+      config.model=q(`#m${index}_model`)?.value.trim()||'claude-3-5-sonnet-20240620';
+      config.temperature=Utils.numOrNull(q(`#m${index}_temp`)?.value);
+      config.top_p=Utils.numOrNull(q(`#m${index}_topP`)?.value);
+      config.max_tokens=Utils.intOrNull(q(`#m${index}_maxTokens`)?.value);
+      config.stream=q(`#m${index}_stream`)?.value==='true';
+      config.useThinking=q(`#m${index}_useThinking`)?.value==='true';
+      config.thinkingEffort=q(`#m${index}_thinkingEffort`)?.value||'';
+    }else if(type==='deepseek'){
+      config.base=q(`#m${index}_base`)?.value.trim()||'https://api.deepseek.com/beta';
+      config.key=q(`#m${index}_key`)?.value.trim()||'';
+      config.model=q(`#m${index}_model`)?.value.trim()||'deepseek-reasoner';
+      config.temperature=Utils.numOrNull(q(`#m${index}_temp`)?.value);
+      config.top_p=Utils.numOrNull(q(`#m${index}_topP`)?.value);
+      config.max_tokens=Utils.intOrNull(q(`#m${index}_maxTokens`)?.value);
+      config.stream=q(`#m${index}_stream`)?.value==='true';
+      config.useThinking=q(`#m${index}_useThinking`)?.value==='true';
+      config.thinkingEffort=q(`#m${index}_thinkingEffort`)?.value||'';
+    }else if(type==='kimi'){
+      config.base=q(`#m${index}_base`)?.value.trim()||'https://api.moonshot.cn/v1';
+      config.key=q(`#m${index}_key`)?.value.trim()||'';
+      config.model=q(`#m${index}_model`)?.value.trim()||'kimi-k2-0905-preview';
+      config.temperature=Utils.numOrNull(q(`#m${index}_temp`)?.value);
+      config.top_p=Utils.numOrNull(q(`#m${index}_topP`)?.value);
+      config.max_tokens=Utils.intOrNull(q(`#m${index}_maxTokens`)?.value);
+      config.stream=q(`#m${index}_stream`)?.value==='true';
+      config.useThinking=q(`#m${index}_useThinking`)?.value==='true';
+      config.thinkingEffort=q(`#m${index}_thinkingEffort`)?.value||'';
+    }else if(type==='gemini'){
+      config.base=q(`#m${index}_base`)?.value.trim()||'https://generativelanguage.googleapis.com';
+      config.key=q(`#m${index}_key`)?.value.trim()||'';
+      config.model=q(`#m${index}_model`)?.value.trim()||'gemini-2.5-pro';
+      config.temperature=Utils.numOrNull(q(`#m${index}_temp`)?.value);
+      config.top_p=Utils.numOrNull(q(`#m${index}_topP`)?.value);
+      config.top_k=Utils.intOrNull(q(`#m${index}_topK`)?.value);
+      config.max_output_tokens=Utils.intOrNull(q(`#m${index}_maxTokens`)?.value);
+      config.stream=q(`#m${index}_stream`)?.value==='true';
+      config.useThinking=q(`#m${index}_useThinking`)?.value==='true';
+      const budgetVal=q(`#m${index}_thinkingBudget`)?.value;
+      config.thinkingBudget=budgetVal===''?null:parseInt(budgetVal,10);
+    }else{
+      // gemini-proxy 或其他代理类型
+      config.proxyUrl=q(`#m${index}_proxyUrl`)?.value.trim()||'http://127.0.0.1:8889';
+      config.proxyPass=q(`#m${index}_proxyPass`)?.value.trim()||'';
+      config.model=q(`#m${index}_model`)?.value.trim()||'gemini-2.5-pro';
+      config.temperature=Utils.numOrNull(q(`#m${index}_temp`)?.value);
+      config.top_p=Utils.numOrNull(q(`#m${index}_topP`)?.value);
+      config.top_k=Utils.intOrNull(q(`#m${index}_topK`)?.value);
+      config.max_output_tokens=Utils.intOrNull(q(`#m${index}_maxTokens`)?.value);
+      config.stream=q(`#m${index}_stream`)?.value==='true';
+      config.useThinking=q(`#m${index}_useThinking`)?.value==='true';
+      const budgetVal=q(`#m${index}_thinkingBudget`)?.value;
+      config.thinkingBudget=budgetVal===''?null:parseInt(budgetVal,10);
+    }
+
+    return config;
+  }
+
+  collectModelPresetsFromDOM(){
+    const container=Utils.$('#modelPresetContainer');
+    if(!container)return [];
+
+    const cards=Array.from(container.querySelectorAll('[data-model-card]'));
+    if(cards.length===0)return [];
+
+    const presets=[];
+    cards.forEach((card,idx)=>{
+      const index=parseInt(card.dataset.index,10) || (idx+1);
+      const enabled=card.querySelector('[data-field="enabled"]')?.value==='true';
+      const type=card.querySelector('[data-field="type"]')?.value||'openai';
+      let name=card.querySelector('[data-field="name"]')?.value??'';
+      name=String(name).trim();
+      const config=this._readModelConfigFromCard(card,type,index);
+      presets.push({enabled,name,type,config});
+    });
+
+    return presets;
+  }
+
+  addModelPreset(){
+    const presets=this.collectModelPresetsFromDOM();
+    const existing=new Set(presets.map(p=>String(p?.name||'').trim()).filter(Boolean));
+
+    let counter=presets.length+1;
+    let name=this._defaultModelPresetName(counter);
+    while(existing.has(name)){
+      counter++;
+      name=this._defaultModelPresetName(counter);
+    }
+
+    presets.push({enabled:false,name,type:'openai',config:{}});
+    this.renderModelPresetCards(presets);
+  }
+
+  removeModelPreset(index){
+    const presets=this.collectModelPresetsFromDOM();
+    const idx=Math.trunc(index);
+    if(Number.isInteger(idx)&&idx>=1&&idx<=presets.length){
+      presets.splice(idx-1,1);
+    }
+    if(presets.length===0){
+      presets.push({enabled:false,name:'GPT-4',type:'openai',config:{}});
+    }
+    this.renderModelPresetCards(presets);
+  }
+
   loadSettingsUI(){
     if(this._settingsRendered){
       this.fillSettingsValues();
       return;
     }
-    
-    const presets=this.state.get('modelPresets');
-    Array.from({length:CONFIG.MODEL_PRESET_SLOTS},(_,i)=>i+1).forEach(i=>{
-      const preset=presets[i-1]||{enabled:false,name:'',type:'openai',config:{}};
-      const enable=Utils.$(`#model${i}Enable`);
-      const name=Utils.$(`#model${i}Name`);
-      const type=Utils.$(`#model${i}Type`);
-      
-      if(enable)enable.value=preset.enabled?'true':'false';
-      if(name)name.value=preset.name||'';
-      if(type)type.value=preset.type||'openai';
-      
-      this.renderModelConfig(i,preset.type,preset.config);
-    });
-    
-    this.renderPromptPresetList();
-    this.updatePromptEditingHint();
-    const apiLogEnabled=Utils.$('#apiLogEnabled');
-    if(apiLogEnabled)apiLogEnabled.value=this.api?.isDebugLoggingEnabled?.()?'true':'false';
-    
+    this.fillSettingsValues();
     this._settingsRendered=true;
   }
-  
+
+
   fillSettingsValues(){
     const presets=this.state.get('modelPresets');
-    Array.from({length:CONFIG.MODEL_PRESET_SLOTS},(_,i)=>i+1).forEach(i=>{
-      const preset=presets[i-1]||{enabled:false,name:'',type:'openai',config:{}};
-      const enable=Utils.$(`#model${i}Enable`);
-      const name=Utils.$(`#model${i}Name`);
-      const type=Utils.$(`#model${i}Type`);
-      
-      if(enable)enable.value=preset.enabled?'true':'false';
-      if(name)name.value=preset.name||'';
-      if(type)type.value=preset.type||'openai';
-      
-      // ✅ 重新渲染config输入框，确保配置被正确填充
-      this.renderModelConfig(i,preset.type,preset.config);
-    });
-    
+    this.renderModelPresetCards(presets);
+
     this.renderPromptPresetList();
+    this.updatePromptEditingHint();
+
     const apiLogEnabled=Utils.$('#apiLogEnabled');
-    if(apiLogEnabled)apiLogEnabled.value=this.api?.isDebugLoggingEnabled?.()?'true':'false';
+    if(apiLogEnabled){
+      apiLogEnabled.value=this.api?.isDebugLoggingEnabled?.()?'true':'false';
+    }
   }
+
   
   renderModelConfig(index,type,config={}){
     const container=Utils.$(`#model${index}Config`);
@@ -4117,102 +4290,61 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       container.innerHTML=`<div class="field"><label>代理URL</label><input id="m${index}_proxyUrl" value="${config.proxyUrl||'http://127.0.0.1:8889'}"/></div><div class="field"><label>代理密码</label><input id="m${index}_proxyPass" type="password" value="${config.proxyPass||''}" placeholder="可选"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gemini-2.5-pro'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>Top K</label><input type="number" id="m${index}_topK" min="0" step="1" value="${config.top_k??''}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_output_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="-1" step="1" value="${config.thinkingBudget??''}" placeholder="-1=自动,0=禁用"/></div>`;
     }
   }
-  
+
   saveSettingsUI(){
-    const presets=[];
-    Array.from({length:CONFIG.MODEL_PRESET_SLOTS},(_,i)=>i+1).forEach(i=>{
-      const enabled=Utils.$(`#model${i}Enable`)?.value==='true';
-      const name=Utils.$(`#model${i}Name`)?.value.trim()||'';
-      const type=Utils.$(`#model${i}Type`)?.value||'openai';
-      
-      // ✅ 无论enabled与否，都读取并保存配置
-      const config={};
-      if(type==='openai'){
-        config.base=Utils.$(`#m${i}_base`)?.value.trim()||'https://api.openai.com/v1';
-        config.key=Utils.$(`#m${i}_key`)?.value.trim()||'';
-        config.model=Utils.$(`#m${i}_model`)?.value.trim()||'gpt-4o-mini';
-        config.temperature=Utils.numOrNull(Utils.$(`#m${i}_temp`)?.value);
-        config.top_p=Utils.numOrNull(Utils.$(`#m${i}_topP`)?.value);
-        config.max_tokens=Utils.intOrNull(Utils.$(`#m${i}_maxTokens`)?.value);
-        config.stream=Utils.$(`#m${i}_stream`)?.value==='true';
-        config.useThinking=Utils.$(`#m${i}_useThinking`)?.value==='true';
-        config.thinkingEffort=Utils.$(`#m${i}_thinkingEffort`)?.value||'';
-      }else if(type==='anthropic'){
-        config.base=Utils.$(`#m${i}_base`)?.value.trim()||'https://api.anthropic.com/v1';
-        config.key=Utils.$(`#m${i}_key`)?.value.trim()||'';
-        config.model=Utils.$(`#m${i}_model`)?.value.trim()||'claude-3-5-sonnet-20240620';
-        config.temperature=Utils.numOrNull(Utils.$(`#m${i}_temp`)?.value);
-        config.top_p=Utils.numOrNull(Utils.$(`#m${i}_topP`)?.value);
-        config.max_tokens=Utils.intOrNull(Utils.$(`#m${i}_maxTokens`)?.value);
-        config.stream=Utils.$(`#m${i}_stream`)?.value==='true';
-        config.useThinking=Utils.$(`#m${i}_useThinking`)?.value==='true';
-        config.thinkingEffort=Utils.$(`#m${i}_thinkingEffort`)?.value||'';
-      }else if(type==='deepseek'){
-        config.base=Utils.$(`#m${i}_base`)?.value.trim()||'https://api.deepseek.com/beta';
-        config.key=Utils.$(`#m${i}_key`)?.value.trim()||'';
-        config.model=Utils.$(`#m${i}_model`)?.value.trim()||'deepseek-reasoner';
-        config.temperature=Utils.numOrNull(Utils.$(`#m${i}_temp`)?.value);
-        config.top_p=Utils.numOrNull(Utils.$(`#m${i}_topP`)?.value);
-        config.max_tokens=Utils.intOrNull(Utils.$(`#m${i}_maxTokens`)?.value);
-        config.stream=Utils.$(`#m${i}_stream`)?.value==='true';
-        config.useThinking=Utils.$(`#m${i}_useThinking`)?.value==='true';
-        config.thinkingEffort=Utils.$(`#m${i}_thinkingEffort`)?.value||'';
-      }else if(type==='kimi'){
-        config.base=Utils.$(`#m${i}_base`)?.value.trim()||'https://api.moonshot.cn/v1';
-        config.key=Utils.$(`#m${i}_key`)?.value.trim()||'';
-        config.model=Utils.$(`#m${i}_model`)?.value.trim()||'kimi-k2-0905-preview';
-        config.temperature=Utils.numOrNull(Utils.$(`#m${i}_temp`)?.value);
-        config.top_p=Utils.numOrNull(Utils.$(`#m${i}_topP`)?.value);
-        config.max_tokens=Utils.intOrNull(Utils.$(`#m${i}_maxTokens`)?.value);
-        config.stream=Utils.$(`#m${i}_stream`)?.value==='true';
-        config.useThinking=Utils.$(`#m${i}_useThinking`)?.value==='true';
-        config.thinkingEffort=Utils.$(`#m${i}_thinkingEffort`)?.value||'';
-      }else if(type==='gemini'){
-        config.base=Utils.$(`#m${i}_base`)?.value.trim()||'https://generativelanguage.googleapis.com';
-        config.key=Utils.$(`#m${i}_key`)?.value.trim()||'';
-        config.model=Utils.$(`#m${i}_model`)?.value.trim()||'gemini-2.5-pro';
-        config.temperature=Utils.numOrNull(Utils.$(`#m${i}_temp`)?.value);
-        config.top_p=Utils.numOrNull(Utils.$(`#m${i}_topP`)?.value);
-        config.top_k=Utils.intOrNull(Utils.$(`#m${i}_topK`)?.value);
-        config.max_output_tokens=Utils.intOrNull(Utils.$(`#m${i}_maxTokens`)?.value);
-        config.stream=Utils.$(`#m${i}_stream`)?.value==='true';
-        config.useThinking=Utils.$(`#m${i}_useThinking`)?.value==='true';
-        const budgetVal=Utils.$(`#m${i}_thinkingBudget`)?.value;
-        config.thinkingBudget=budgetVal===''?null:parseInt(budgetVal,10);
-      }else{
-        config.proxyUrl=Utils.$(`#m${i}_proxyUrl`)?.value.trim()||'http://127.0.0.1:8889';
-        config.proxyPass=Utils.$(`#m${i}_proxyPass`)?.value.trim()||'';
-        config.model=Utils.$(`#m${i}_model`)?.value.trim()||'gemini-2.5-pro';
-        config.temperature=Utils.numOrNull(Utils.$(`#m${i}_temp`)?.value);
-        config.top_p=Utils.numOrNull(Utils.$(`#m${i}_topP`)?.value);
-        config.top_k=Utils.intOrNull(Utils.$(`#m${i}_topK`)?.value);
-        config.max_output_tokens=Utils.intOrNull(Utils.$(`#m${i}_maxTokens`)?.value);
-        config.stream=Utils.$(`#m${i}_stream`)?.value==='true';
-        config.useThinking=Utils.$(`#m${i}_useThinking`)?.value==='true';
-        const budgetVal=Utils.$(`#m${i}_thinkingBudget`)?.value;
-        config.thinkingBudget=budgetVal===''?null:parseInt(budgetVal,10);
+    let presets=this.collectModelPresetsFromDOM();
+
+    // 若未渲染模型预设容器，退回使用当前状态
+    if(!Array.isArray(presets)||presets.length===0){
+      presets=Array.isArray(this.state.get('modelPresets'))?this.state.get('modelPresets'):[];
+    }
+
+    // 规范化 + 校验名称唯一
+    const nameSet=new Set();
+    const normalized=[];
+    for(let i=0;i<presets.length;i++){
+      const preset=presets[i];
+      const safe=(preset&&typeof preset==='object')?preset:{};
+
+      safe.enabled=!!safe.enabled;
+      safe.type=(safe.type||'openai').toString();
+      safe.config=(safe.config&&typeof safe.config==='object')?safe.config:{};
+
+      let name=String(safe.name||'').trim();
+      if(!name)name=this._defaultModelPresetName(i+1);
+
+      if(nameSet.has(name)){
+        ErrorHandler.show(`模型预设显示名称不能重复: ${name}`);
+        return false;
       }
-      
-      presets.push({enabled,name,type,config});
-    });
-    
-    const activeCount=presets.filter(p=>p.enabled).length;
+      nameSet.add(name);
+      safe.name=name;
+
+      normalized.push(safe);
+    }
+
+    const activeCount=normalized.filter(p=>p.enabled).length;
     if(activeCount>CONFIG.MODEL_ACTIVE_LIMIT){
       ErrorHandler.show(`最多只能启用${CONFIG.MODEL_ACTIVE_LIMIT}个模型预设`);
       return false;
     }
-    
-    this.state.set('modelPresets',presets);
-    
-    if(activeCount===0)ErrorHandler.show('警告: 至少启用一个模型预设');
-    
+
+    this.state.set('modelPresets',normalized);
+
+    // 如果当前索引越界，重置到第一个启用项
     if(this.state.get('currentModelIndex')>=activeCount){
       this.state.state.currentModelIndex=0;
     }
-    
+
     this.updateModelSelectors();
+
+    if(activeCount===0){
+      ErrorHandler.show('提示：当前没有启用的模型预设，主界面将无法发送消息',2500);
+    }
+
     return true;
   }
+
   
   renderPromptPresetList(){
     const list=Utils.$('#promptPresetList');
@@ -4285,35 +4417,41 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   }
 
   _getStepPresetOptions(stepPresetName=''){
-    const presets=this.state.getActivePresets();
-    const options=[{value:'',label:'默认(当前会话)'}];
-    presets.forEach(preset=>{
-      options.push({value:preset.name,label:preset.name});
+    const presets=Array.isArray(this.state.get('modelPresets'))?this.state.get('modelPresets'):[];
+    const options=[{value:'',label:'默认(当前会话启用项)'}];
+
+    presets.forEach((preset,idx)=>{
+      const rawName=String(preset?.name||'').trim();
+      const name=rawName||this._defaultModelPresetName(idx+1);
+      const label=preset?.enabled?name:`${name} (未启用)`;
+      options.push({value:name,label});
     });
+
     if(stepPresetName&&stepPresetName!==''&&!options.some(opt=>opt.value===stepPresetName)){
-      options.push({value:stepPresetName,label:`未启用: ${stepPresetName}`});
+      options.push({value:stepPresetName,label:`未找到: ${stepPresetName}`});
     }
     return options;
   }
 
   _renderTurnEditList(edits,role,stepIdx){
     if(!Array.isArray(edits)||edits.length===0){
-      return `<div style="color:var(--muted);font-size:11px;padding:.35rem 0">暂无${role==='assistant'?'助手':'用户'}楼层改写。</div>`;
+      return `<div style="color:var(--muted);font-size:11px;padding:.35rem 0">暂无${role==='assistant'?'助手':'用户'}回合改写。</div>`;
     }
     return edits.map((edit,idx)=>`
       <div style="display:grid;grid-template-columns:80px 120px 1fr auto;gap:.5rem;align-items:center;margin-bottom:.5rem" data-edit-idx="${idx}" data-edit-role="${role}">
-        <input type="number" min="1" step="1" placeholder="楼层" data-field="turn" value="${Number.isFinite(edit?.turn)?edit.turn:''}" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem"/>
-        <select data-field="mode" style="border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.35rem .5rem">
-          <option value="keep"${(edit?.mode||'replace')==='keep'?' selected':''}>不变</option>
+        <input type="number" min="1" step="1" placeholder="回合" data-field="turn" value="${Number.isFinite(edit?.turn)?edit.turn:''}" style="border:1px solid var(--border);border-radius:.5rem;padding:.35rem .5rem;background:rgba(0,0,0,.2);color:var(--text)"/>
+        <select data-field="mode" style="border:1px solid var(--border);border-radius:.5rem;padding:.35rem .5rem;background:rgba(0,0,0,.2);color:var(--text)">
           <option value="replace"${(edit?.mode||'replace')==='replace'?' selected':''}>替换</option>
-          <option value="append"${(edit?.mode||'replace')==='append'?' selected':''}>追加</option>
-          <option value="prepend"${(edit?.mode||'replace')==='prepend'?' selected':''}>前置</option>
+          <option value="append"${edit?.mode==='append'?' selected':''}>追加</option>
+          <option value="prepend"${edit?.mode==='prepend'?' selected':''}>前置</option>
+          <option value="keep"${edit?.mode==='keep'?' selected':''}>保持</option>
         </select>
-        <textarea rows="2" data-field="content" placeholder="支持 {{reply1}} 变量" style="width:100%;border:1px solid var(--border);border-radius:.5rem;background:rgba(0,0,0,.35);color:var(--fg);padding:.4rem .6rem;resize:vertical">${edit?.content??''}</textarea>
-        <button type="button" class="btn small warn" data-action="remove-turn-edit" data-role="${role}" data-step-idx="${stepIdx}" data-edit-idx="${idx}">×</button>
+        <input type="text" data-field="content" placeholder="内容(支持 {{reply1}} )" value="${Utils.escapeHTML(edit?.content??'')}" style="border:1px solid var(--border);border-radius:.5rem;padding:.35rem .5rem;background:rgba(0,0,0,.2);color:var(--text)"/>
+        <button type="button" class="btn small warn" data-action="remove-turn-edit" data-role="${role}" data-step-idx="${stepIdx}" data-edit-idx="${idx}" style="padding:.25rem .6rem">移除</button>
       </div>
     `).join('');
   }
+
 
   _renderStepReplyRegexRules(rules,stepIdx){
     if(!Array.isArray(rules)||rules.length===0){
@@ -4344,6 +4482,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       const rangeStart=Number.isFinite(step?.history?.start)?step.history.start:'';
       const rangeEnd=Number.isFinite(step?.history?.end)?step.history.end:'';
       const latestCount=Number.isFinite(step?.history?.count)?step.history.count:(Number.isFinite(step?.history?.latest)?step.history.latest:'');
+      const turnFloorHint=this._getTurnFloorHintText(historyMode,rangeStart,rangeEnd,latestCount);
       const systemEdit=typeof step?.system==='string'?{mode:'replace',content:step.system}:{mode:step?.system?.mode||'keep',content:step?.system?.content??step?.system?.text??''};
       const userEdit=typeof step?.user==='string'?{mode:'replace',content:step.user}:{mode:step?.user?.mode||'keep',content:step?.user?.content??step?.user?.text??''};
       const replyRegexRules=Array.isArray(step?.replyRegexRules)?step.replyRegexRules:[];
@@ -4381,20 +4520,21 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
               </div>
             </div>
             <div class="field" style="grid-template-columns:1fr">
-              <label>楼层选择</label>
+              <label>回合选择</label>
               <select data-field="historyMode">
-                <option value="all"${historyMode==='all'?' selected':''}>全部楼层</option>
+                <option value="all"${historyMode==='all'?' selected':''}>全部回合</option>
                 <option value="range"${historyMode==='range'?' selected':''}>指定范围</option>
-                <option value="latest"${historyMode==='latest'?' selected':''}>最新 N 楼</option>
+                <option value="latest"${historyMode==='latest'?' selected':''}>最新 N 回合</option>
                 <option value="none"${historyMode==='none'?' selected':''}>不带历史</option>
               </select>
               <div data-history-range style="display:${historyMode==='range'?'grid':'none'};grid-template-columns:1fr 1fr;gap:.5rem;margin-top:.4rem">
-                <input type="number" min="1" step="1" placeholder="起始楼层" data-field="rangeStart" value="${rangeStart}"/>
-                <input type="number" min="1" step="1" placeholder="结束楼层" data-field="rangeEnd" value="${rangeEnd}"/>
+                <input type="number" min="1" step="1" placeholder="起始回合" data-field="rangeStart" value="${rangeStart}"/>
+                <input type="number" min="1" step="1" placeholder="结束回合" data-field="rangeEnd" value="${rangeEnd}"/>
               </div>
               <div data-history-latest style="display:${historyMode==='latest'?'block':'none'};margin-top:.4rem">
-                <input type="number" min="1" step="1" placeholder="最新楼层数" data-field="latestCount" value="${latestCount}" style="width:100%"/>
+                <input type="number" min="1" step="1" placeholder="最新回合数" data-field="latestCount" value="${latestCount}" style="width:100%"/>
               </div>
+              <div data-turn-floor-hint style="font-size:11px;color:var(--muted);margin-top:.35rem;line-height:1.4">${turnFloorHint}</div>
             </div>
             <div class="field" style="grid-template-columns:1fr">
               <label>最新用户消息改写</label>
@@ -4409,14 +4549,14 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
               </div>
             </div>
             <div class="field" style="grid-template-columns:1fr">
-              <label>用户楼层改写</label>
+              <label>用户回合改写</label>
               <div data-edit-list="user">${this._renderTurnEditList(step?.patches?.turnUsers||[],'user',idx)}</div>
-              <button type="button" class="btn small" data-action="add-turn-edit" data-role="user" data-step-idx="${idx}">+ 添加用户楼层改写</button>
+              <button type="button" class="btn small" data-action="add-turn-edit" data-role="user" data-step-idx="${idx}">+ 添加用户回合改写</button>
             </div>
             <div class="field" style="grid-template-columns:1fr">
-              <label>助手楼层改写</label>
+              <label>助手回合改写</label>
               <div data-edit-list="assistant">${this._renderTurnEditList(step?.patches?.turnAssistants||[],'assistant',idx)}</div>
-              <button type="button" class="btn small" data-action="add-turn-edit" data-role="assistant" data-step-idx="${idx}">+ 添加助手楼层改写</button>
+              <button type="button" class="btn small" data-action="add-turn-edit" data-role="assistant" data-step-idx="${idx}">+ 添加助手回合改写</button>
             </div>
             <div class="field" style="grid-template-columns:1fr">
               <label>步骤回复正则处理</label>
@@ -4579,7 +4719,139 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     const latestEl=stepEl.querySelector('[data-history-latest]');
     if(rangeEl)rangeEl.style.display=mode==='range'?'grid':'none';
     if(latestEl)latestEl.style.display=mode==='latest'?'block':'none';
+    this.updateTurnFloorHintForStep(stepEl);
   }
+  _getTurnFloorPairs(){
+    const session=this.state.getActiveSession();
+    const history=session?.history||[];
+    const pairs=[];
+    let pendingUserIndex=null;
+    let startIndex=0;
+
+    // ✅ 将隐藏的 firstUser + 对话开头的 assistant 也计入回合（隐藏楼层记为 #0）
+    const pc=this.state.getSessionPromptConfig(session);
+    const hasHiddenFirstUser=!!(pc?.firstUser && String(pc.firstUser).trim());
+    const firstMsg=history[0];
+    const hasLeadingAssistant=!!(firstMsg && firstMsg.role==='assistant');
+
+    const treatLeadingAssistantAsTurn=hasHiddenFirstUser && hasLeadingAssistant;
+    if(treatLeadingAssistantAsTurn){
+      pairs.push({
+        turn:1,
+        userFloor:0,
+        assistantFloor:1,
+        userHidden:true,
+        assistantHidden:false
+      });
+      startIndex=1; // 跳过首条 assistant，避免后续配对重复
+    }
+
+    for(let i=startIndex;i<history.length;i++){
+      const msg=history[i];
+      if(msg?.role==='user'){
+        pendingUserIndex=i;
+        continue;
+      }
+      if(msg?.role==='assistant'&&pendingUserIndex!=null){
+        pairs.push({
+          turn:pairs.length+1,
+          userFloor:pendingUserIndex+1,
+          assistantFloor:i+1,
+          userHidden:false,
+          assistantHidden:false
+        });
+        pendingUserIndex=null;
+      }
+    }
+
+    return {pairs,history,meta:{
+      hasHiddenFirstUser,
+      hasLeadingAssistant,
+      treatLeadingAssistantAsTurn
+    }};
+  }
+
+
+  _getTurnFloorHintText(mode,start,end,count){
+    const rawMode=String(mode||'all').toLowerCase().trim();
+    const normalized=rawMode.includes('range')
+      ?'range'
+      :(rawMode.includes('latest')||rawMode.includes('last')||rawMode.includes('recent')
+        ?'latest'
+        :(rawMode.includes('none')||rawMode.includes('empty')?'none':'all'));
+
+    const {pairs,history,meta}=this._getTurnFloorPairs();
+    const total=pairs.length;
+
+    if(normalized==='none'){
+      return '不带历史回合：仅发送系统提示 + 最新用户消息。';
+    }
+    if(total===0){
+      if(meta?.hasLeadingAssistant){
+        return '当前对话暂无可用回合（需要成对的 user+assistant）。提示：对话开头存在 assistant，但由于没有对应 user，不计入回合。';
+      }
+      return '当前对话暂无可用回合（需要成对的 user+assistant）。';
+    }
+
+    let s=1;
+    let e=total;
+
+    if(normalized==='range'){
+      const sVal=Number.isFinite(start)?Math.trunc(start):parseInt(start,10);
+      const eVal=Number.isFinite(end)?Math.trunc(end):parseInt(end,10);
+      s=Number.isFinite(sVal)?sVal:1;
+      e=Number.isFinite(eVal)?eVal:total;
+
+      if(s<1||e<s||e>total){
+        return `范围无效：回合 ${s}..${e} (总回合=${total})。`;
+      }
+    }else if(normalized==='latest'){
+      const cVal=Number.isFinite(count)?Math.trunc(count):parseInt(count,10);
+      const c=Number.isFinite(cVal)?Math.max(1,cVal):1;
+      s=Math.max(1,total-c+1);
+      e=total;
+    }
+
+    const floorStart=pairs[s-1].userFloor;
+    const floorEnd=pairs[e-1].assistantFloor;
+
+    let note='';
+    if(meta?.treatLeadingAssistantAsTurn){
+      note='（提示：已将 firstUser + 对话首条 assistant 计为回合 1，其中 firstUser 为隐藏楼层 #0）';
+    }else if(meta?.hasLeadingAssistant){
+      note='（提示：对话开头存在 assistant，但由于没有对应 user，不计入回合）';
+    }
+
+    // 楼层是“历史里的绝对楼层”。开启性能裁剪/虚拟化时，较早楼层可能未在当前列表渲染。
+    let hiddenNote='';
+    const renderStartIdx=Number.isInteger(this._renderStartIndex)?this._renderStartIndex:0;
+    if(renderStartIdx>0){
+      const visibleFrom=renderStartIdx+1;
+      const effectiveStart=floorStart===0?1:floorStart;
+      if(effectiveStart && effectiveStart < visibleFrom){
+        hiddenNote='（注：所选楼层包含未加载的更早消息，向上滚动/点击“加载更早消息”查看）';
+      }
+    }
+
+    return `当前总回合 ${total}；所选回合 ${s}-${e} 对应楼层 #${floorStart}-#${floorEnd}${note}${hiddenNote}`;
+  }
+
+
+  updateTurnFloorHintForStep(stepEl){
+    if(!stepEl)return;
+    const hintEl=stepEl.querySelector('[data-turn-floor-hint]');
+    if(!hintEl)return;
+
+    const mode=stepEl.querySelector('[data-field="historyMode"]')?.value||'all';
+    const start=Utils.intOrNull(stepEl.querySelector('[data-field="rangeStart"]')?.value);
+    const end=Utils.intOrNull(stepEl.querySelector('[data-field="rangeEnd"]')?.value);
+    const count=Utils.intOrNull(stepEl.querySelector('[data-field="latestCount"]')?.value);
+
+    hintEl.textContent=this._getTurnFloorHintText(mode,start,end,count);
+  }
+
+
+
 
   updateMultiStepInputState(enabled){
     const prefixEl=Utils.$('#messagePrefix');
@@ -5677,15 +5949,44 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         }
       });
     }
-    
-    Array.from({length:CONFIG.MODEL_PRESET_SLOTS},(_,i)=>i+1).forEach(i=>{
-      const typeSelect=Utils.$(`#model${i}Type`);
-      if(typeSelect){
-        this.events.on(typeSelect,'change',()=>{
-          this.renderModelConfig(i,typeSelect.value,{});
-        });
-      }
-    });
+
+    // 模型预设（无限数量，仍最多启用2个）
+    const btnAddModelPreset=Utils.$('#btnAddModelPreset');
+    if(btnAddModelPreset&&!btnAddModelPreset.dataset.bound){
+      btnAddModelPreset.dataset.bound='true';
+      this.events.on(btnAddModelPreset,'click',(e)=>{
+        e.preventDefault();
+        e.stopPropagation();
+        this.addModelPreset();
+      });
+    }
+
+    const modelPresetContainer=Utils.$('#modelPresetContainer');
+    if(modelPresetContainer&&!modelPresetContainer.dataset.bound){
+      modelPresetContainer.dataset.bound='true';
+
+      this.events.on(modelPresetContainer,'change',(e)=>{
+        const typeSelect=e.target.closest('select[data-field="type"]');
+        if(typeSelect){
+          const card=typeSelect.closest('[data-model-card]');
+          const idx=parseInt(card?.dataset.index,10);
+          if(!isNaN(idx)){
+            // 切换类型时，重建该预设配置区域（清空原配置）
+            this.renderModelConfig(idx,typeSelect.value,{});
+          }
+        }
+      });
+
+      this.events.on(modelPresetContainer,'click',(e)=>{
+        const btn=e.target.closest('[data-action="remove-model-preset"]');
+        if(btn){
+          e.preventDefault();
+          e.stopPropagation();
+          const idx=parseInt(btn.dataset.index,10);
+          if(!isNaN(idx))this.removeModelPreset(idx);
+        }
+      });
+    }
     
     const promptPresetList=Utils.$('#promptPresetList');
     if(promptPresetList){
@@ -5807,6 +6108,19 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
         if(e.target.matches('[data-field="historyMode"]')){
           const stepEl=e.target.closest('[data-step-card]');
           if(stepEl)this.updateHistoryFieldsForStep(stepEl,e.target.value);
+          return;
+        }
+
+        if(e.target.matches('[data-field="rangeStart"],[data-field="rangeEnd"],[data-field="latestCount"]')){
+          const stepEl=e.target.closest('[data-step-card]');
+          if(stepEl)this.updateTurnFloorHintForStep(stepEl);
+        }
+      });
+
+      this.events.on(multiStepContainer,'input',(e)=>{
+        if(e.target.matches('[data-field="rangeStart"],[data-field="rangeEnd"],[data-field="latestCount"]')){
+          const stepEl=e.target.closest('[data-step-card]');
+          if(stepEl)this.updateTurnFloorHintForStep(stepEl);
         }
       });
     }
