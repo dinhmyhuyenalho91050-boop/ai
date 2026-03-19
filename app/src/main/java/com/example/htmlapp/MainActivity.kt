@@ -72,6 +72,7 @@ class MainActivity : AppCompatActivity() {
     private var lastRendererWaived: Boolean? = null
     private var isPageReady = false
     private var pendingVisibilityState: String? = null
+    private var isWebViewPaused = false
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
             handleAppVisibility(true)
@@ -342,6 +343,13 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         if (this::webView.isInitialized) {
             webView.apply {
+                if (!isWebViewPaused) {
+                    try {
+                        onPause()
+                    } catch (_: Throwable) {
+                    }
+                    isWebViewPaused = true
+                }
                 loadUrl("about:blank")
                 stopLoading()
                 clearHistory()
@@ -452,6 +460,13 @@ class MainActivity : AppCompatActivity() {
         if (!this::webView.isInitialized) return
         val shouldKeepActive = shouldKeepWebViewActive()
         if (shouldKeepActive) {
+            if (isWebViewPaused) {
+                try {
+                    webView.onResume()
+                } catch (_: Throwable) {
+                }
+                isWebViewPaused = false
+            }
             if (areImagesBlocked) {
                 webView.settings.blockNetworkImage = false
                 areImagesBlocked = false
@@ -468,6 +483,13 @@ class MainActivity : AppCompatActivity() {
             if (!areTimersPaused) {
                 webView.pauseTimers()
                 areTimersPaused = true
+            }
+            if (!isWebViewPaused) {
+                try {
+                    webView.onPause()
+                } catch (_: Throwable) {
+                }
+                isWebViewPaused = true
             }
         }
 
