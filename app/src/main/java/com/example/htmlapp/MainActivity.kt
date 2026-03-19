@@ -152,6 +152,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        ensureWebViewInteractive()
+        handleAppVisibility(true)
+        notifyWebVisibility("foreground")
+    }
+
+    override fun onPause() {
+        handleAppVisibility(false)
+        notifyWebVisibility("background")
+        if (this::webView.isInitialized) {
+            webView.onPause()
+            webView.clearFocus()
+        }
+        super.onPause()
+    }
+
     private fun configureWebView() {
         webView.setBackgroundColor(Color.TRANSPARENT)
         assetLoader = WebViewAssetLoader.Builder()
@@ -363,6 +380,22 @@ class MainActivity : AppCompatActivity() {
             return
         }
         dispatchVisibilityState(state)
+    }
+
+    private fun ensureWebViewInteractive() {
+        if (!this::webView.isInitialized) return
+        webView.onResume()
+        if (areImagesBlocked) {
+            webView.settings.blockNetworkImage = false
+            areImagesBlocked = false
+        }
+        if (areTimersPaused) {
+            webView.resumeTimers()
+            areTimersPaused = false
+        }
+        if (webView.hasFocus()) {
+            webView.post { webView.clearFocus() }
+        }
     }
 
     private fun dispatchVisibilityState(state: String) {
