@@ -8,6 +8,7 @@
     <color name="chat_border">#1F2937</color>
     <color name="chat_accent">#FBBF24</color>
     <color name="chat_accent_blue">#60A5FA</color>
+    <color name="chat_accent3">#10B981</color>
     <color name="chat_title">#8CC9F8</color>
     <color name="chat_danger">#EF4444</color>
 </resources>

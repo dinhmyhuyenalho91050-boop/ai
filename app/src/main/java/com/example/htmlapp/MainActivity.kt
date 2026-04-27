@@ -11,6 +11,10 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -35,6 +39,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.doOnLayout
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 import kotlin.math.max
@@ -62,6 +67,12 @@ class MainActivity : AppCompatActivity() {
     private val messageThinkingViews = mutableMapOf<String, TextView>()
     private var isSending = false
     private var pendingImportReplace = false
+    private var followBottom = true
+    private var bottomScrollScheduled = false
+    private var settingsCompact = false
+
+    private var renderMessageLimit = 80
+    private val streamFrameMs = 48L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,6 +88,7 @@ class MainActivity : AppCompatActivity() {
         setupEdgeToEdge()
         setupTitleGradient()
         setupClicks()
+        setupScrollTracking()
         setupBackNavigation()
         renderAll()
         hideSystemBars()
@@ -111,6 +123,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupScrollTracking() {
+        messagesScroll.setOnScrollChangeListener { _, _, _, _, _ ->
+            followBottom = isNearBottom()
+        }
+    }
+
     private fun bindViews() {
         root = findViewById(R.id.root_container)
         messagesScroll = findViewById(R.id.messages_scroll)
@@ -137,6 +155,7 @@ class MainActivity : AppCompatActivity() {
                 systemBars.right,
                 max(systemBars.bottom, ime.bottom)
             )
+            if (followBottom) scrollToBottomSoon()
             insets
         }
     }
@@ -216,8 +235,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setSidebarVisible(visible: Boolean) {
-        backdrop.visibility = if (visible) View.VISIBLE else View.GONE
-        sidebar.visibility = if (visible) View.VISIBLE else View.GONE
+        val sidebarWidth = if (sidebar.width > 0) sidebar.width.toFloat() else dp(320).toFloat()
+        if (visible) {
+            backdrop.alpha = 0f
+            backdrop.visibility = View.VISIBLE
+            sidebar.translationX = -sidebarWidth
+            sidebar.visibility = View.VISIBLE
+            backdrop.animate().alpha(1f).setDuration(180).start()
+            sidebar.animate()
+                .translationX(0f)
+                .setDuration(240)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .start()
+        } else {
+            backdrop.animate().alpha(0f).setDuration(180).withEndAction {
+                backdrop.visibility = View.GONE
+            }.start()
+            sidebar.animate()
+                .translationX(-sidebarWidth)
+                .setDuration(220)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .withEndAction { sidebar.visibility = View.GONE }
+                .start()
+        }
     }
 
     private fun renderModelTabs() {
@@ -243,6 +283,7 @@ class MainActivity : AppCompatActivity() {
         val preset = state.currentPreset()
         session.modelName = preset?.name ?: session.modelName
         session.history.add(ChatMessage(role = "user", content = text, modelName = preset?.name.orEmpty()))
+        followBottom = true
         inputMessage.setText("")
         repository.save(state)
         renderMessages(scrollToBottom = true)
@@ -255,22 +296,32 @@ class MainActivity : AppCompatActivity() {
         val preset = state.currentPreset()
         val assistant = ChatMessage(role = "assistant", content = "", modelName = preset?.name.orEmpty())
         session.history.add(assistant)
+        followBottom = true
         repository.save(state)
         renderMessages(scrollToBottom = true)
         setSendingUi(true)
 
         Thread {
+            var lastFrameAt = 0L
+            var latestContent = ""
+            var latestThinking = ""
             runCatching {
                 aiClient.send(state, session) { content, thinking ->
-                    mainHandler.post {
-                        assistant.content = content
-                        assistant.thinking = thinking
-                        updateMessageViews(assistant)
+                    latestContent = content
+                    latestThinking = thinking
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (now - lastFrameAt >= streamFrameMs) {
+                        lastFrameAt = now
+                        mainHandler.post {
+                            assistant.content = applyPromptRegex(latestContent)
+                            assistant.thinking = latestThinking
+                            updateMessageViews(assistant)
+                        }
                     }
                 }
             }.onSuccess { result ->
                 mainHandler.post {
-                    assistant.content = result.content
+                    assistant.content = applyPromptRegex(result.content)
                     assistant.thinking = result.thinking
                     repository.save(state)
                     updateMessageViews(assistant)
@@ -324,6 +375,7 @@ class MainActivity : AppCompatActivity() {
         }
         state.sessions[session.id] = session
         state.currentId = session.id
+        renderMessageLimit = 80
         repository.save(state)
         inputMessage.setText("")
         renderAll()
@@ -335,11 +387,38 @@ class MainActivity : AppCompatActivity() {
         messageThinkingViews.clear()
         messagesContainer.removeAllViews()
         val session = state.ensureSession()
-        session.history.forEachIndexed { index, message ->
-            messagesContainer.addView(messageCard(message, index + 1))
+        val startIndex = max(0, session.history.size - renderMessageLimit)
+        if (startIndex > 0) {
+            messagesContainer.addView(loadOlderHint(startIndex))
+        }
+        session.history.drop(startIndex).forEachIndexed { offset, message ->
+            val card = messageCard(message, startIndex + offset + 1)
+            messagesContainer.addView(card)
+            if (scrollToBottom && offset >= session.history.size - startIndex - 2) {
+                animateIn(card)
+            }
         }
         if (scrollToBottom) {
-            messagesScroll.post { messagesScroll.fullScroll(View.FOCUS_DOWN) }
+            scrollToBottomSoon(animated = false)
+        }
+    }
+
+    private fun loadOlderHint(hiddenCount: Int): View {
+        return TextView(this).apply {
+            text = "加载更早消息 · 还有 $hiddenCount 条"
+            setTextColor(color(R.color.chat_muted))
+            textSize = 12f
+            gravity = Gravity.CENTER
+            background = rounded(Color.argb(72, 0, 0, 0), dp(12), dp(1), color(R.color.chat_border))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setOnClickListener {
+                renderMessageLimit += 40
+                renderMessages(scrollToBottom = false)
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(12) }
         }
     }
 
@@ -380,7 +459,7 @@ class MainActivity : AppCompatActivity() {
         contentColumn.addView(thinkingView)
 
         val body = TextView(this).apply {
-            text = displayContent(message)
+            text = formatMessageText(displayContent(message))
             setTextColor(Color.WHITE)
             textSize = 16f
             setLineSpacing(dp(2).toFloat(), 1f)
@@ -399,11 +478,135 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateMessageViews(message: ChatMessage) {
-        messageBodyViews[message.id]?.text = displayContent(message)
+        val stick = followBottom || isNearBottom()
+        messageBodyViews[message.id]?.text = formatMessageText(displayContent(message))
         messageThinkingViews[message.id]?.apply {
             text = message.thinking
             visibility = if (message.thinking.isBlank()) View.GONE else View.VISIBLE
         }
+        if (stick) scrollToBottomSoon()
+    }
+
+    private fun formatMessageText(text: String): CharSequence {
+        if (text.isEmpty()) return text
+        val out = SpannableStringBuilder()
+        var index = 0
+        while (index < text.length) {
+            val ch = text[index]
+            when {
+                isQuote(ch) -> {
+                    val end = findNext(text, index + 1, ::isQuote)
+                    if (end > index + 1) {
+                        val start = out.length
+                        out.append(text, index, end + 1)
+                        out.setSpan(ForegroundColorSpan(color(R.color.chat_accent3)), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        out.setSpan(StyleSpan(Typeface.ITALIC), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        index = end + 1
+                    } else {
+                        out.append(ch)
+                        index += 1
+                    }
+                }
+                isStar(ch) -> {
+                    val end = findNext(text, index + 1, ::isStar)
+                    if (end > index + 1) {
+                        val start = out.length
+                        out.append(text, index + 1, end)
+                        out.setSpan(ForegroundColorSpan(color(R.color.chat_accent)), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        out.setSpan(StyleSpan(Typeface.BOLD_ITALIC), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        index = end + 1
+                    } else {
+                        out.append(ch)
+                        index += 1
+                    }
+                }
+                else -> {
+                    out.append(ch)
+                    index += 1
+                }
+            }
+        }
+        return out
+    }
+
+    private fun applyPromptRegex(content: String): String {
+        if (content.isBlank()) return content
+        val prompt = state.promptFor(state.activeSession())
+        val rules = runCatching { JSONArray(prompt.regexRulesJson) }.getOrNull() ?: return content
+        var result = content
+        for (i in 0 until rules.length()) {
+            val rule = rules.optJSONObject(i) ?: continue
+            val pattern = rule.optString("pattern")
+            if (pattern.isBlank()) continue
+            val replacement = rule.optString("replacement")
+            val regex = compilePromptRegex(pattern, rule.optString("flags"))
+            result = regex?.let { runCatching { it.replace(result, replacement) }.getOrDefault(result) } ?: result
+        }
+        return result
+    }
+
+    private fun compilePromptRegex(rawPattern: String, rawFlags: String): Regex? {
+        var pattern = rawPattern
+        var flags = rawFlags
+        val literal = Regex("^/([\\s\\S]*)/([a-zA-Z]*)$").matchEntire(pattern)
+        if (literal != null) {
+            pattern = literal.groupValues[1]
+            flags = literal.groupValues[2]
+        }
+        val options = buildSet {
+            if ('i' in flags) add(RegexOption.IGNORE_CASE)
+            if ('m' in flags) add(RegexOption.MULTILINE)
+            if ('s' in flags) add(RegexOption.DOT_MATCHES_ALL)
+        }
+        return runCatching { Regex(pattern, options) }.getOrNull()
+    }
+
+    private fun isQuote(ch: Char): Boolean {
+        return ch == '"' || ch == '\u201C' || ch == '\u201D' || ch == '\uFF02'
+    }
+
+    private fun isStar(ch: Char): Boolean {
+        return ch == '*' || ch == '\uFF0A'
+    }
+
+    private fun findNext(text: String, start: Int, predicate: (Char) -> Boolean): Int {
+        for (i in start until text.length) {
+            if (predicate(text[i])) return i
+        }
+        return -1
+    }
+
+    private fun isNearBottom(): Boolean {
+        val child = messagesScroll.getChildAt(0) ?: return true
+        val distance = child.bottom - (messagesScroll.scrollY + messagesScroll.height)
+        return distance <= dp(60)
+    }
+
+    private fun scrollToBottomSoon(animated: Boolean = false) {
+        if (bottomScrollScheduled) return
+        bottomScrollScheduled = true
+        messagesScroll.post {
+            bottomScrollScheduled = false
+            val child = messagesScroll.getChildAt(0) ?: return@post
+            val targetY = max(0, child.bottom - messagesScroll.height)
+            if (animated) {
+                messagesScroll.smoothScrollTo(0, targetY)
+            } else {
+                messagesScroll.scrollTo(0, targetY)
+            }
+            followBottom = true
+        }
+    }
+
+    private fun animateIn(view: View) {
+        view.alpha = 0f
+        view.translationY = dp(8).toFloat()
+        view.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(220)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .start()
     }
 
     private fun messageHeader(message: ChatMessage, index: Int): View {
@@ -527,6 +730,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 if (!isSending) {
                     state.currentId = session.id
+                    renderMessageLimit = 80
                     repository.save(state)
                     renderAll()
                     setSidebarVisible(false)
@@ -569,6 +773,7 @@ class MainActivity : AppCompatActivity() {
     private fun showSettingsDialog() {
         val dialog = Dialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        settingsCompact = resources.displayMetrics.widthPixels / resources.displayMetrics.density < 720f
 
         val contentHost = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -579,25 +784,38 @@ class MainActivity : AppCompatActivity() {
         var saveCurrentPane: (() -> Unit)? = null
 
         val body = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = if (settingsCompact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
             background = rounded(color(R.color.chat_panel), dp(16), dp(1), color(R.color.chat_border))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
         }
         val tabColumn = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = if (settingsCompact) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
             background = solid(Color.argb(36, 0, 0, 0))
-            layoutParams = LinearLayout.LayoutParams(dp(132), ViewGroup.LayoutParams.MATCH_PARENT)
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56))
+            } else {
+                LinearLayout.LayoutParams(dp(132), ViewGroup.LayoutParams.MATCH_PARENT)
+            }
         }
         tabs.forEachIndexed { index, label ->
             val tab = TextView(this).apply {
                 text = label
-                gravity = Gravity.CENTER_VERTICAL
+                gravity = if (settingsCompact) Gravity.CENTER else Gravity.CENTER_VERTICAL
                 setTextColor(if (index == 0) color(R.color.chat_accent_blue) else color(R.color.chat_muted))
                 textSize = 13f
                 typeface = Typeface.DEFAULT_BOLD
                 includeFontPadding = false
                 setPadding(dp(16), 0, dp(10), 0)
                 background = if (index == 0) solid(Color.argb(38, 96, 165, 250)) else null
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56))
+                layoutParams = if (settingsCompact) {
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                } else {
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56))
+                }
             }
             tabViews.add(tab)
             tabColumn.addView(tab)
@@ -606,7 +824,11 @@ class MainActivity : AppCompatActivity() {
         val paneScroll = ScrollView(this).apply {
             overScrollMode = View.OVER_SCROLL_NEVER
             isVerticalScrollBarEnabled = false
-            layoutParams = LinearLayout.LayoutParams(0, dp(520), 1f)
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            } else {
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+            }
         }
         paneScroll.addView(contentHost)
         body.addView(tabColumn)
@@ -630,6 +852,10 @@ class MainActivity : AppCompatActivity() {
         val shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = rounded(color(R.color.chat_panel), dp(16), dp(1), color(R.color.chat_border))
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
             addView(body)
             addView(footer)
         }
@@ -645,6 +871,8 @@ class MainActivity : AppCompatActivity() {
                 1 -> fillPromptsPane(contentHost)
                 else -> fillBackupPane(contentHost, dialog)
             }
+            contentHost.alpha = 0f
+            contentHost.animate().alpha(1f).setDuration(160).start()
         }
         tabViews.forEachIndexed { index, tab -> tab.setOnClickListener { selectTab(index) } }
         selectTab(0)
@@ -653,7 +881,12 @@ class MainActivity : AppCompatActivity() {
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
             val width = min(resources.displayMetrics.widthPixels - dp(24), dp(960))
-            dialog.window?.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)
+            val height = min(resources.displayMetrics.heightPixels - dp(72), dp(720))
+            dialog.window?.setLayout(width, height)
+            shell.alpha = 0f
+            shell.scaleX = 0.98f
+            shell.scaleY = 0.98f
+            shell.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(220).start()
         }
         dialog.show()
     }
@@ -696,7 +929,8 @@ class MainActivity : AppCompatActivity() {
         val firstAssistant = field("首条助手消息", preset.firstAssistant, multiLine = true)
         val prefix = field("消息前缀", preset.messagePrefix, multiLine = true)
         val prefill = field("助手预填", preset.assistantPrefill, multiLine = true)
-        listOf(name, sys, firstUser, firstAssistant, prefix, prefill).forEach { host.addView(it.container) }
+        val regexRules = field("正则规则(JSON)", preset.regexRulesJson, multiLine = true)
+        listOf(name, sys, firstUser, firstAssistant, prefix, prefill, regexRules).forEach { host.addView(it.container) }
         return {
             preset.name = name.value()
             preset.sysPrompt = sys.value()
@@ -704,6 +938,7 @@ class MainActivity : AppCompatActivity() {
             preset.firstAssistant = firstAssistant.value()
             preset.messagePrefix = prefix.value()
             preset.assistantPrefill = prefill.value()
+            preset.regexRulesJson = regexRules.value().ifBlank { "[]" }
         }
     }
 
@@ -855,19 +1090,28 @@ class MainActivity : AppCompatActivity() {
             gravity = if (multiLine) Gravity.TOP or Gravity.START else Gravity.CENTER_VERTICAL
             background = rounded(Color.argb(72, 0, 0, 0), dp(8), dp(1), color(R.color.chat_border))
             setPadding(dp(12), if (multiLine) dp(10) else 0, dp(12), if (multiLine) dp(10) else 0)
-            layoutParams = LinearLayout.LayoutParams(0, if (multiLine) dp(96) else dp(44), 1f)
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, if (multiLine) dp(120) else dp(44))
+            } else {
+                LinearLayout.LayoutParams(0, if (multiLine) dp(96) else dp(44), 1f)
+            }
         }
         val container = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(11))
+            orientation = if (settingsCompact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            gravity = if (settingsCompact) Gravity.START else Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, if (settingsCompact) dp(14) else dp(11))
             addView(TextView(context).apply {
                 text = label
                 setTextColor(color(R.color.chat_muted))
                 textSize = 13f
                 typeface = Typeface.DEFAULT_BOLD
                 includeFontPadding = false
-                layoutParams = LinearLayout.LayoutParams(dp(104), ViewGroup.LayoutParams.WRAP_CONTENT)
+                layoutParams = if (settingsCompact) {
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                        .apply { bottomMargin = dp(8) }
+                } else {
+                    LinearLayout.LayoutParams(dp(104), ViewGroup.LayoutParams.WRAP_CONTENT)
+                }
             })
             addView(input)
         }
