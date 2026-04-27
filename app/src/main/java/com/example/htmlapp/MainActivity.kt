@@ -65,11 +65,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
     private var isAppInForeground = true
     private var isStreaming = false
-    private var areTimersPaused = false
-    private var areImagesBlocked = false
     private var lastVisibilityState: String? = null
-    private var lastRendererPriority: Int? = null
-    private var lastRendererWaived: Boolean? = null
     private var isPageReady = false
     private var pendingVisibilityState: String? = null
     private val appVisibilityObserver = object : DefaultLifecycleObserver {
@@ -192,9 +188,6 @@ class MainActivity : AppCompatActivity() {
                 method.invoke(null, false)
             } catch (_: Throwable) {
             }
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
         }
         downloadBridge = DownloadBridge(this)
         webView.addJavascriptInterface(downloadBridge, "HtmlAppNative")
@@ -387,7 +380,6 @@ class MainActivity : AppCompatActivity() {
     private fun handleAppVisibility(isForeground: Boolean) {
         val changed = isAppInForeground != isForeground
         isAppInForeground = isForeground
-        updateWebViewActivityState()
         if (changed) {
             if (isForeground) {
                 resumeWebViewAfterBackground()
@@ -400,7 +392,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun prepareWebViewForBackground() {
         if (!this::webView.isInitialized) return
-        if (!shouldKeepWebViewActive()) {
+        if (!isStreaming) {
             try {
                 webView.onPause()
             } catch (_: Throwable) {
@@ -443,51 +435,7 @@ class MainActivity : AppCompatActivity() {
 
     fun onStreamingStateChanged(active: Boolean) {
         if (!this::webView.isInitialized) return
-        if (isStreaming == active) return
         isStreaming = active
-        updateWebViewActivityState()
-    }
-
-    private fun updateWebViewActivityState() {
-        if (!this::webView.isInitialized) return
-        val shouldKeepActive = shouldKeepWebViewActive()
-        if (shouldKeepActive) {
-            if (areImagesBlocked) {
-                webView.settings.blockNetworkImage = false
-                areImagesBlocked = false
-            }
-            if (areTimersPaused) {
-                webView.resumeTimers()
-                areTimersPaused = false
-            }
-        } else {
-            if (!areImagesBlocked) {
-                webView.settings.blockNetworkImage = true
-                areImagesBlocked = true
-            }
-            if (!areTimersPaused) {
-                webView.pauseTimers()
-                areTimersPaused = true
-            }
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val desiredPriority = if (shouldKeepActive) {
-                WebView.RENDERER_PRIORITY_IMPORTANT
-            } else {
-                WebView.RENDERER_PRIORITY_BOUND
-            }
-            val desiredWaived = !shouldKeepActive
-            if (desiredPriority != lastRendererPriority || desiredWaived != lastRendererWaived) {
-                webView.setRendererPriorityPolicy(desiredPriority, desiredWaived)
-                lastRendererPriority = desiredPriority
-                lastRendererWaived = desiredWaived
-            }
-        }
-    }
-
-    private fun shouldKeepWebViewActive(): Boolean {
-        return isAppInForeground || isStreaming
     }
 }
 
