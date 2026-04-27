@@ -21,7 +21,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import kotlin.math.max
 
 data class ChatMessage(
     val id: String = "msg_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}",
@@ -523,10 +522,22 @@ class NativeAiClient {
     ): NativeAiResult {
         val preset = state.currentPreset() ?: throw IllegalStateException("无可用模型预设")
         val prompt = state.promptFor(session)
+        val runner = runCatching { JSONObject(prompt.multiStepRunnerJson) }.getOrNull()
+        if (runner?.optBoolean("enabled") == true && (runner.optJSONArray("steps")?.length() ?: 0) > 0) {
+            return runMultiStep(state, session, prompt, preset, runner, onDelta)
+        }
+        return sendWithMessages(buildMessages(session, prompt, preset), preset, onDelta)
+    }
+
+    private fun sendWithMessages(
+        messages: List<JSONObject>,
+        preset: ModelPreset,
+        onDelta: (content: String, thinking: String) -> Unit
+    ): NativeAiResult {
         return when (preset.type.lowercase(Locale.ROOT)) {
-            "anthropic" -> sendAnthropic(buildMessages(session, prompt, preset), preset, onDelta)
-            "gemini", "gemini-proxy" -> sendGemini(buildMessages(session, prompt, preset), preset, onDelta)
-            else -> sendOpenAICompatible(buildMessages(session, prompt, preset), preset, onDelta)
+            "anthropic" -> sendAnthropic(messages, preset, onDelta)
+            "gemini", "gemini-proxy" -> sendGemini(messages, preset, onDelta)
+            else -> sendOpenAICompatible(messages, preset, onDelta)
         }
     }
 
@@ -563,6 +574,206 @@ class NativeAiClient {
             messages.add(prefill)
         }
         return messages
+    }
+
+    private fun runMultiStep(
+        state: NativeChatState,
+        session: ChatSession,
+        prompt: PromptPreset,
+        defaultPreset: ModelPreset,
+        runner: JSONObject,
+        onDelta: (content: String, thinking: String) -> Unit
+    ): NativeAiResult {
+        val steps = runner.optJSONArray("steps") ?: throw IllegalStateException("多步编排器未配置 steps")
+        val finalIndex = resolveFinalStepIndex(steps)
+        val baseTurns = buildRunnerTurns(session, prompt)
+        val baseUser = latestUserContent(session)
+        if (baseUser.isBlank()) throw IllegalStateException("多步编排器需要最新 user 消息")
+        val replies = mutableListOf<String>()
+        var lastResult = NativeAiResult("")
+
+        for (i in 0 until steps.length()) {
+            val step = steps.optJSONObject(i) ?: JSONObject()
+            val isFinal = i == finalIndex
+            val stepPreset = resolveStepPreset(state, step, defaultPreset)
+            var system = prompt.sysPrompt
+            if (step.has("system")) system = applyContentEdit(system, step.opt("system"), replies)
+            val selectedTurns = selectRunnerTurns(baseTurns, step.optJSONObject("history"))
+
+            step.optJSONObject("patches")?.let { patches ->
+                applyTurnEdits(selectedTurns, patches.optJSONArray("turnUsers"), replies, targetAssistant = false)
+                applyTurnEdits(selectedTurns, patches.optJSONArray("turnAssistants"), replies, targetAssistant = true)
+                if (patches.has("system")) system = applyContentEdit(system, patches.opt("system"), replies)
+            }
+
+            var userContent = baseUser
+            if (step.has("user")) userContent = applyContentEdit(userContent, step.opt("user"), replies)
+            step.optJSONObject("patches")?.let { patches ->
+                if (patches.has("latestUser")) userContent = applyContentEdit(userContent, patches.opt("latestUser"), replies)
+            }
+
+            val messages = mutableListOf<JSONObject>()
+            if (system.isNotBlank()) messages.add(JSONObject().put("role", "system").put("content", system))
+            selectedTurns.forEach { turn ->
+                messages.add(JSONObject().put("role", "user").put("content", turn.user))
+                messages.add(JSONObject().put("role", "assistant").put("content", turn.assistant))
+            }
+            messages.add(JSONObject().put("role", "user").put("content", userContent))
+
+            val result = sendWithMessages(messages, stepPreset, if (isFinal) onDelta else { _, _ -> })
+            val processed = applyRegexRules(result.content, step.optJSONArray("replyRegexRules"))
+            replies.add(processed)
+            if (isFinal) lastResult = result.copy(content = processed)
+        }
+        return lastResult
+    }
+
+    private data class RunnerTurn(val index: Int, var user: String, var assistant: String)
+
+    private fun resolveFinalStepIndex(steps: JSONArray): Int {
+        var finalIndex = -1
+        for (i in 0 until steps.length()) {
+            if (steps.optJSONObject(i)?.optBoolean("isFinal") == true) {
+                if (finalIndex >= 0) throw IllegalStateException("多步编排只能有一个最终步骤")
+                finalIndex = i
+            }
+        }
+        if (finalIndex >= 0 && finalIndex != steps.length() - 1) {
+            throw IllegalStateException("最终步骤必须是最后一步")
+        }
+        return if (finalIndex >= 0) finalIndex else steps.length() - 1
+    }
+
+    private fun buildRunnerTurns(session: ChatSession, prompt: PromptPreset): List<RunnerTurn> {
+        val turns = mutableListOf<RunnerTurn>()
+        var startIndex = 0
+        if (prompt.firstUser.isNotBlank() && session.history.firstOrNull()?.role == "assistant") {
+            turns.add(RunnerTurn(1, prompt.firstUser, session.history.first().content))
+            startIndex = 1
+        }
+        var pendingUser: ChatMessage? = null
+        for (i in startIndex until session.history.size) {
+            val message = session.history[i]
+            if (message.role == "user") {
+                pendingUser = message
+            } else if (message.role == "assistant" && pendingUser != null) {
+                turns.add(RunnerTurn(turns.size + 1, pendingUser?.content.orEmpty(), message.content))
+                pendingUser = null
+            }
+        }
+        return turns
+    }
+
+    private fun latestUserContent(session: ChatSession): String {
+        for (i in session.history.size - 1 downTo 0) {
+            val message = session.history[i]
+            if (message.role == "user") return message.content
+        }
+        return ""
+    }
+
+    private fun selectRunnerTurns(turns: List<RunnerTurn>, history: JSONObject?): MutableList<RunnerTurn> {
+        if (turns.isEmpty()) return mutableListOf()
+        val rawMode = history?.optString("mode", "all").orEmpty().lowercase(Locale.ROOT)
+        val mode = when {
+            rawMode.contains("none") || rawMode.contains("empty") -> "none"
+            rawMode.contains("range") -> "range"
+            rawMode.contains("last") || rawMode.contains("latest") || rawMode.contains("recent") -> "latest"
+            else -> "all"
+        }
+        if (mode == "none") return mutableListOf()
+        var start = 1
+        var end = turns.size
+        if (mode == "range") {
+            start = history?.optInt("start", 1) ?: 1
+            end = history?.optInt("end", turns.size) ?: turns.size
+        } else if (mode == "latest") {
+            val latest = history?.optInt("latest", 1) ?: 1
+            val count = maxOf(1, history?.optInt("count", latest) ?: latest)
+            start = maxOf(1, turns.size - count + 1)
+            end = turns.size
+        }
+        if (start < 1 || end < start || end > turns.size) {
+            throw IllegalStateException("历史回合范围无效: $start..$end (总回合 ${turns.size})")
+        }
+        return turns.subList(start - 1, end).map { it.copy() }.toMutableList()
+    }
+
+    private fun applyTurnEdits(
+        turns: MutableList<RunnerTurn>,
+        edits: JSONArray?,
+        replies: List<String>,
+        targetAssistant: Boolean
+    ) {
+        if (edits == null) return
+        for (i in 0 until edits.length()) {
+            val edit = edits.optJSONObject(i) ?: continue
+            val turnIndex = edit.optInt("turn", Int.MIN_VALUE)
+            val turn = turns.firstOrNull { it.index == turnIndex }
+                ?: throw IllegalStateException("回合改写目标不存在: turn $turnIndex")
+            if (targetAssistant) {
+                turn.assistant = applyContentEdit(turn.assistant, edit, replies)
+            } else {
+                turn.user = applyContentEdit(turn.user, edit, replies)
+            }
+        }
+    }
+
+    private fun applyContentEdit(base: String, editValue: Any?, replies: List<String>): String {
+        if (editValue == null || editValue == JSONObject.NULL) return base
+        if (editValue is String) return interpolateReplies(editValue, replies)
+        val edit = editValue as? JSONObject ?: return base
+        val mode = edit.optString("mode", "replace").lowercase(Locale.ROOT)
+        val rawContent = if (edit.has("content")) edit.optString("content") else edit.optString("text")
+        val content = interpolateReplies(rawContent, replies)
+        return when (mode) {
+            "keep", "none", "unchanged" -> base
+            "append" -> base + content
+            "prepend" -> content + base
+            else -> content
+        }
+    }
+
+    private fun interpolateReplies(text: String, replies: List<String>): String {
+        return Regex("\\{\\{\\s*reply(\\d+)\\s*\\}\\}").replace(text) { match ->
+            val index = match.groupValues[1].toIntOrNull()?.minus(1)
+            if (index == null || index !in replies.indices) {
+                throw IllegalStateException("引用了不存在的回复变量 ${match.value}")
+            }
+            replies[index]
+        }
+    }
+
+    private fun resolveStepPreset(state: NativeChatState, step: JSONObject, defaultPreset: ModelPreset): ModelPreset {
+        val presetName = when {
+            step.has("preset") -> step.optString("preset")
+            step.has("presetName") -> step.optString("presetName")
+            else -> ""
+        }.trim()
+        if (presetName.isNotBlank()) {
+            return state.modelPresets.firstOrNull { it.name.trim() == presetName }
+                ?: throw IllegalStateException("Step 模型预设不存在: $presetName")
+        }
+        if (step.has("presetIndex")) {
+            val rawIndex = step.optInt("presetIndex")
+            val index = if (rawIndex >= 0) rawIndex else state.modelPresets.size + rawIndex
+            return state.modelPresets.getOrNull(index)
+                ?: throw IllegalStateException("Step 模型预设索引无效: $rawIndex")
+        }
+        return defaultPreset
+    }
+
+    private fun applyRegexRules(content: String, rules: JSONArray?): String {
+        if (content.isBlank() || rules == null || rules.length() == 0) return content
+        var result = content
+        for (i in 0 until rules.length()) {
+            val rule = rules.optJSONObject(i) ?: continue
+            val pattern = rule.optString("pattern")
+            if (pattern.isBlank()) continue
+            val replacement = rule.optString("replacement")
+            result = runCatching { Regex(pattern).replace(result, replacement) }.getOrDefault(result)
+        }
+        return result
     }
 
     private fun sendOpenAICompatible(
@@ -645,13 +856,28 @@ class NativeAiClient {
             .put("stream", cfg.stream)
             .put("max_tokens", if (cfg.maxTokens > 0) cfg.maxTokens else 4096)
         if (extracted.first.isNotBlank()) body.put("system", extracted.first)
+        val thinkingEffort = normalizeAnthropicEffort(cfg.thinkingEffort)
         if (cfg.useThinking) {
-            val budget = max(1024, minOf(body.optInt("max_tokens", 4096) / 2, 8192))
-            body.put("thinking", JSONObject().put("type", "enabled").put("budget_tokens", budget))
+            if (useAnthropicAdaptiveThinking(model)) {
+                body.put("thinking", JSONObject().put("type", "adaptive").put("display", "summarized"))
+                if (thinkingEffort.isNotBlank()) body.put("output_config", JSONObject().put("effort", thinkingEffort))
+            } else {
+                val budget = anthropicThinkingBudget(cfg, thinkingEffort, body.optInt("max_tokens", 4096))
+                body.put(
+                    "thinking",
+                    JSONObject()
+                        .put("type", "enabled")
+                        .put("budget_tokens", budget)
+                        .put("display", "summarized")
+                )
+                if (supportsAnthropicOutputEffort(model) && thinkingEffort.isNotBlank()) {
+                    body.put("output_config", JSONObject().put("effort", thinkingEffort))
+                }
+            }
         } else if (cfg.temperature != 0.0) {
             body.put("temperature", cfg.temperature)
         }
-        if (cfg.topP != 0.0) body.put("top_p", cfg.topP)
+        if (cfg.topP != 0.0 && (!cfg.useThinking || cfg.topP >= 0.95)) body.put("top_p", cfg.topP)
 
         val request = Request.Builder()
             .url(cfg.base.ifBlank { "https://api.anthropic.com/v1" }.trimEnd('/') + "/messages")
@@ -694,10 +920,29 @@ class NativeAiClient {
         if (cfg.topK != 0) generationConfig.put("topK", cfg.topK)
         if (cfg.maxOutputTokens != 0) generationConfig.put("maxOutputTokens", cfg.maxOutputTokens)
         if (cfg.useThinking) {
-            generationConfig.put(
-                "thinkingConfig",
-                JSONObject().put("includeThoughts", true).put("thinkingBudget", cfg.thinkingBudget)
-            )
+            val thinkingConfig = JSONObject().put("includeThoughts", true)
+            if (isGemini3Model(model)) {
+                normalizeGeminiThinkingLevel(cfg.thinkingLevel).takeIf { it.isNotBlank() }?.let {
+                    thinkingConfig.put("thinkingLevel", it)
+                }
+            } else {
+                thinkingConfig.put("thinkingBudget", cfg.thinkingBudget)
+            }
+            generationConfig.put("thinkingConfig", thinkingConfig)
+        } else {
+            if (isGemini3Model(model)) {
+                if (!Regex("pro", RegexOption.IGNORE_CASE).containsMatchIn(model)) {
+                    generationConfig.put(
+                        "thinkingConfig",
+                        JSONObject().put("thinkingLevel", "minimal").put("includeThoughts", false)
+                    )
+                }
+            } else if (!isGemini25ProModel(model)) {
+                generationConfig.put(
+                    "thinkingConfig",
+                    JSONObject().put("thinkingBudget", 0).put("includeThoughts", false)
+                )
+            }
         }
         val body = JSONObject().put("contents", contents)
         if (extracted.first.isNotBlank()) {
@@ -893,6 +1138,62 @@ class NativeAiClient {
         val raw = value.trim().lowercase(Locale.ROOT)
         if (isOmitEffort(raw)) return ""
         return if (raw == "max" || raw == "xhigh") "max" else "high"
+    }
+
+    private fun normalizeAnthropicEffort(value: String): String {
+        val raw = value.trim().lowercase(Locale.ROOT)
+        if (isOmitEffort(raw)) return ""
+        return when (raw) {
+            "max", "xhigh" -> raw
+            "low", "medium", "high" -> raw
+            "minimal" -> "low"
+            else -> "high"
+        }
+    }
+
+    private fun anthropicThinkingBudget(cfg: ModelConfig, effort: String, maxTokens: Int): Int {
+        if (cfg.thinkingBudget >= 1024) return cfg.thinkingBudget
+        val budget = when (effort) {
+            "low" -> 1024
+            "medium" -> 4096
+            "max" -> 16000
+            else -> 10000
+        }
+        val cap = maxTokens - 1
+        return if (cap >= 1024) minOf(budget, cap) else budget
+    }
+
+    private fun useAnthropicAdaptiveThinking(model: String): Boolean {
+        val name = model.lowercase(Locale.ROOT)
+        return Regex("claude-mythos").containsMatchIn(name) ||
+            Regex("claude-(?:opus|sonnet)-4-6").containsMatchIn(name) ||
+            Regex("claude-opus-4-(?:[7-9]|\\d{2,})").containsMatchIn(name)
+    }
+
+    private fun supportsAnthropicOutputEffort(model: String): Boolean {
+        val name = model.lowercase(Locale.ROOT)
+        return Regex("claude-mythos").containsMatchIn(name) ||
+            Regex("claude-(?:opus|sonnet)-4-6").containsMatchIn(name) ||
+            Regex("claude-opus-4-(?:[5-9]|\\d{2,})").containsMatchIn(name)
+    }
+
+    private fun isGemini3Model(model: String): Boolean {
+        return Regex("^gemini-3", RegexOption.IGNORE_CASE).containsMatchIn(model)
+    }
+
+    private fun isGemini25ProModel(model: String): Boolean {
+        val name = model.lowercase(Locale.ROOT)
+        return Regex("gemini-2\\.5").containsMatchIn(name) && Regex("pro").containsMatchIn(name)
+    }
+
+    private fun normalizeGeminiThinkingLevel(value: String): String {
+        val raw = value.trim().lowercase(Locale.ROOT)
+        if (isOmitEffort(raw)) return ""
+        return when (raw) {
+            "minimal", "low", "medium", "high" -> raw
+            "max", "xhigh" -> "high"
+            else -> "high"
+        }
     }
 
     private fun isOmitEffort(value: String): Boolean {

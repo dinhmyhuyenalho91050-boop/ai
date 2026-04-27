@@ -1,7 +1,9 @@
 package com.example.htmlapp
 
+import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.Dialog
+import android.content.Context
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Shader
@@ -20,12 +22,16 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.inputmethod.EditorInfo
-import android.widget.CheckBox
+import android.webkit.JavascriptInterface
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Space
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.addCallback
@@ -92,6 +98,7 @@ class MainActivity : AppCompatActivity() {
         setupBackNavigation()
         renderAll()
         hideSystemBars()
+        migrateLegacyWebStateIfNeeded()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -179,7 +186,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupClicks() {
         findViewById<TextView>(R.id.btn_sessions).setOnClickListener { setSidebarVisible(true) }
         findViewById<TextView>(R.id.btn_settings).setOnClickListener { showSettingsDialog() }
-        findViewById<TextView>(R.id.btn_new_chat).setOnClickListener { newChat() }
+        findViewById<TextView>(R.id.btn_new_chat).setOnClickListener { showPromptSelector() }
         backdrop.setOnClickListener { setSidebarVisible(false) }
         sendButton.setOnClickListener {
             if (isSending) stopSending() else submitMessage()
@@ -224,6 +231,155 @@ class MainActivity : AppCompatActivity() {
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller.hide(WindowInsetsCompat.Type.systemBars())
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun migrateLegacyWebStateIfNeeded() {
+        val prefs = getSharedPreferences("native-chat", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("legacy_web_migrated", false)) return
+        if (!looksLikeFreshNativeState()) return
+
+        val webView = WebView(this).apply {
+            visibility = View.GONE
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.databaseEnabled = true
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        }
+        root.addView(webView, FrameLayout.LayoutParams(1, 1))
+
+        fun finishMigration() {
+            prefs.edit().putBoolean("legacy_web_migrated", true).apply()
+            runCatching {
+                root.removeView(webView)
+                webView.removeAllViews()
+                webView.destroy()
+            }
+        }
+
+        mainHandler.postDelayed({
+            if (webView.parent != null) finishMigration()
+        }, 8000)
+
+        webView.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun onData(jsonText: String) {
+                mainHandler.post {
+                    runCatching {
+                        val data = JSONObject(jsonText)
+                        if (hasLegacyPayload(data)) {
+                            repository.importBackup(state, data, replace = true)
+                            state.ensureSession()
+                            renderAll()
+                            toast("已迁移旧版 Web 数据")
+                        }
+                    }.onFailure {
+                        toast("旧版数据迁移失败: ${it.message}")
+                    }
+                    finishMigration()
+                }
+            }
+
+            @JavascriptInterface
+            fun onError(message: String) {
+                mainHandler.post {
+                    if (message.isNotBlank()) {
+                        toast("旧版数据迁移跳过: $message")
+                    }
+                    finishMigration()
+                }
+            }
+        }, "NativeMigrationBridge")
+
+        webView.loadDataWithBaseURL(
+            "https://appassets.androidplatform.net/assets/native-migration.html",
+            legacyMigrationHtml(),
+            "text/html",
+            "UTF-8",
+            null
+        )
+    }
+
+    private fun looksLikeFreshNativeState(): Boolean {
+        val promptFresh = state.promptPresets.keys == setOf("default")
+        val modelFresh = state.modelPresets.size == 2 &&
+            state.modelPresets.all { it.config.key.isBlank() } &&
+            state.modelPresets.map { it.name }.containsAll(listOf("GPT-4", "DeepSeek"))
+        val sessionFresh = state.sessions.size <= 1 && state.sessions.values.all { it.history.isEmpty() }
+        return promptFresh && modelFresh && sessionFresh
+    }
+
+    private fun hasLegacyPayload(data: JSONObject): Boolean {
+        val models = data.optJSONArray("modelPresets")
+        val prompts = data.optJSONObject("promptPresets")
+        val sessions = data.optJSONObject("sessions")
+        return (models != null && models.length() > 0) ||
+            (prompts != null && prompts.length() > 0) ||
+            (sessions != null && sessions.length() > 0)
+    }
+
+    private fun legacyMigrationHtml(): String {
+        return """
+            <!doctype html><meta charset="utf-8">
+            <script>
+            (async function(){
+              const keys={
+                modelPresets:'chat.modelPresets',
+                promptPresets:'chat.promptPresets',
+                sessions:'chat.sessions',
+                currentId:'chat.currentId',
+                sessionIndex:'chat.sessions.index',
+                sessionPrefix:'chat.session.'
+              };
+              function openDb(){
+                return new Promise(function(resolve,reject){
+                  const req=indexedDB.open('chatAppDB',1);
+                  req.onerror=function(){ reject(req.error||new Error('open indexedDB failed')); };
+                  req.onsuccess=function(){ resolve(req.result); };
+                  req.onupgradeneeded=function(e){
+                    const db=e.target.result;
+                    if(!db.objectStoreNames.contains('chatData'))db.createObjectStore('chatData');
+                  };
+                });
+              }
+              const db=await openDb();
+              function get(key,fallback){
+                return new Promise(function(resolve){
+                  try{
+                    const tx=db.transaction(['chatData'],'readonly');
+                    const store=tx.objectStore('chatData');
+                    const req=store.get(key);
+                    req.onsuccess=function(){ resolve(req.result===undefined?fallback:req.result); };
+                    req.onerror=function(){ resolve(fallback); };
+                  }catch(e){ resolve(fallback); }
+                });
+              }
+              const modelPresets=await get(keys.modelPresets,null);
+              const promptPresets=await get(keys.promptPresets,null);
+              const currentId=await get(keys.currentId,null);
+              let sessions={};
+              const index=await get(keys.sessionIndex,null);
+              if(Array.isArray(index)&&index.length){
+                for(const id of index){
+                  const session=await get(keys.sessionPrefix+id,undefined);
+                  if(session!==undefined)sessions[id]=session;
+                }
+              }else{
+                sessions=await get(keys.sessions,{})||{};
+              }
+              NativeMigrationBridge.onData(JSON.stringify({
+                version:'9.3',
+                timestamp:Date.now(),
+                modelPresets:modelPresets,
+                promptPresets:promptPresets,
+                sessions:sessions,
+                currentId:currentId
+              }));
+            })().catch(function(error){
+              NativeMigrationBridge.onError(error&&error.message?error.message:String(error));
+            });
+            </script>
+        """.trimIndent()
     }
 
     private fun renderAll() {
@@ -355,14 +511,87 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun newChat() {
+    private fun showPromptSelector() {
+        if (isSending) return
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            addView(dialogTitle("选择提示词预设"))
+        }
+        state.promptPresets.keys.sorted().forEach { key ->
+            val preset = state.promptPresets[key] ?: return@forEach
+            list.addView(promptPresetSelectCard(key, preset).apply {
+                setOnClickListener {
+                    dialog.dismiss()
+                    createNewChat(key)
+                }
+            })
+        }
+        list.addView(dialogButton("取消").apply { setOnClickListener { dialog.dismiss() } })
+
+        val scroll = ScrollView(this).apply {
+            addView(list)
+            background = rounded(color(R.color.chat_panel), dp(16), dp(1), color(R.color.chat_border))
+        }
+        dialog.setContentView(scroll)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.setOnShowListener {
+            dialog.window?.setLayout(
+                min(resources.displayMetrics.widthPixels - dp(32), dp(700)),
+                min(resources.displayMetrics.heightPixels - dp(96), dp(620))
+            )
+        }
+        dialog.show()
+    }
+
+    private fun promptPresetSelectCard(key: String, preset: PromptPreset): View {
+        val desc = listOf(preset.firstUser, preset.firstAssistant, preset.sysPrompt)
+            .firstOrNull { it.isNotBlank() }
+            ?.take(80)
+            ?: "暂无描述"
+        val rules = runCatching { JSONArray(preset.regexRulesJson).length() }.getOrDefault(0)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(Color.argb(154, 21, 25, 33), dp(12), dp(1), color(R.color.chat_border))
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(12) }
+            addView(TextView(context).apply {
+                text = preset.name.ifBlank { key }
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                includeFontPadding = false
+            })
+            addView(TextView(context).apply {
+                text = desc
+                setTextColor(color(R.color.chat_muted))
+                textSize = 12f
+                setPadding(0, dp(8), 0, 0)
+            })
+            addView(TextView(context).apply {
+                text = "$rules 个规则"
+                setTextColor(color(R.color.chat_accent_blue))
+                textSize = 11f
+                setPadding(0, dp(8), 0, 0)
+            })
+        }
+    }
+
+    private fun createNewChat(presetKey: String = "default") {
         if (isSending) return
         val preset = state.currentPreset()
-        val prompt = state.promptPresets["default"] ?: PromptPreset()
+        val resolvedKey = if (state.promptPresets.containsKey(presetKey)) presetKey else "default"
+        val prompt = state.promptPresets[resolvedKey] ?: PromptPreset()
         val session = ChatSession(
             name = "对话 ${state.sessions.size + 1}",
             modelName = preset?.name ?: "未知",
-            promptPresetName = "default"
+            promptPresetName = resolvedKey
         )
         if (prompt.firstAssistant.isNotBlank()) {
             session.history.add(
@@ -745,7 +974,8 @@ class MainActivity : AppCompatActivity() {
                 includeFontPadding = false
             })
             addView(TextView(context).apply {
-                text = "${session.modelName.ifBlank { state.currentPreset()?.name.orEmpty() }} · ${session.history.size} 条消息"
+                val promptName = state.promptPresets[session.promptPresetName]?.name ?: "默认"
+                text = "${session.modelName.ifBlank { state.currentPreset()?.name.orEmpty() }} · 提示词:$promptName · ${session.history.size} 条消息"
                 setTextColor(color(R.color.chat_muted))
                 textSize = 11f
                 includeFontPadding = false
@@ -781,7 +1011,7 @@ class MainActivity : AppCompatActivity() {
         }
         val tabs = listOf("模型预设", "提示词", "备份")
         val tabViews = mutableListOf<TextView>()
-        var saveCurrentPane: (() -> Unit)? = null
+        var saveCurrentPane: (() -> Boolean)? = null
 
         val body = LinearLayout(this).apply {
             orientation = if (settingsCompact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
@@ -841,7 +1071,7 @@ class MainActivity : AppCompatActivity() {
         }
         footer.addView(dialogButton("保存").apply {
             setOnClickListener {
-                saveCurrentPane?.invoke()
+                if (saveCurrentPane?.invoke() == false) return@setOnClickListener
                 repository.save(state)
                 renderAll()
                 toast("已保存")
@@ -891,7 +1121,7 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun fillModelsPane(host: LinearLayout): () -> Unit {
+    private fun fillModelsPane(host: LinearLayout): () -> Boolean {
         host.addView(dialogTitle("模型预设配置"))
         val editors = mutableListOf<ModelPresetEditor>()
         state.modelPresets.forEachIndexed { index, preset ->
@@ -914,35 +1144,298 @@ class MainActivity : AppCompatActivity() {
             }
         })
         return {
+            val backup = state.modelPresets.map { ModelPreset.fromJson(it.toJson()) }
             editors.forEach { it.applyTo(state.modelPresets[it.index]) }
-            if (state.enabledPresets().isEmpty()) state.modelPresets.firstOrNull()?.enabled = true
-            state.currentModelIndex = state.currentModelIndex.coerceIn(0, max(0, state.enabledPresets().size - 1))
+            val enabled = state.enabledPresets()
+            if (enabled.size > 2) {
+                state.modelPresets.clear()
+                state.modelPresets.addAll(backup)
+                toast("最多只能启用2个模型预设")
+                false
+            } else {
+                if (enabled.isEmpty()) state.modelPresets.firstOrNull()?.enabled = true
+                state.currentModelIndex = state.currentModelIndex.coerceIn(0, max(0, state.enabledPresets().size - 1))
+                true
+            }
         }
     }
 
-    private fun fillPromptsPane(host: LinearLayout): () -> Unit {
-        val preset = state.promptPresets["default"] ?: PromptPreset().also { state.promptPresets["default"] = it }
-        host.addView(dialogTitle("默认预设"))
-        val name = field("名称", preset.name)
+    private fun fillPromptsPane(host: LinearLayout): () -> Boolean {
+        if (!state.promptPresets.containsKey("default")) state.promptPresets["default"] = PromptPreset()
+        var currentKey = state.activeSession()?.promptPresetName
+            ?.takeIf { state.promptPresets.containsKey(it) }
+            ?: "default"
+        var currentEditor: PromptPresetEditor? = null
+
+        val body = LinearLayout(this).apply {
+            orientation = if (settingsCompact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val listHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { bottomMargin = dp(14) }
+            } else {
+                LinearLayout.LayoutParams(dp(220), ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { marginEnd = dp(16) }
+            }
+        }
+        val editorHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            } else {
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+        }
+        body.addView(listHost)
+        body.addView(editorHost)
+        host.addView(body)
+
+        fun saveEditor(): Boolean {
+            val editor = currentEditor ?: return true
+            val preset = state.promptPresets[editor.key] ?: return true
+            editor.applyTo(preset)
+            return true
+        }
+
+        fun renderList() {
+            listHost.removeAllViews()
+            listHost.addView(dialogTitle("提示词预设"))
+            state.promptPresets.keys.sorted().forEach { key ->
+                val preset = state.promptPresets[key] ?: return@forEach
+                listHost.addView(promptPresetListItem(key, preset, key == currentKey).apply {
+                    setOnClickListener {
+                        saveEditor()
+                        currentKey = key
+                        renderList()
+                        currentEditor = renderPromptPresetEditor(editorHost, key)
+                    }
+                })
+            }
+            listHost.addView(dialogButton("+ 新增预设").apply {
+                setOnClickListener {
+                    saveEditor()
+                    val key = uniquePromptKey("preset_${state.promptPresets.size + 1}")
+                    state.promptPresets[key] = PromptPreset(name = "新预设 ${state.promptPresets.size + 1}")
+                    currentKey = key
+                    renderList()
+                    currentEditor = renderPromptPresetEditor(editorHost, key)
+                }
+            })
+            listHost.addView(dialogButton("复制当前").apply {
+                setOnClickListener {
+                    saveEditor()
+                    val source = state.promptPresets[currentKey] ?: return@setOnClickListener
+                    val key = uniquePromptKey("${currentKey}_copy")
+                    state.promptPresets[key] = source.copy(name = "${source.name} 副本")
+                    currentKey = key
+                    renderList()
+                    currentEditor = renderPromptPresetEditor(editorHost, key)
+                }
+            })
+            listHost.addView(dialogButton("删除当前").apply {
+                setOnClickListener {
+                    if (currentKey == "default") {
+                        toast("无法删除默认预设")
+                        return@setOnClickListener
+                    }
+                    state.promptPresets.remove(currentKey)
+                    state.sessions.values.forEach {
+                        if (it.promptPresetName == currentKey) it.promptPresetName = "default"
+                    }
+                    currentKey = "default"
+                    renderList()
+                    currentEditor = renderPromptPresetEditor(editorHost, currentKey)
+                }
+            })
+        }
+
+        renderList()
+        currentEditor = renderPromptPresetEditor(editorHost, currentKey)
+        return { saveEditor() }
+    }
+
+    private fun promptPresetListItem(key: String, preset: PromptPreset, selected: Boolean): View {
+        val desc = listOf(preset.sysPrompt, preset.firstAssistant, preset.firstUser)
+            .firstOrNull { it.isNotBlank() }
+            ?.take(30)
+            ?: "空"
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(
+                if (selected) Color.argb(56, 96, 165, 250) else Color.argb(154, 21, 25, 33),
+                dp(8),
+                dp(1),
+                if (selected) color(R.color.chat_accent_blue) else color(R.color.chat_border)
+            )
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(8) }
+            addView(TextView(context).apply {
+                text = preset.name.ifBlank { key }
+                setTextColor(if (selected) color(R.color.chat_accent_blue) else Color.WHITE)
+                textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
+                includeFontPadding = false
+            })
+            addView(TextView(context).apply {
+                text = desc
+                setTextColor(color(R.color.chat_muted))
+                textSize = 11f
+                setPadding(0, dp(6), 0, 0)
+                includeFontPadding = false
+            })
+        }
+    }
+
+    private fun renderPromptPresetEditor(host: LinearLayout, key: String): PromptPresetEditor {
+        host.removeAllViews()
+        val preset = state.promptPresets[key] ?: PromptPreset().also { state.promptPresets[key] = it }
+        host.addView(dialogTitle("编辑预设"))
+        host.addView(TextView(this).apply {
+            text = "当前键: $key"
+            setTextColor(color(R.color.chat_muted))
+            textSize = 11f
+            setPadding(0, 0, 0, dp(12))
+        })
+        val name = field("预设名称", preset.name)
         val sys = field("系统提示词", preset.sysPrompt, multiLine = true)
         val firstUser = field("首条用户消息", preset.firstUser, multiLine = true)
         val firstAssistant = field("首条助手消息", preset.firstAssistant, multiLine = true)
         val prefix = field("消息前缀", preset.messagePrefix, multiLine = true)
-        val prefill = field("助手预填", preset.assistantPrefill, multiLine = true)
-        val regexRules = field("正则规则(JSON)", preset.regexRulesJson, multiLine = true)
-        listOf(name, sys, firstUser, firstAssistant, prefix, prefill, regexRules).forEach { host.addView(it.container) }
-        return {
-            preset.name = name.value()
-            preset.sysPrompt = sys.value()
-            preset.firstUser = firstUser.value()
-            preset.firstAssistant = firstAssistant.value()
-            preset.messagePrefix = prefix.value()
-            preset.assistantPrefill = prefill.value()
-            preset.regexRulesJson = regexRules.value().ifBlank { "[]" }
+        val prefill = field("助手预填内容", preset.assistantPrefill, multiLine = true)
+        listOf(name, sys, firstUser, firstAssistant, prefix, prefill).forEach { host.addView(it.container) }
+
+        host.addView(separator(dp(10)))
+        host.addView(sectionLabel("多步任务编排器"))
+        val multiStep = field("配置(JSON)", preset.multiStepRunnerJson, multiLine = true)
+        host.addView(multiStep.container)
+
+        host.addView(separator(dp(10)))
+        host.addView(sectionLabel("正则替换规则(生成后处理)"))
+        val regexHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        renderRegexRuleEditors(regexHost, preset.regexRulesJson)
+        host.addView(regexHost)
+        host.addView(dialogButton("+ 添加规则").apply {
+            setOnClickListener { addRegexRuleEditor(regexHost, JSONObject()) }
+        })
+
+        return PromptPresetEditor(
+            key = key,
+            name = name,
+            sys = sys,
+            firstUser = firstUser,
+            firstAssistant = firstAssistant,
+            prefix = prefix,
+            prefill = prefill,
+            multiStep = multiStep,
+            regexHost = regexHost,
+            regexRules = { collectRegexRules(regexHost).toString() }
+        )
+    }
+
+    private fun sectionLabel(textValue: String): TextView {
+        return TextView(this).apply {
+            text = textValue
+            setTextColor(color(R.color.chat_muted))
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+            setPadding(0, dp(12), 0, dp(10))
         }
     }
 
-    private fun fillBackupPane(host: LinearLayout, dialog: Dialog): () -> Unit {
+    private fun renderRegexRuleEditors(host: LinearLayout, rulesJson: String) {
+        host.removeAllViews()
+        val rules = runCatching { JSONArray(rulesJson) }.getOrDefault(JSONArray())
+        if (rules.length() == 0) {
+            host.addView(TextView(this).apply {
+                tag = "empty"
+                text = "暂无规则。点击下方按钮添加。"
+                setTextColor(color(R.color.chat_muted))
+                textSize = 11f
+                setPadding(0, dp(6), 0, dp(10))
+            })
+            return
+        }
+        for (i in 0 until rules.length()) {
+            addRegexRuleEditor(host, rules.optJSONObject(i) ?: JSONObject())
+        }
+    }
+
+    private fun addRegexRuleEditor(host: LinearLayout, rule: JSONObject) {
+        if (host.childCount == 1 && (host.getChildAt(0).tag as? String) == "empty") {
+            host.removeAllViews()
+        } else if (host.childCount == 1 && host.getChildAt(0) is TextView && host.getChildAt(0).tag == null) {
+            host.removeAllViews()
+        }
+        val name = field("规则名称", rule.optString("name"))
+        val pattern = field("查找正则", rule.optString("pattern"), multiLine = true)
+        val replacement = field("替换为", rule.optString("replacement"), multiLine = true)
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(Color.argb(154, 21, 25, 33), dp(10), dp(1), color(R.color.chat_border))
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            tag = RegexRuleRefs(name, pattern, replacement)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(10) }
+            addView(name.container)
+            addView(pattern.container)
+            addView(replacement.container)
+        }
+        card.addView(dialogButton("删除规则").apply {
+            setOnClickListener { host.removeView(card) }
+        })
+        host.addView(card)
+    }
+
+    private fun collectRegexRules(host: LinearLayout): JSONArray {
+        val rules = JSONArray()
+        for (i in 0 until host.childCount) {
+            val refs = host.getChildAt(i).tag as? RegexRuleRefs ?: continue
+            val pattern = refs.pattern.value().trim()
+            if (pattern.isBlank()) continue
+            rules.put(
+                JSONObject()
+                    .put("name", refs.name.value().trim())
+                    .put("pattern", pattern)
+                    .put("replacement", refs.replacement.value())
+            )
+        }
+        return rules
+    }
+
+    private fun uniquePromptKey(seed: String): String {
+        val base = seed.trim()
+            .lowercase(Locale.ROOT)
+            .replace(Regex("[^a-z0-9_\\-]+"), "_")
+            .trim('_')
+            .ifBlank { "preset" }
+        var key = base
+        var index = 2
+        while (state.promptPresets.containsKey(key)) {
+            key = "${base}_$index"
+            index += 1
+        }
+        return key
+    }
+
+    private fun fillBackupPane(host: LinearLayout, dialog: Dialog): () -> Boolean {
         host.addView(dialogTitle("备份"))
         host.addView(dialogButton("导出全部").apply { setOnClickListener { exportBackup("all") } })
         host.addView(dialogButton("导出对话").apply { setOnClickListener { exportBackup("sessions") } })
@@ -986,7 +1479,7 @@ class MainActivity : AppCompatActivity() {
                     .show()
             }
         })
-        return {}
+        return { true }
     }
 
     private fun exportBackup(kind: String) {
@@ -1010,18 +1503,7 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(14) }
-            addView(editor.enabledRow)
-            addView(editor.name.container)
-            addView(editor.type.container)
-            addView(editor.base.container)
-            addView(editor.model.container)
-            addView(editor.key.container)
-            addView(editor.temperature.container)
-            addView(editor.topP.container)
-            addView(editor.maxTokens.container)
-            addView(editor.streamRow)
-            addView(editor.thinkingRow)
-            addView(editor.thinkingEffort.container)
+            editor.rows.forEach { addView(it) }
         }
     }
 
@@ -1110,7 +1592,7 @@ class MainActivity : AppCompatActivity() {
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                         .apply { bottomMargin = dp(8) }
                 } else {
-                    LinearLayout.LayoutParams(dp(104), ViewGroup.LayoutParams.WRAP_CONTENT)
+                    LinearLayout.LayoutParams(dp(140), ViewGroup.LayoutParams.WRAP_CONTENT)
                 }
             })
             addView(input)
@@ -1118,42 +1600,209 @@ class MainActivity : AppCompatActivity() {
         return FieldRef(container, input)
     }
 
-    private fun checkboxRow(label: String, checked: Boolean): Pair<LinearLayout, CheckBox> {
-        val box = CheckBox(this).apply {
-            isChecked = checked
-            setTextColor(Color.WHITE)
-            text = label
+    private fun selectField(
+        label: String,
+        options: List<Pair<String, String>>,
+        selected: String
+    ): SelectRef {
+        val labels = options.map { it.second }
+        val adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, labels) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                return (super.getView(position, convertView, parent) as TextView).apply {
+                    setTextColor(Color.WHITE)
+                    textSize = 14f
+                    includeFontPadding = false
+                }
+            }
+
+            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+                return (super.getDropDownView(position, convertView, parent) as TextView).apply {
+                    setTextColor(Color.WHITE)
+                    setBackgroundColor(color(R.color.chat_panel))
+                    textSize = 14f
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                }
+            }
         }
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(8))
-            addView(box)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        val spinner = Spinner(this).apply {
+            this.adapter = adapter
+            setSelection(options.indexOfFirst { it.first == selected }.takeIf { it >= 0 } ?: 0)
+            background = rounded(Color.argb(72, 0, 0, 0), dp(8), dp(1), color(R.color.chat_border))
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44))
+            } else {
+                LinearLayout.LayoutParams(0, dp(44), 1f)
+            }
         }
-        return row to box
+        val container = LinearLayout(this).apply {
+            orientation = if (settingsCompact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            gravity = if (settingsCompact) Gravity.START else Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, if (settingsCompact) dp(14) else dp(11))
+            addView(TextView(context).apply {
+                text = label
+                setTextColor(color(R.color.chat_muted))
+                textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
+                includeFontPadding = false
+                layoutParams = if (settingsCompact) {
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                        .apply { bottomMargin = dp(8) }
+                } else {
+                    LinearLayout.LayoutParams(dp(140), ViewGroup.LayoutParams.WRAP_CONTENT)
+                }
+            })
+            addView(spinner)
+        }
+        return SelectRef(container, spinner, options)
+    }
+
+    private fun yesNoOptions(): List<Pair<String, String>> {
+        return listOf("true" to "是", "false" to "否")
+    }
+
+    private fun modelTypeOptions(): List<Pair<String, String>> {
+        return listOf(
+            "openai" to "OpenAI",
+            "anthropic" to "Anthropic兼容",
+            "deepseek" to "DeepSeek直连",
+            "kimi" to "Kimi",
+            "gemini" to "Gemini直连",
+            "gemini-proxy" to "Gemini代理"
+        )
+    }
+
+    private fun providerDefaultBase(type: String, value: String): String {
+        if (value.isNotBlank()) return value
+        return when (type) {
+            "anthropic" -> "https://api.anthropic.com/v1"
+            "deepseek" -> "https://api.deepseek.com"
+            "kimi" -> "https://api.moonshot.cn/v1"
+            "gemini" -> "https://generativelanguage.googleapis.com"
+            else -> "https://api.openai.com/v1"
+        }
+    }
+
+    private fun providerDefaultModel(type: String, value: String): String {
+        if (value.isNotBlank()) return value
+        return when (type) {
+            "anthropic" -> "claude-3-5-sonnet-20240620"
+            "deepseek" -> "deepseek-v4-flash"
+            "kimi" -> "kimi-k2.5"
+            "gemini", "gemini-proxy" -> "gemini-2.5-pro"
+            else -> "gpt-4o-mini"
+        }
+    }
+
+    private fun effortOptions(type: String): List<Pair<String, String>> {
+        return when (type) {
+            "deepseek" -> listOf(
+                "" to "默认(high)",
+                "__omit__" to "不发送(兼容)",
+                "high" to "high",
+                "max" to "max"
+            )
+            "anthropic" -> listOf(
+                "" to "默认(high)",
+                "__omit__" to "不发送(兼容)",
+                "low" to "low",
+                "medium" to "medium",
+                "high" to "high",
+                "xhigh" to "xhigh",
+                "max" to "max"
+            )
+            else -> listOf(
+                "" to "默认(medium)",
+                "__omit__" to "不发送(兼容)",
+                "none" to "none",
+                "minimal" to "minimal",
+                "low" to "low",
+                "medium" to "medium",
+                "high" to "high",
+                "xhigh" to "xhigh"
+            )
+        }
+    }
+
+    private fun geminiThinkingLevelOptions(): List<Pair<String, String>> {
+        return listOf(
+            "" to "默认(high/自动)",
+            "minimal" to "minimal",
+            "low" to "low",
+            "medium" to "medium",
+            "high" to "high"
+        )
     }
 
     private fun modelPresetEditor(index: Int, preset: ModelPreset): ModelPresetEditor {
-        val enabledPair = checkboxRow("启用 ${preset.name}", preset.enabled)
-        val streamPair = checkboxRow("流式输出", preset.config.stream)
-        val thinkingPair = checkboxRow("思考模式", preset.config.useThinking)
+        val typeValue = preset.type.lowercase(Locale.ROOT).ifBlank { "openai" }
+        val enabled = selectField("启用", yesNoOptions(), if (preset.enabled) "true" else "false")
+        val name = field("显示名称", preset.name)
+        val type = selectField("模型类型", modelTypeOptions(), typeValue)
+        val base = if (typeValue == "gemini-proxy") null else field("Base URL", providerDefaultBase(typeValue, preset.config.base))
+        val proxyUrl = if (typeValue == "gemini-proxy") field("代理URL", preset.config.proxyUrl.ifBlank { "http://127.0.0.1:8889" }) else null
+        val proxyPass = if (typeValue == "gemini-proxy") field("代理密码", preset.config.proxyPass) else null
+        val key = if (typeValue == "gemini-proxy") null else field("API Key", preset.config.key)
+        val model = field("模型名", providerDefaultModel(typeValue, preset.config.model))
+        val temperature = field("温度(0=不发送)", preset.config.temperature.toString())
+        val topP = field("Top P(0=不发送)", preset.config.topP.toString())
+        val topK = if (typeValue == "gemini" || typeValue == "gemini-proxy") field("Top K(0=不发送)", preset.config.topK.takeIf { it != 0 }?.toString().orEmpty()) else null
+        val tokenValue = if (typeValue == "gemini" || typeValue == "gemini-proxy") {
+            preset.config.maxOutputTokens
+        } else {
+            preset.config.maxTokens
+        }
+        val maxTokens = field("最大输出长度(0=不发送)", tokenValue.toString())
+        val stream = selectField("流式输出", yesNoOptions(), if (preset.config.stream) "true" else "false")
+        val useThinking = selectField("启用思维链", yesNoOptions(), if (preset.config.useThinking) "true" else "false")
+        val thinkingEffort = when (typeValue) {
+            "gemini", "gemini-proxy", "kimi" -> null
+            else -> selectField("思维链级别", effortOptions(typeValue), preset.config.thinkingEffort)
+        }
+        val thinkingLevel = if (typeValue == "gemini" || typeValue == "gemini-proxy") {
+            selectField("思维级别", geminiThinkingLevelOptions(), preset.config.thinkingLevel)
+        } else {
+            null
+        }
+        val thinkingBudget = when (typeValue) {
+            "anthropic" -> field("思维预算", preset.config.thinkingBudget.takeIf { it >= 1024 }?.toString().orEmpty())
+            "gemini", "gemini-proxy" -> field("思维预算", preset.config.thinkingBudget.toString())
+            else -> null
+        }
+        val rows = mutableListOf<View>(
+            enabled.container,
+            name.container,
+            type.container
+        )
+        listOf(base, proxyUrl, proxyPass, key, model, temperature, topP, topK, maxTokens).forEach {
+            if (it != null) rows.add(it.container)
+        }
+        rows.add(stream.container)
+        rows.add(useThinking.container)
+        if (thinkingEffort != null) rows.add(thinkingEffort.container)
+        if (thinkingLevel != null) rows.add(thinkingLevel.container)
+        if (thinkingBudget != null) rows.add(thinkingBudget.container)
+
         return ModelPresetEditor(
             index = index,
-            enabledRow = enabledPair.first,
-            enabled = enabledPair.second,
-            name = field("名称", preset.name),
-            type = field("类型", preset.type),
-            base = field("Base URL", preset.config.base),
-            model = field("模型", preset.config.model),
-            key = field("API Key", preset.config.key),
-            temperature = field("Temperature", preset.config.temperature.toString()),
-            topP = field("Top P", preset.config.topP.toString()),
-            maxTokens = field("Max Tokens", preset.config.maxTokens.toString()),
-            streamRow = streamPair.first,
-            stream = streamPair.second,
-            thinkingRow = thinkingPair.first,
-            useThinking = thinkingPair.second,
-            thinkingEffort = field("思考强度", preset.config.thinkingEffort)
+            rows = rows,
+            enabled = enabled,
+            name = name,
+            type = type,
+            base = base,
+            proxyUrl = proxyUrl,
+            proxyPass = proxyPass,
+            model = model,
+            key = key,
+            temperature = temperature,
+            topP = topP,
+            topK = topK,
+            maxTokens = maxTokens,
+            stream = stream,
+            useThinking = useThinking,
+            thinkingEffort = thinkingEffort,
+            thinkingBudget = thinkingBudget,
+            thinkingLevel = thinkingLevel
         )
     }
 
@@ -1195,38 +1844,91 @@ class MainActivity : AppCompatActivity() {
         fun value(): String = input.text.toString()
     }
 
+    private data class SelectRef(
+        val container: View,
+        val spinner: Spinner,
+        val options: List<Pair<String, String>>
+    ) {
+        fun value(): String = options.getOrNull(spinner.selectedItemPosition)?.first.orEmpty()
+    }
+
+    private data class RegexRuleRefs(
+        val name: FieldRef,
+        val pattern: FieldRef,
+        val replacement: FieldRef
+    )
+
+    private data class PromptPresetEditor(
+        val key: String,
+        val name: FieldRef,
+        val sys: FieldRef,
+        val firstUser: FieldRef,
+        val firstAssistant: FieldRef,
+        val prefix: FieldRef,
+        val prefill: FieldRef,
+        val multiStep: FieldRef,
+        val regexHost: LinearLayout,
+        val regexRules: () -> String
+    ) {
+        fun applyTo(preset: PromptPreset) {
+            preset.name = name.value().ifBlank { preset.name }
+            preset.sysPrompt = sys.value()
+            preset.firstUser = firstUser.value()
+            preset.firstAssistant = firstAssistant.value()
+            preset.messagePrefix = prefix.value()
+            preset.assistantPrefill = prefill.value()
+            preset.multiStepRunnerJson = multiStep.value().ifBlank { "{\"enabled\":false,\"steps\":[]}" }
+            preset.regexRulesJson = regexRules()
+        }
+    }
+
     private class ModelPresetEditor(
         val index: Int,
-        val enabledRow: LinearLayout,
-        val enabled: CheckBox,
+        val rows: List<View>,
+        val enabled: SelectRef,
         val name: FieldRef,
-        val type: FieldRef,
-        val base: FieldRef,
+        val type: SelectRef,
+        val base: FieldRef?,
+        val proxyUrl: FieldRef?,
+        val proxyPass: FieldRef?,
         val model: FieldRef,
-        val key: FieldRef,
+        val key: FieldRef?,
         val temperature: FieldRef,
         val topP: FieldRef,
+        val topK: FieldRef?,
         val maxTokens: FieldRef,
-        val streamRow: LinearLayout,
-        val stream: CheckBox,
-        val thinkingRow: LinearLayout,
-        val useThinking: CheckBox,
-        val thinkingEffort: FieldRef
+        val stream: SelectRef,
+        val useThinking: SelectRef,
+        val thinkingEffort: SelectRef?,
+        val thinkingBudget: FieldRef?,
+        val thinkingLevel: SelectRef?
     ) {
         fun applyTo(preset: ModelPreset) {
-            preset.enabled = enabled.isChecked
+            preset.enabled = enabled.value() == "true"
             preset.name = name.value().ifBlank { preset.name }
             preset.type = type.value().trim().lowercase(Locale.ROOT).ifBlank { "openai" }
-            preset.config.base = base.value().trim()
+            base?.let { preset.config.base = it.value().trim() }
+            proxyUrl?.let { preset.config.proxyUrl = it.value().trim() }
+            proxyPass?.let { preset.config.proxyPass = it.value().trim() }
             preset.config.model = model.value().trim()
-            preset.config.key = key.value().trim()
+            key?.let { preset.config.key = it.value().trim() }
             preset.config.temperature = temperature.value().toDoubleOrNull() ?: preset.config.temperature
             preset.config.topP = topP.value().toDoubleOrNull() ?: preset.config.topP
-            preset.config.maxTokens = maxTokens.value().toIntOrNull() ?: preset.config.maxTokens
-            preset.config.maxOutputTokens = preset.config.maxTokens
-            preset.config.stream = stream.isChecked
-            preset.config.useThinking = useThinking.isChecked
-            preset.config.thinkingEffort = thinkingEffort.value().ifBlank { preset.config.thinkingEffort }
+            topK?.let { preset.config.topK = it.value().toIntOrNull() ?: 0 }
+            val maxValue = maxTokens.value().toIntOrNull()
+            if (preset.type == "gemini" || preset.type == "gemini-proxy") {
+                if (maxValue != null) preset.config.maxOutputTokens = maxValue
+            } else {
+                if (maxValue != null) {
+                    preset.config.maxTokens = maxValue
+                    preset.config.maxOutputTokens = maxValue
+                }
+            }
+            preset.config.stream = stream.value() == "true"
+            preset.config.useThinking = useThinking.value() == "true"
+            thinkingEffort?.let { preset.config.thinkingEffort = it.value() }
+            thinkingBudget?.let { preset.config.thinkingBudget = it.value().toIntOrNull() ?: preset.config.thinkingBudget }
+            thinkingLevel?.let { preset.config.thinkingLevel = it.value() }
         }
     }
 }
