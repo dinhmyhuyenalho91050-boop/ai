@@ -3,6 +3,35 @@ plugins {
     kotlin("android")
 }
 
+fun signingProperty(name: String): String? = providers.gradleProperty(name)
+    .orElse(providers.environmentVariable(name))
+    .orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+
+fun signingFile(path: String) = file(path)
+    .takeIf { it.exists() }
+    ?: rootProject.file(path)
+
+val releaseStorePath = signingProperty("AI_CHAT_KEYSTORE_FILE")
+val releaseStoreFile = releaseStorePath?.let(::signingFile)
+val releaseStorePassword = signingProperty("AI_CHAT_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingProperty("AI_CHAT_KEY_ALIAS")
+val releaseKeyPassword = signingProperty("AI_CHAT_KEY_PASSWORD") ?: releaseStorePassword
+val releaseStoreType = signingProperty("AI_CHAT_KEYSTORE_TYPE")
+val hasReleaseSigning = releaseStoreFile != null &&
+    releaseStorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null
+
+/*
+ * Keep this lookup backward-compatible with both root-relative paths from CI
+ * (app/signing/release.p12) and app-module-relative paths from local Gradle.
+ */
+if (releaseStorePath != null && releaseStoreFile?.exists() != true) {
+    throw GradleException("Release signing keystore not found: $releaseStorePath")
+}
+
 android {
     namespace = "com.example.htmlapp"
     compileSdk = 34
@@ -11,9 +40,21 @@ android {
         applicationId = "com.example.htmlapp"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.0.2"
         resourceConfigurations += listOf("en", "zh")
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                releaseStoreType?.let { storeType = it }
+            }
+        }
     }
 
     buildTypes {
@@ -22,7 +63,9 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
-            signingConfig = signingConfigs.getByName("debug")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

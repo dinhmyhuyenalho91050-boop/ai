@@ -1726,8 +1726,8 @@ class StateManager{
           temperature:1,top_p:0.95,max_tokens:65536,stream:false
         }},
         {enabled:true,name:'DeepSeek',type:'deepseek',config:{
-          base:'https://api.deepseek.com/beta',key:'',model:'deepseek-reasoner',
-          temperature:1,top_p:0.95,max_tokens:65536,stream:false
+          base:'https://api.deepseek.com',key:'',model:'deepseek-v4-flash',
+          temperature:1,top_p:0.95,max_tokens:65536,stream:false,useThinking:true,thinkingEffort:'high'
         }}
       ],
       sessions:{},
@@ -2444,17 +2444,94 @@ class APIManager{
     }
   }
 
+  _isOmitEffort(value){
+    return /^(?:__omit__|omit|no_send|nosend|off)$/i.test(String(value??'').trim());
+  }
+
+  _normalizeOpenAIReasoningEffort(value){
+    const raw=String(value??'').trim().toLowerCase();
+    if(this._isOmitEffort(raw))return '';
+    if(['none','minimal','low','medium','high','xhigh'].includes(raw))return raw;
+    if(raw==='max')return 'xhigh';
+    return 'medium';
+  }
+
+  _deepSeekDefaultsToThinking(model){
+    return !/^deepseek-chat$/i.test(String(model||''));
+  }
+
+  _normalizeDeepSeekReasoningEffort(value){
+    const raw=String(value??'').trim().toLowerCase();
+    if(this._isOmitEffort(raw))return '';
+    if(raw==='max'||raw==='xhigh')return 'max';
+    return 'high';
+  }
+
+  _isKimiForcedThinking(model){
+    return /thinking/i.test(String(model||''));
+  }
+
+  _normalizeAnthropicEffort(value){
+    const raw=String(value??'').trim().toLowerCase();
+    if(this._isOmitEffort(raw))return '';
+    if(raw==='max'||raw==='xhigh')return raw;
+    if(['low','medium','high'].includes(raw))return raw;
+    if(raw==='minimal')return 'low';
+    return 'high';
+  }
+
+  _useAnthropicAdaptiveThinking(model){
+    const name=String(model||'').toLowerCase();
+    return /claude-mythos/.test(name)||
+      /claude-(?:opus|sonnet)-4-6/.test(name)||
+      /claude-opus-4-(?:[7-9]|\d{2,})/.test(name);
+  }
+
+  _supportsAnthropicOutputEffort(model){
+    const name=String(model||'').toLowerCase();
+    return /claude-mythos/.test(name)||
+      /claude-(?:opus|sonnet)-4-6/.test(name)||
+      /claude-opus-4-(?:[5-9]|\d{2,})/.test(name);
+  }
+
+  _anthropicThinkingBudget(cfg,effort,maxTokens){
+    const explicit=Utils.intOrNull(cfg?.thinkingBudget);
+    if(Number.isFinite(explicit)&&explicit>=1024)return explicit;
+    const budgetByEffort={low:1024,medium:4096,high:10000,max:16000};
+    let budget=budgetByEffort[effort]||10000;
+    const cap=Number.isFinite(maxTokens)?Math.trunc(maxTokens)-1:budget;
+    if(cap>=1024)budget=Math.min(budget,cap);
+    return budget;
+  }
+
+  _isGemini3Model(model){
+    return /^gemini-3/i.test(String(model||''));
+  }
+
+  _isGemini25ProModel(model){
+    const name=String(model||'').toLowerCase();
+    return /gemini-2\.5/.test(name)&&/pro/.test(name);
+  }
+
+  _normalizeGeminiThinkingLevel(value){
+    const raw=String(value??'').trim().toLowerCase();
+    if(this._isOmitEffort(raw))return '';
+    if(['minimal','low','medium','high'].includes(raw))return raw;
+    if(raw==='max'||raw==='xhigh')return 'high';
+    return 'high';
+  }
+
   async sendOpenAIWithMessages(messages,cfg,onDelta,signal,forceDeepSeek=false,forceKimi=false){
     const isDeepSeek=forceDeepSeek||((cfg.base||'').includes('api.deepseek.com'));
-    const isKimi=forceKimi||((cfg.base||'').includes('api.moonshot.cn'));
+    const isKimi=forceKimi||/api\.moonshot\.(?:cn|ai)/.test(cfg.base||'');
     let baseDefault='https://api.openai.com/v1';
     let modelDefault='gpt-4o-mini';
     if(isDeepSeek){
-      baseDefault='https://api.deepseek.com/beta';
-      modelDefault='deepseek-reasoner';
+      baseDefault='https://api.deepseek.com';
+      modelDefault='deepseek-v4-flash';
     }else if(isKimi){
       baseDefault='https://api.moonshot.cn/v1';
-      modelDefault='kimi-k2-0905-preview';
+      modelDefault='kimi-k2.5';
     }
     const url=(cfg.base||baseDefault).replace(/\/+$/,'')+'/chat/completions';
     const requestThinking=!!cfg.useThinking;
@@ -2477,23 +2554,31 @@ class APIManager{
       messages,
       stream:!!cfg.stream
     };
-    
-    if(cfg.temperature!=null&&cfg.temperature!==0)body.temperature=cfg.temperature;
-    if(cfg.top_p!=null&&cfg.top_p!==0)body.top_p=cfg.top_p;
+
+    const deepSeekThinkingActive=isDeepSeek&&(
+      cfg.useThinking===true||(cfg.useThinking!==false&&this._deepSeekDefaultsToThinking(body.model))
+    );
+    if(cfg.temperature!=null&&cfg.temperature!==0&&!deepSeekThinkingActive)body.temperature=cfg.temperature;
+    if(cfg.top_p!=null&&cfg.top_p!==0&&!deepSeekThinkingActive)body.top_p=cfg.top_p;
     if(cfg.max_tokens!=null&&cfg.max_tokens!==0)body.max_tokens=cfg.max_tokens;
-    
-    // ✅ 添加思维链支持 - 只有在启用时才发送
-    if(requestThinking&&!isClaudeCompatible){
-      const effortRaw=(cfg.thinkingEffort==null?'':String(cfg.thinkingEffort)).trim();
-      const omitEffort=/^(?:__omit__|omit|none|no_send|nosend|off)$/i.test(effortRaw);
-      if(omitEffort){
-        // 显式选择“不发送”时，为了兼容不同后端，不携带 reasoning_effort 字段
-      }else if(effortRaw){
-        body.reasoning_effort=effortRaw;
-      }else{
-        // 启用但未指定级别，使用medium作为默认值
-        body.reasoning_effort='medium';
+
+    if(isDeepSeek){
+      if(cfg.useThinking===true||cfg.useThinking===false){
+        body.thinking={type:cfg.useThinking?'enabled':'disabled'};
       }
+      if(deepSeekThinkingActive){
+        const effort=this._normalizeDeepSeekReasoningEffort(cfg.thinkingEffort);
+        if(effort)body.reasoning_effort=effort;
+      }
+    }else if(isKimi){
+      if(cfg.useThinking===true){
+        body.thinking={type:'enabled'};
+      }else if(cfg.useThinking===false&&!this._isKimiForcedThinking(body.model)){
+        body.thinking={type:'disabled'};
+      }
+    }else if(requestThinking&&!isClaudeCompatible){
+      const effort=this._normalizeOpenAIReasoningEffort(cfg.thinkingEffort);
+      if(effort)body.reasoning_effort=effort;
     }
     
     const logEntry=this._startApiLog({
@@ -2506,7 +2591,8 @@ class APIManager{
         temperature:body.temperature,
         top_p:body.top_p,
         max_tokens:body.max_tokens,
-        reasoning_effort:body.reasoning_effort
+        reasoning_effort:body.reasoning_effort,
+        thinking:body.thinking
       }
     });
 
@@ -2591,7 +2677,7 @@ class APIManager{
 
   async sendOpenAI(session,cfg,onDelta,signal,forceDeepSeek=false,forceKimi=false){
     const isDeepSeek=forceDeepSeek||((cfg.base||'').includes('api.deepseek.com'));
-    const isKimi=forceKimi||((cfg.base||'').includes('api.moonshot.cn'));
+    const isKimi=forceKimi||/api\.moonshot\.(?:cn|ai)/.test(cfg.base||'');
     const messages=this.buildMessages(session,{isDeepSeek,isKimi});
     return await this.sendOpenAIWithMessages(messages,cfg,onDelta,signal,forceDeepSeek,forceKimi);
   }
@@ -2609,8 +2695,23 @@ class APIManager{
     };
 
     if(system)body.system=system;
-    if(cfg.temperature!=null&&cfg.temperature!==0)body.temperature=cfg.temperature;
-    if(cfg.top_p!=null&&cfg.top_p!==0)body.top_p=cfg.top_p;
+    const thinkingEffort=this._normalizeAnthropicEffort(cfg.thinkingEffort);
+    if(cfg.useThinking){
+      if(this._useAnthropicAdaptiveThinking(model)){
+        body.thinking={type:'adaptive',display:'summarized'};
+        if(thinkingEffort)body.output_config={effort:thinkingEffort};
+      }else{
+        const budget=this._anthropicThinkingBudget(cfg,thinkingEffort,body.max_tokens);
+        body.thinking={type:'enabled',budget_tokens:budget,display:'summarized'};
+        if(this._supportsAnthropicOutputEffort(model)&&thinkingEffort){
+          body.output_config={effort:thinkingEffort};
+        }
+      }
+    }
+    if(!cfg.useThinking&&cfg.temperature!=null&&cfg.temperature!==0)body.temperature=cfg.temperature;
+    if(cfg.top_p!=null&&cfg.top_p!==0){
+      if(!cfg.useThinking||cfg.top_p>=0.95)body.top_p=cfg.top_p;
+    }
 
     const logEntry=this._startApiLog({
       provider:'anthropic',
@@ -2622,7 +2723,9 @@ class APIManager{
         stream:!!cfg.stream,
         max_tokens:body.max_tokens,
         temperature:body.temperature,
-        top_p:body.top_p
+        top_p:body.top_p,
+        thinking:body.thinking,
+        output_config:body.output_config
       }
     });
 
@@ -2742,14 +2845,24 @@ if (qs.length) url += `?${qs.join('&')}`;
     if(cfg.top_k!=null&&cfg.top_k!==0)generationConfig.topK=cfg.top_k;
     if(cfg.max_output_tokens!=null&&cfg.max_output_tokens!==0)generationConfig.maxOutputTokens=cfg.max_output_tokens;
     
-    // ✅ 添加思维链支持 - 根据官方文档格式
-    if(cfg.useThinking){
-      // thinkingBudget: -1=自动(动态), 0=禁用, 1-24576=指定token数
-      const budget=cfg.thinkingBudget!=null?cfg.thinkingBudget:-1;
-      generationConfig.thinkingConfig={
-        thinkingBudget:budget,
-        includeThoughts:true
-      };
+    if(cfg.useThinking===true){
+      const thinkingConfig={includeThoughts:true};
+      if(this._isGemini3Model(model)){
+        const level=this._normalizeGeminiThinkingLevel(cfg.thinkingLevel);
+        if(level)thinkingConfig.thinkingLevel=level;
+      }else{
+        const budget=cfg.thinkingBudget!=null?cfg.thinkingBudget:-1;
+        thinkingConfig.thinkingBudget=budget;
+      }
+      generationConfig.thinkingConfig=thinkingConfig;
+    }else if(cfg.useThinking===false){
+      if(this._isGemini3Model(model)){
+        if(!/pro/i.test(model)){
+          generationConfig.thinkingConfig={thinkingLevel:'minimal',includeThoughts:false};
+        }
+      }else if(!this._isGemini25ProModel(model)){
+        generationConfig.thinkingConfig={thinkingBudget:0,includeThoughts:false};
+      }
     }
     
     // ✅ 构建请求体 - 按照官方文档推荐的字段顺序
@@ -4150,10 +4263,12 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       config.stream=q(`#m${index}_stream`)?.value==='true';
       config.useThinking=q(`#m${index}_useThinking`)?.value==='true';
       config.thinkingEffort=q(`#m${index}_thinkingEffort`)?.value||'';
+      const budgetVal=q(`#m${index}_thinkingBudget`)?.value;
+      config.thinkingBudget=budgetVal===''?null:parseInt(budgetVal,10);
     }else if(type==='deepseek'){
-      config.base=q(`#m${index}_base`)?.value.trim()||'https://api.deepseek.com/beta';
+      config.base=q(`#m${index}_base`)?.value.trim()||'https://api.deepseek.com';
       config.key=q(`#m${index}_key`)?.value.trim()||'';
-      config.model=q(`#m${index}_model`)?.value.trim()||'deepseek-reasoner';
+      config.model=q(`#m${index}_model`)?.value.trim()||'deepseek-v4-flash';
       config.temperature=Utils.numOrNull(q(`#m${index}_temp`)?.value);
       config.top_p=Utils.numOrNull(q(`#m${index}_topP`)?.value);
       config.max_tokens=Utils.intOrNull(q(`#m${index}_maxTokens`)?.value);
@@ -4163,7 +4278,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }else if(type==='kimi'){
       config.base=q(`#m${index}_base`)?.value.trim()||'https://api.moonshot.cn/v1';
       config.key=q(`#m${index}_key`)?.value.trim()||'';
-      config.model=q(`#m${index}_model`)?.value.trim()||'kimi-k2-0905-preview';
+      config.model=q(`#m${index}_model`)?.value.trim()||'kimi-k2.5';
       config.temperature=Utils.numOrNull(q(`#m${index}_temp`)?.value);
       config.top_p=Utils.numOrNull(q(`#m${index}_topP`)?.value);
       config.max_tokens=Utils.intOrNull(q(`#m${index}_maxTokens`)?.value);
@@ -4182,6 +4297,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       config.useThinking=q(`#m${index}_useThinking`)?.value==='true';
       const budgetVal=q(`#m${index}_thinkingBudget`)?.value;
       config.thinkingBudget=budgetVal===''?null:parseInt(budgetVal,10);
+      config.thinkingLevel=q(`#m${index}_thinkingLevel`)?.value||'';
     }else{
       // gemini-proxy 或其他代理类型
       config.proxyUrl=q(`#m${index}_proxyUrl`)?.value.trim()||'http://127.0.0.1:8889';
@@ -4195,6 +4311,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       config.useThinking=q(`#m${index}_useThinking`)?.value==='true';
       const budgetVal=q(`#m${index}_thinkingBudget`)?.value;
       config.thinkingBudget=budgetVal===''?null:parseInt(budgetVal,10);
+      config.thinkingLevel=q(`#m${index}_thinkingLevel`)?.value||'';
     }
 
     return config;
@@ -4281,13 +4398,90 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
     }else if(type==='anthropic'){
       container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://api.anthropic.com/v1'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="text" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'claude-3-5-sonnet-20240620'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维链级别</label><select id="m${index}_thinkingEffort"><option value="" ${!config.thinkingEffort?'selected':''}>默认(medium)</option><option value="__omit__" ${config.thinkingEffort==='__omit__'?'selected':''}>不发送(兼容)</option><option value="minimal" ${config.thinkingEffort==='minimal'?'selected':''}>极简</option><option value="low" ${config.thinkingEffort==='low'?'selected':''}>低</option><option value="medium" ${config.thinkingEffort==='medium'?'selected':''}>中</option><option value="high" ${config.thinkingEffort==='high'?'selected':''}>高</option></select></div>`;
     }else if(type==='deepseek'){
-      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://api.deepseek.com/beta'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="text" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'deepseek-reasoner'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维链级别</label><select id="m${index}_thinkingEffort"><option value="" ${!config.thinkingEffort?'selected':''}>默认(medium)</option><option value="__omit__" ${config.thinkingEffort==='__omit__'?'selected':''}>不发送(兼容)</option><option value="minimal" ${config.thinkingEffort==='minimal'?'selected':''}>极简</option><option value="low" ${config.thinkingEffort==='low'?'selected':''}>低</option><option value="medium" ${config.thinkingEffort==='medium'?'selected':''}>中</option><option value="high" ${config.thinkingEffort==='high'?'selected':''}>高</option></select></div>`;
+      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://api.deepseek.com'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="text" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'deepseek-v4-flash'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维链级别</label><select id="m${index}_thinkingEffort"><option value="" ${!config.thinkingEffort?'selected':''}>默认(medium)</option><option value="__omit__" ${config.thinkingEffort==='__omit__'?'selected':''}>不发送(兼容)</option><option value="minimal" ${config.thinkingEffort==='minimal'?'selected':''}>极简</option><option value="low" ${config.thinkingEffort==='low'?'selected':''}>低</option><option value="medium" ${config.thinkingEffort==='medium'?'selected':''}>中</option><option value="high" ${config.thinkingEffort==='high'?'selected':''}>高</option></select></div>`;
     }else if(type==='kimi'){
-      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://api.moonshot.cn/v1'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="text" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'kimi-k2-0905-preview'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维链级别</label><select id="m${index}_thinkingEffort"><option value="" ${!config.thinkingEffort?'selected':''}>默认(medium)</option><option value="__omit__" ${config.thinkingEffort==='__omit__'?'selected':''}>不发送(兼容)</option><option value="minimal" ${config.thinkingEffort==='minimal'?'selected':''}>极简</option><option value="low" ${config.thinkingEffort==='low'?'selected':''}>低</option><option value="medium" ${config.thinkingEffort==='medium'?'selected':''}>中</option><option value="high" ${config.thinkingEffort==='high'?'selected':''}>高</option></select></div>`;
+      container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://api.moonshot.cn/v1'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="text" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'kimi-k2.5'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维链级别</label><select id="m${index}_thinkingEffort"><option value="" ${!config.thinkingEffort?'selected':''}>默认(medium)</option><option value="__omit__" ${config.thinkingEffort==='__omit__'?'selected':''}>不发送(兼容)</option><option value="minimal" ${config.thinkingEffort==='minimal'?'selected':''}>极简</option><option value="low" ${config.thinkingEffort==='low'?'selected':''}>低</option><option value="medium" ${config.thinkingEffort==='medium'?'selected':''}>中</option><option value="high" ${config.thinkingEffort==='high'?'selected':''}>高</option></select></div>`;
     }else if(type==='gemini'){
       container.innerHTML=`<div class="field"><label>Base URL</label><input id="m${index}_base" value="${config.base||'https://generativelanguage.googleapis.com'}"/></div><div class="field"><label>API Key</label><input id="m${index}_key" type="text" value="${config.key||''}"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gemini-2.5-pro'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>Top K</label><input type="number" id="m${index}_topK" min="0" step="1" value="${config.top_k??''}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_output_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="-1" step="1" value="${config.thinkingBudget??''}" placeholder="-1=自动,0=禁用"/></div>`;
     }else{
       container.innerHTML=`<div class="field"><label>代理URL</label><input id="m${index}_proxyUrl" value="${config.proxyUrl||'http://127.0.0.1:8889'}"/></div><div class="field"><label>代理密码</label><input id="m${index}_proxyPass" type="password" value="${config.proxyPass||''}" placeholder="可选"/></div><div class="field"><label>模型名</label><input id="m${index}_model" value="${config.model||'gemini-2.5-pro'}"/></div><div class="sep"></div><div class="field"><label>温度</label><input type="number" id="m${index}_temp" min="0" max="2" step="0.01" value="${config.temperature??1}" placeholder="0=不发送"/></div><div class="field"><label>Top P</label><input type="number" id="m${index}_topP" min="0" max="1" step="0.01" value="${config.top_p??0.95}" placeholder="0=不发送"/></div><div class="field"><label>Top K</label><input type="number" id="m${index}_topK" min="0" step="1" value="${config.top_k??''}" placeholder="0=不发送"/></div><div class="field"><label>最大输出长度</label><input type="number" id="m${index}_maxTokens" min="0" step="1" value="${config.max_output_tokens??65536}" placeholder="0=不发送"/></div><div class="field"><label>流式输出</label><select id="m${index}_stream"><option value="true" ${config.stream?'selected':''}>是</option><option value="false" ${!config.stream?'selected':''}>否</option></select></div><div class="sep"></div><div class="field"><label>启用思维链</label><select id="m${index}_useThinking"><option value="true" ${config.useThinking?'selected':''}>是</option><option value="false" ${!config.useThinking?'selected':''}>否</option></select></div><div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="-1" step="1" value="${config.thinkingBudget??''}" placeholder="-1=自动,0=禁用"/></div>`;
+    }
+    this._applyProviderThinkingControls(index,type,config);
+  }
+
+  _setSelectOptions(select,options,selected){
+    if(!select)return;
+    const selectedValue=options.some(([value])=>value===selected)?selected:(options[0]?.[0]||'');
+    select.innerHTML=options.map(([value,label])=>
+      `<option value="${value}"${value===selectedValue?' selected':''}>${label}</option>`
+    ).join('');
+  }
+
+  _applyProviderThinkingControls(index,type,config={}){
+    const container=Utils.$(`#model${index}Config`);
+    if(!container)return;
+
+    const useThinking=container.querySelector(`#m${index}_useThinking`);
+    if((type==='deepseek'||type==='kimi')&&config.useThinking==null&&useThinking){
+      useThinking.value='true';
+    }
+
+    const effort=container.querySelector(`#m${index}_thinkingEffort`);
+    if(effort){
+      const selected=String(config.thinkingEffort??'');
+      if(type==='deepseek'){
+        this._setSelectOptions(effort,[
+          ['','默认(high)'],
+          ['__omit__','不发送(兼容)'],
+          ['high','high'],
+          ['max','max']
+        ],selected);
+      }else if(type==='anthropic'){
+        this._setSelectOptions(effort,[
+          ['','默认(high)'],
+          ['__omit__','不发送(兼容)'],
+          ['low','low'],
+          ['medium','medium'],
+          ['high','high'],
+          ['xhigh','xhigh'],
+          ['max','max']
+        ],selected);
+        if(!container.querySelector(`#m${index}_thinkingBudget`)){
+          effort.closest('.field')?.insertAdjacentHTML('afterend',
+            `<div class="field"><label>思维预算</label><input type="number" id="m${index}_thinkingBudget" min="1024" step="1" value="${config.thinkingBudget??''}" placeholder="手动模式可选"/></div>`);
+        }
+      }else if(type==='kimi'){
+        const field=effort.closest('.field');
+        if(field)field.hidden=true;
+      }else{
+        this._setSelectOptions(effort,[
+          ['','默认(medium)'],
+          ['__omit__','不发送(兼容)'],
+          ['none','none'],
+          ['minimal','minimal'],
+          ['low','low'],
+          ['medium','medium'],
+          ['high','high'],
+          ['xhigh','xhigh']
+        ],selected);
+      }
+    }
+
+    if(type==='gemini'||type==='gemini-proxy'){
+      const budget=container.querySelector(`#m${index}_thinkingBudget`);
+      if(budget&&!container.querySelector(`#m${index}_thinkingLevel`)){
+        const field=document.createElement('div');
+        field.className='field';
+        field.innerHTML=`<label>思维级别</label><select id="m${index}_thinkingLevel"></select>`;
+        budget.closest('.field')?.before(field);
+        this._setSelectOptions(field.querySelector('select'),[
+          ['','默认(high/自动)'],
+          ['minimal','minimal'],
+          ['low','low'],
+          ['medium','medium'],
+          ['high','high']
+        ],String(config.thinkingLevel??''));
+      }
     }
   }
 
@@ -5392,8 +5586,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
       },
       {
         enabled:true,name:'DeepSeek',type:'deepseek',
-        config:{base:'https://api.deepseek.com/beta',key:'',model:'deepseek-reasoner',
-          temperature:1,top_p:0.95,max_tokens:65536,stream:false}
+        config:{base:'https://api.deepseek.com',key:'',model:'deepseek-v4-flash',
+          temperature:1,top_p:0.95,max_tokens:65536,stream:false,useThinking:true,thinkingEffort:'high'}
       }
     ]);
     
