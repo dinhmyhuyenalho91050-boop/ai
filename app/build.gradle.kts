@@ -3,35 +3,34 @@ plugins {
     kotlin("android")
 }
 
-val releaseStoreFile = providers.gradleProperty("AI_CHAT_KEYSTORE_FILE")
-    .orElse(providers.environmentVariable("AI_CHAT_KEYSTORE_FILE"))
+fun signingProperty(name: String): String? = providers.gradleProperty(name)
+    .orElse(providers.environmentVariable(name))
     .orNull
     ?.trim()
     ?.takeIf { it.isNotEmpty() }
-val releaseStorePassword = providers.gradleProperty("AI_CHAT_KEYSTORE_PASSWORD")
-    .orElse(providers.environmentVariable("AI_CHAT_KEYSTORE_PASSWORD"))
-    .orNull
-    ?.trim()
-    ?.takeIf { it.isNotEmpty() }
-val releaseKeyAlias = providers.gradleProperty("AI_CHAT_KEY_ALIAS")
-    .orElse(providers.environmentVariable("AI_CHAT_KEY_ALIAS"))
-    .orNull
-    ?.trim()
-    ?.takeIf { it.isNotEmpty() }
-val releaseKeyPassword = providers.gradleProperty("AI_CHAT_KEY_PASSWORD")
-    .orElse(providers.environmentVariable("AI_CHAT_KEY_PASSWORD"))
-    .orNull
-    ?.trim()
-    ?.takeIf { it.isNotEmpty() }
-val releaseStoreType = providers.gradleProperty("AI_CHAT_KEYSTORE_TYPE")
-    .orElse(providers.environmentVariable("AI_CHAT_KEYSTORE_TYPE"))
-    .orNull
-    ?.trim()
-    ?.takeIf { it.isNotEmpty() }
+
+fun signingFile(path: String) = file(path)
+    .takeIf { it.exists() }
+    ?: rootProject.file(path)
+
+val releaseStorePath = signingProperty("AI_CHAT_KEYSTORE_FILE")
+val releaseStoreFile = releaseStorePath?.let(::signingFile)
+val releaseStorePassword = signingProperty("AI_CHAT_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingProperty("AI_CHAT_KEY_ALIAS")
+val releaseKeyPassword = signingProperty("AI_CHAT_KEY_PASSWORD") ?: releaseStorePassword
+val releaseStoreType = signingProperty("AI_CHAT_KEYSTORE_TYPE")
 val hasReleaseSigning = releaseStoreFile != null &&
     releaseStorePassword != null &&
     releaseKeyAlias != null &&
     releaseKeyPassword != null
+
+/*
+ * Keep this lookup backward-compatible with both root-relative paths from CI
+ * (app/signing/release.p12) and app-module-relative paths from local Gradle.
+ */
+if (releaseStorePath != null && releaseStoreFile?.exists() != true) {
+    throw GradleException("Release signing keystore not found: $releaseStorePath")
+}
 
 android {
     namespace = "com.example.htmlapp"
@@ -49,7 +48,7 @@ android {
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
-                storeFile = file(releaseStoreFile!!)
+                storeFile = releaseStoreFile
                 storePassword = releaseStorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
@@ -64,7 +63,9 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
-            signingConfig = signingConfigs.getByName(if (hasReleaseSigning) "release" else "debug")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

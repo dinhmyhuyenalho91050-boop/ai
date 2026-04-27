@@ -89,7 +89,7 @@ AI_CHAT_KEY_ALIAS
 AI_CHAT_KEY_PASSWORD
 ```
 
-GitHub Actions restores `AI_CHAT_KEYSTORE_BASE64` from repository secrets and signs the uploaded release APK with that stable key. If signing secrets are absent, the build falls back to the debug signing config for development builds.
+GitHub Actions restores `AI_CHAT_KEYSTORE_BASE64` from repository secrets and signs the uploaded release APK with that stable key. CI release builds require the signing secrets so every uploaded APK keeps the same certificate and can update an existing install. Release builds no longer fall back to debug signing; local development builds can still use `assembleDebug`.
 
 ## Continuous Integration
 
