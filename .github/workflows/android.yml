@@ -28,8 +28,31 @@ jobs:
           yes | sdkmanager --licenses
           sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
+      - name: Restore release signing key
+        env:
+          AI_CHAT_KEYSTORE_BASE64: ${{ secrets.AI_CHAT_KEYSTORE_BASE64 }}
+          AI_CHAT_KEYSTORE_PASSWORD: ${{ secrets.AI_CHAT_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$AI_CHAT_KEYSTORE_BASE64" ]; then
+            mkdir -p app/signing
+            printf '%s' "$AI_CHAT_KEYSTORE_BASE64" | base64 --decode > app/signing/release.p12
+            KEY_ALIAS="$(keytool -list -v \
+              -keystore app/signing/release.p12 \
+              -storetype pkcs12 \
+              -storepass "$AI_CHAT_KEYSTORE_PASSWORD" \
+              | awk -F': ' '/Alias name:/{print $2; exit}')"
+            {
+              echo "AI_CHAT_KEYSTORE_FILE=app/signing/release.p12"
+              echo "AI_CHAT_KEYSTORE_TYPE=pkcs12"
+              echo "AI_CHAT_KEY_ALIAS=$KEY_ALIAS"
+            } >> "$GITHUB_ENV"
+          fi
+
       - name: Build release APK
         uses: gradle/gradle-build-action@v2
+        env:
+          AI_CHAT_KEYSTORE_PASSWORD: ${{ secrets.AI_CHAT_KEYSTORE_PASSWORD }}
+          AI_CHAT_KEY_PASSWORD: ${{ secrets.AI_CHAT_KEY_PASSWORD }}
         with:
           gradle-version: 8.7
           arguments: assembleRelease

@@ -3,6 +3,36 @@ plugins {
     kotlin("android")
 }
 
+val releaseStoreFile = providers.gradleProperty("AI_CHAT_KEYSTORE_FILE")
+    .orElse(providers.environmentVariable("AI_CHAT_KEYSTORE_FILE"))
+    .orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+val releaseStorePassword = providers.gradleProperty("AI_CHAT_KEYSTORE_PASSWORD")
+    .orElse(providers.environmentVariable("AI_CHAT_KEYSTORE_PASSWORD"))
+    .orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+val releaseKeyAlias = providers.gradleProperty("AI_CHAT_KEY_ALIAS")
+    .orElse(providers.environmentVariable("AI_CHAT_KEY_ALIAS"))
+    .orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+val releaseKeyPassword = providers.gradleProperty("AI_CHAT_KEY_PASSWORD")
+    .orElse(providers.environmentVariable("AI_CHAT_KEY_PASSWORD"))
+    .orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+val releaseStoreType = providers.gradleProperty("AI_CHAT_KEYSTORE_TYPE")
+    .orElse(providers.environmentVariable("AI_CHAT_KEYSTORE_TYPE"))
+    .orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+val hasReleaseSigning = releaseStoreFile != null &&
+    releaseStorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null
+
 android {
     namespace = "com.example.htmlapp"
     compileSdk = 34
@@ -11,9 +41,21 @@ android {
         applicationId = "com.example.htmlapp"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.0.2"
         resourceConfigurations += listOf("en", "zh")
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                releaseStoreType?.let { storeType = it }
+            }
+        }
     }
 
     buildTypes {
@@ -22,7 +64,7 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (hasReleaseSigning) "release" else "debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

@@ -77,6 +77,20 @@ The generated APK is typically written to:
 app/build/outputs/apk/release/app-release.apk
 ```
 
+## Release Signing
+
+Release builds use a fixed signing key when these Gradle properties or environment variables are set:
+
+```text
+AI_CHAT_KEYSTORE_FILE
+AI_CHAT_KEYSTORE_TYPE
+AI_CHAT_KEYSTORE_PASSWORD
+AI_CHAT_KEY_ALIAS
+AI_CHAT_KEY_PASSWORD
+```
+
+GitHub Actions restores `AI_CHAT_KEYSTORE_BASE64` from repository secrets and signs the uploaded release APK with that stable key. If signing secrets are absent, the build falls back to the debug signing config for development builds.
+
 ## Continuous Integration
 
 GitHub Actions builds the release APK on pushes and pull requests targeting `main` or `work`.
