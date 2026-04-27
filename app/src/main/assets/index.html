@@ -234,7 +234,7 @@
   }
   /* Prevent rubber-banding from interfering with scroll position during transitions */
   html,body{overscroll-behavior-y:contain}
-  #messages{backface-visibility:hidden;transform:translateZ(0);overscroll-behavior:contain}
+  #messages{overscroll-behavior:contain}
 
 
 /* === Chat editing UX enhancements (patch) === */
@@ -470,13 +470,9 @@
 <script>
 (function(){'use strict';
 
-// ===== 配置 - 降低虚拟化阈值 =====
+// ===== 配置 =====
 const CONFIG={
-  MSG_VLIST_THRESHOLD:50,
-  MSG_WINDOW_TAIL:30,
-  MSG_WINDOW_BUFFER:10,
   AUTO_FOLLOW_PX:60,
-  MSG_LOAD_CHUNK:40,
   THROTTLE_DELAY:80,
   DEBOUNCE_DELAY:300,
   PERSIST_DELAY:800,
@@ -542,34 +538,6 @@ class SmartSanitizer{
       this.cache.delete(firstKey);
     }
     this.cache.set(key,value);
-  }
-}
-
-// ===== DOMDiffer - 保留改进的append优化 =====
-class DOMDiffer{
-  constructor(){
-    this.cache=new WeakMap();
-  }
-  
-  updateHTML(el,newHTML){
-    const oldHTML=this.cache.get(el);
-    if(oldHTML===newHTML)return;
-    
-    // ✅ 前缀检查+insertAdjacentHTML优化
-    if(oldHTML&&newHTML.startsWith(oldHTML)){
-      const diff=newHTML.slice(oldHTML.length);
-      const temp=document.createElement('div');
-      temp.innerHTML=diff;
-      const cursor=el.querySelector('.typing-cursor');
-      if(cursor)cursor.remove();
-      while(temp.firstChild)el.appendChild(temp.firstChild);
-      if(cursor)el.appendChild(cursor);
-      this.cache.set(el,newHTML);
-      return;
-    }
-    
-    el.innerHTML=newHTML;
-    this.cache.set(el,newHTML);
   }
 }
 
@@ -697,97 +665,23 @@ class AdaptiveStreamBatcher{
   }
 }
 
-// ===== LeakSafeObserverManager =====
-class LeakSafeObserverManager{
-  constructor(){
-    this.observers=new Map();
-    this.observedElements=new WeakMap();
-  }
-  
-  create(type,container,callback,options){
-    this.cleanup(type);
-    const observer=new IntersectionObserver((entries)=>{
-      entries.forEach(entry=>{
-        if(!entry.target.isConnected){
-          observer.unobserve(entry.target);
-          return;
-        }
-        callback(entry);
-      });
-    },{root:container,...options});
-    
-    this.observers.set(type,{observer,container,elements:new Set()});
-    return observer;
-  }
-  
-  observe(type,element){
-    const data=this.observers.get(type);
-    if(!data)return;
-    data.observer.observe(element);
-    data.elements.add(element);
-    this.observedElements.set(element,type);
-  }
-  
-  unobserve(type,element){
-    const data=this.observers.get(type);
-    if(!data)return;
-    try{
-      data.observer.unobserve(element);
-      data.elements.delete(element);
-    }catch{}
-  }
-  
-  cleanup(type){
-    const data=this.observers.get(type);
-    if(!data)return;
-    data.elements.forEach(el=>{
-      try{data.observer.unobserve(el);}catch{}
-    });
-    try{data.observer.disconnect();}catch{}
-    data.elements.clear();
-    this.observers.delete(type);
-  }
-  
-  cleanupAll(){
-    for(const type of this.observers.keys()){
-      this.cleanup(type);
-    }
-  }
-}
-
-// ===== DOMPool - 改进子元素复用 =====
-class DOMPool{
-  constructor(){
-    this.pools=new Map();
-    this.maxPoolSize=50;
-  }
-  
+// ===== DOMElementFactory =====
+class DOMElementFactory{
   acquire(tagName,className){
-    const pool=this.pools.get(tagName);
-    if(pool&&pool.length>0){
-      const el=pool.pop();
-      el.className=className;
-      return el;
-    }
     const el=document.createElement(tagName);
     el.className=className;
     return el;
   }
   
-  release(tagName,element){
+  release(_tagName,element){
     if(!element)return;
-    if(!this.pools.has(tagName))this.pools.set(tagName,[]);
-    const pool=this.pools.get(tagName);
-    if(pool.length<this.maxPoolSize){
+    try{
+      element.replaceChildren();
       element.className='';
       element.removeAttribute('data-id');
-      // 注意：不清空innerHTML，让buildMessageElement复用子元素
-      pool.push(element);
-    }
-  }
-  
-  clear(){
-    this.pools.clear();
+      element.removeAttribute('data-msg-id');
+      element.removeAttribute('data-streaming');
+    }catch(_){}
   }
 }
 
@@ -1609,113 +1503,6 @@ class ErrorHandler{
   }
 }
 
-// ===== DOMManager - 添加self-heal =====
-class DOMManager{
-  constructor(){
-    this.elements=new Map();
-    this.updateQueue=[];
-    this.isFlushScheduled=false;
-    this.cleanupTimer=null;
-    this.cachedElements={
-      messages:null,
-      input:null,
-      send:null,
-      sidebar:null,
-      backdrop:null,
-      btnSessions:null,
-      btnSettings:null,
-      btnNew:null,
-      composerModelSelector:null,
-      newChatModelSelector:null
-    };
-  }
-  
-  get(selector){
-    let el=this.elements.get(selector);
-    if(!el||!el.isConnected){
-      el=Utils.$(selector);
-      this.elements.set(selector,el);
-    }
-    return el;
-  }
-  
-  // ✅ Self-heal: 自动重新查询断开的元素
-  getCached(key){
-    const el=this.cachedElements[key];
-    if(!el||!el.isConnected){
-      const selector=this._getSelectorForKey(key);
-      const fresh=selector?Utils.$(selector):null;
-      this.cachedElements[key]=fresh;
-      return fresh;
-    }
-    return el;
-  }
-  
-  _getSelectorForKey(key){
-    const map={
-      messages:'#messages',
-      input:'#input',
-      send:'#send',
-      sidebar:'#sidebar',
-      backdrop:'#backdrop',
-      btnSessions:'#btnSessions',
-      btnSettings:'#btnSettings',
-      btnNew:'#btnNew',
-      composerModelSelector:'#composerModelSelector',
-      newChatModelSelector:'#newChatModelSelector'
-    };
-    return map[key];
-  }
-  
-  invalidate(selector){
-    this.elements.delete(selector);
-  }
-  
-  batchUpdate(fn){
-    this.updateQueue.push(fn);
-    if(!this.isFlushScheduled){
-      this.isFlushScheduled=true;
-      queueMicrotask(()=>this.flushUpdates());
-    }
-  }
-  
-  flushUpdates(){
-    this.updateQueue.forEach(fn=>{
-      try{fn();}catch{}
-    });
-    this.updateQueue=[];
-    this.isFlushScheduled=false;
-  }
-  
-  cleanupDisconnected(){
-    for(const[key,el]of this.elements.entries()){
-      if(el&&!el.isConnected){
-        this.elements.delete(key);
-      }
-    }
-  }
-  
-  startAutoCleanup(){
-    this.stopAutoCleanup();
-    this.cleanupTimer=setInterval(()=>this.cleanupDisconnected(),180000);
-  }
-  
-  stopAutoCleanup(){
-    if(this.cleanupTimer){
-      clearInterval(this.cleanupTimer);
-      this.cleanupTimer=null;
-    }
-  }
-  
-  clear(){
-    this.stopAutoCleanup();
-    this.elements.clear();
-    for(const key in this.cachedElements){
-      this.cachedElements[key]=null;
-    }
-  }
-}
-
 // ===== StateManager =====
 class StateManager{
   constructor(){
@@ -1861,48 +1648,6 @@ class StateManager{
       this.state.promptPresets['default']||
       {sysPrompt:'',firstUser:'',firstAssistant:'',messagePrefix:'',assistantPrefill:'',regexRules:[],
         multiStepRunner:{enabled:false,steps:[]}};
-  }
-}
-
-// ===== MessageWindowManager =====
-class MessageWindowManager{
-  constructor(){
-    this.window={enabled:false,start:0,end:-1,total:0};
-  }
-  
-  evaluate(total){
-    if(total>CONFIG.MSG_VLIST_THRESHOLD){
-      this.window.enabled=true;
-      this.window.total=total;
-      this.window.end=total-1;
-      this.window.start=Math.max(0,total-CONFIG.MSG_WINDOW_TAIL-CONFIG.MSG_WINDOW_BUFFER);
-    }else{
-      this.window.enabled=false;
-      this.window.total=total;
-      this.window.start=0;
-      this.window.end=total-1;
-    }
-  }
-  
-  loadEarlier(){
-    if(!this.window.enabled||this.window.start===0)return null;
-    const newStart=Math.max(0,this.window.start-CONFIG.MSG_LOAD_CHUNK);
-    const oldStart=this.window.start;
-    this.window.start=newStart;
-    return{newStart,oldStart};
-  }
-  
-  appendNew(total,isNearBottom=true){
-    if(this.window.enabled){
-      this.window.total=total;
-      this.window.end=total-1;
-      if(isNearBottom){
-        this.window.start=Math.max(0,total-CONFIG.MSG_WINDOW_TAIL-CONFIG.MSG_WINDOW_BUFFER);
-      }
-    }else{
-      this.window.total=total;
-      this.window.end=total-1;
-    }
   }
 }
 
@@ -3023,14 +2768,10 @@ class UIManager{
     this._vvListener=null;
     this._unfreezeTimer=null;
     this.api=api;
-    this.dom=new DOMManager();
     this.events=new EventHub();
     this.sanitizer=new SmartSanitizer();
-    this.domDiffer=new DOMDiffer();
-    this.domPool=new DOMPool();
+    this.domFactory=new DOMElementFactory();
     this.regexProcessor=new RegexProcessor();
-    this.observerMgr=new LeakSafeObserverManager();
-    this.windowManager=new MessageWindowManager();
     this.promptPresetDraft=null;
 
     // ✅ 核心改进1：维护idx到element的映射
@@ -3137,12 +2878,10 @@ class UIManager{
     if(this._appHidden===hidden)return;
     this._appHidden=hidden;
     if(hidden){
-      this.dom.stopAutoCleanup();
       if(this._currentBatcher){
         this._currentBatcher.setBackgroundMode(true);
       }
     }else{
-      this.dom.startAutoCleanup();
       this.flushPendingTyping(true);
       if(this._currentBatcher){
         this._currentBatcher.setBackgroundMode(false);
@@ -3289,7 +3028,6 @@ class UIManager{
     this.setupTopObserver();
     if(this._setupIMEHandlers) this._setupIMEHandlers();
     if(this._updateBottomPadding) this._updateBottomPadding();
-    this.dom.startAutoCleanup();
   }
   
   ensureSession(){
@@ -3338,7 +3076,7 @@ class UIManager{
     
     for(let[msgId,el]of this.messageElements){
       el.remove();
-      this.domPool.release('article',el);
+      this.domFactory.release('article',el);
     }
     this.messageElements.clear();
   }
@@ -3402,7 +3140,7 @@ class UIManager{
 
     box.innerHTML='';
     for(const [msgId,el] of this.messageElements){
-      this.domPool.release('article',el);
+      this.domFactory.release('article',el);
     }
     this.messageElements.clear();
 
@@ -3425,9 +3163,9 @@ class UIManager{
     }
   }
   
-  // ✅ 核心改进：复用子元素而不是重建
+  // 创建消息元素；交给浏览器回收旧 DOM，避免保留大型消息子树
   buildMessageElement(msg,idx){
-    const el=this.domPool.acquire('article',`msg ${msg.role}`);
+    const el=this.domFactory.acquire('article',`msg ${msg.role}`);
     
     // 查找或创建子元素
     let header=el.querySelector('header');
@@ -3647,7 +3385,7 @@ class UIManager{
       if(msgId&&this.messageElements.has(msgId)){
         this.messageElements.delete(msgId);
       }
-      this.domPool.release('article',el);
+      this.domFactory.release('article',el);
       el.remove();
     }
     const session=this.state.getActiveSession();
@@ -3754,10 +3492,8 @@ class UIManager{
       fragment.appendChild(div);
     });
     
-    this.dom.batchUpdate(()=>{
-      list.innerHTML='';
-      list.appendChild(fragment);
-    });
+    list.innerHTML='';
+    list.appendChild(fragment);
   }
   
   updateModelSelectors(){
@@ -3954,7 +3690,7 @@ class UIManager{
     const box=Utils.$('#messages');
     if(!box)return null;
     
-    const el=this.domPool.acquire('article','msg assistant');
+    const el=this.domFactory.acquire('article','msg assistant');
     el.innerHTML=isStreaming?
       '<header><div class="role">ASSISTANT</div><div class="pill">回复中...</div></header><div class="body"><span class="typing-cursor"></span></div><footer style="display:none"></footer>':
       '<header><div class="role">ASSISTANT</div><div class="pill">思考中</div></header><div class="body"><span data-stream-prefix></span><span data-stream-tail></span></div><footer style="display:none"></footer>';
@@ -3973,12 +3709,9 @@ class UIManager{
     }
     
     requestAnimationFrame(()=>{
-  this.dom.batchUpdate(()=>{
-box.appendChild(el);
+      box.appendChild(el);
       if(this.isAtBottom(box))box.scrollTop=box.scrollHeight;
-    
-  });
-});
+    });
     
     this.typingElement=el;
     this.typingBodyCache=el.querySelector('.body');  // ✅ 缓存body元素
@@ -4097,7 +3830,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
 
     if(el){
       if(el.parentNode){
-        this.domPool.release('article',el);
+        this.domFactory.release('article',el);
         el.remove();
       }
     }
@@ -5842,7 +5575,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           if(el){
             this.animateOut(el).then(()=>{
               el.remove();
-              this.domPool.release('article',el);
+              this.domFactory.release('article',el);
               this.messageElements.delete(msgId);
               this.renumberMessagesFrom(Math.max(0,msgIdx));
               const box=Utils.$('#messages');
@@ -5897,7 +5630,7 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
           const el=this.messageElements.get(msg.id);
           if(el){
             el.remove();
-            this.domPool.release('article',el);
+            this.domFactory.release('article',el);
             this.messageElements.delete(msg.id);
           }
         });
@@ -6383,11 +6116,8 @@ if (now - __st.lastFlush >= (window.__STREAM_CFG && window.__STREAM_CFG.minGapMs
   
   cleanup(){
     StorageManager.registerMessagesObserverHandler(null);
-    this.observerMgr.cleanupAll();
     this.api.abort();
     this.events.cleanup();
-    this.dom.clear();
-    this.domPool.clear();
     this.clearMessages();
     this.state.forceSave();
     
@@ -6574,69 +6304,6 @@ if(document.readyState==='loading'){
   })();
 }
 
-})();
-</script>
-
-<!-- ✅ 保留有效的优化补丁 -->
-<script>
-(function(){
-  'use strict';
-  
-  // ✅ 1. ScrollScheduler - 读写分离
-  class __Scheduler{
-    constructor(){
-      this.reads=[];
-      this.writes=[];
-      this.scheduled=false;
-    }
-    read(job){
-      if(typeof job==='function'){
-        this.reads.push(job);
-        this.schedule();
-      }
-    }
-    write(job){
-      if(typeof job==='function'){
-        this.writes.push(job);
-        this.schedule();
-      }
-    }
-    schedule(){
-      if(this.scheduled)return;
-      this.scheduled=true;
-      requestAnimationFrame(()=>{
-        const r=this.reads.splice(0);
-        for(let i=0;i<r.length;i++){try{r[i]();}catch{}}
-        const w=this.writes.splice(0);
-        for(let i=0;i<w.length;i++){try{w[i]();}catch{}}
-        this.scheduled=false;
-        if(this.reads.length||this.writes.length)this.schedule();
-      });
-    }
-  }
-  if(!window.ScrollScheduler)window.ScrollScheduler=new __Scheduler();
-  
-  // ✅ 2. maybeStickToBottom helper
-  function __maybeStickToBottom(box,thresholdPx){
-    try{
-      if(!box)return;
-      const thr=typeof thresholdPx==='number'?thresholdPx:1;
-      const atBottom=Math.abs(box.scrollHeight-(box.scrollTop+box.clientHeight))<=thr;
-      if(atBottom){
-        ScrollScheduler.write(()=>{box.scrollTop=box.scrollHeight;});
-      }
-    }catch(e){}
-  }
-  
-  // ✅ 3. ResizeObserver for auto-scroll
-  try{
-    const box=document.querySelector('#messages');
-    if(box&&'ResizeObserver'in window){
-      const ro=new ResizeObserver(()=>__maybeStickToBottom(box));
-      ro.observe(box);
-    }
-  }catch(e){}
-  
 })();
 </script>
 
