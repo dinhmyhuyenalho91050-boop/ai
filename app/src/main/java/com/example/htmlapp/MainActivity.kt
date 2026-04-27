@@ -847,7 +847,7 @@ class MainActivity : AppCompatActivity() {
         val input = EditText(this).apply {
             setText(value)
             setTextColor(Color.WHITE)
-            setTextColorHint(color(R.color.chat_muted))
+            setHintTextColor(color(R.color.chat_muted))
             textSize = 14f
             minLines = if (multiLine) 3 else 1
             maxLines = if (multiLine) 8 else 1
