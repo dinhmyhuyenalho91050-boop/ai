@@ -1043,10 +1043,16 @@ class NativeAiClient {
     ) {
         runCatching {
             val delta = parser(JSONObject(data))
-            if (delta.content.isNotBlank() && delta.content != "(空响应)") full.append(delta.content)
-            if (delta.thinking.isNotBlank()) thinking.append(delta.thinking)
-            if (delta.content.isNotBlank() || delta.thinking.isNotBlank()) onDelta(full.toString(), thinking.toString())
+            val contentPart = cleanStreamPart(delta.content)
+            val thinkingPart = cleanStreamPart(delta.thinking)
+            if (contentPart.isNotBlank() && contentPart != "(空响应)") full.append(contentPart)
+            if (thinkingPart.isNotBlank()) thinking.append(thinkingPart)
+            if (contentPart.isNotBlank() || thinkingPart.isNotBlank()) onDelta(full.toString(), thinking.toString())
         }
+    }
+
+    private fun cleanStreamPart(value: String): String {
+        return if (value.trim().equals("null", ignoreCase = true)) "" else value
     }
 
     private fun parseOpenAINonStream(json: JSONObject): NativeAiResult {

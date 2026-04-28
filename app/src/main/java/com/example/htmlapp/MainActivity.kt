@@ -76,7 +76,10 @@ class MainActivity : AppCompatActivity() {
     private val messageThinkingSummaries = mutableMapOf<String, TextView>()
     private val messageRenderedContent = mutableMapOf<String, String>()
     private val messageRenderedThinking = mutableMapOf<String, String>()
+    private val messageStreamFormatters = mutableMapOf<String, StreamFormatState>()
     private val messageThinkingExpanded = mutableSetOf<String>()
+    private val stoppedAssistantIds = mutableSetOf<String>()
+    private var activeAssistantId: String? = null
     private var isSending = false
     private var pendingImportReplace = false
     private var followBottom = true
@@ -463,6 +466,7 @@ class MainActivity : AppCompatActivity() {
         val assistant = ChatMessage(role = "assistant", content = "", modelName = preset?.name.orEmpty())
         session.history.add(assistant)
         followBottom = true
+        activeAssistantId = assistant.id
         repository.save(state)
         setSendingUi(true)
         renderMessages(scrollToBottom = true)
@@ -487,6 +491,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }.onSuccess { result ->
                 mainHandler.post {
+                    stoppedAssistantIds.remove(assistant.id)
+                    if (activeAssistantId == assistant.id) activeAssistantId = null
                     assistant.content = applyPromptRegex(result.content)
                     assistant.thinking = result.thinking
                     repository.save(state)
@@ -496,11 +502,30 @@ class MainActivity : AppCompatActivity() {
                 }
             }.onFailure { error ->
                 mainHandler.post {
-                    assistant.content = if (error.message.isNullOrBlank()) "请求失败" else "请求失败: ${error.message}"
-                    assistant.thinking = ""
-                    repository.save(state)
-                    setSendingUi(false)
-                    updateMessageViews(assistant, final = true)
+                    val stopped = stoppedAssistantIds.remove(assistant.id)
+                    if (activeAssistantId == assistant.id) activeAssistantId = null
+                    if (stopped) {
+                        val partialContent = latestContent.ifBlank { assistant.content }
+                        val partialThinking = latestThinking.ifBlank { assistant.thinking }
+                        if (partialContent.isBlank() && partialThinking.isBlank()) {
+                            session.history.removeAll { it.id == assistant.id }
+                            repository.save(state)
+                            setSendingUi(false)
+                            renderMessages(scrollToBottom = followBottom)
+                        } else {
+                            assistant.content = applyPromptRegex(partialContent)
+                            assistant.thinking = partialThinking
+                            repository.save(state)
+                            setSendingUi(false)
+                            updateMessageViews(assistant, final = true)
+                        }
+                    } else {
+                        assistant.content = if (error.message.isNullOrBlank()) "请求失败" else "请求失败: ${error.message}"
+                        assistant.thinking = ""
+                        repository.save(state)
+                        setSendingUi(false)
+                        updateMessageViews(assistant, final = true)
+                    }
                     renderSessions()
                 }
             }
@@ -508,6 +533,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopSending() {
+        activeAssistantId?.let { stoppedAssistantIds.add(it) }
         aiClient.abort()
         setSendingUi(false)
     }
@@ -628,6 +654,7 @@ class MainActivity : AppCompatActivity() {
         messageThinkingSummaries.clear()
         messageRenderedContent.clear()
         messageRenderedThinking.clear()
+        messageStreamFormatters.clear()
         messagesContainer.removeAllViews()
         val session = state.ensureSession()
         val startIndex = max(0, session.history.size - renderMessageLimit)
@@ -694,7 +721,7 @@ class MainActivity : AppCompatActivity() {
 
         val body = TextView(this).apply {
             val content = displayContent(message)
-            text = if (isLiveAssistant(message)) content else formatMessageText(content)
+            text = if (isLiveAssistant(message)) streamingFormatter(message.id).render(content) else formatMessageText(content)
             setTextColor(Color.WHITE)
             textSize = 16f
             setLineSpacing(dp(2).toFloat(), 1f)
@@ -789,17 +816,23 @@ class MainActivity : AppCompatActivity() {
         val previous = messageRenderedContent[message.id]
         if (streaming && !final) {
             if (previous == content) return
-            if (!previous.isNullOrEmpty() && content.startsWith(previous)) {
-                body.append(content.substring(previous.length))
-            } else {
-                body.text = content
-            }
+            body.text = streamingFormatter(message.id).render(content)
             messageRenderedContent[message.id] = content
             return
         }
         if (final || previous != content) {
+            messageStreamFormatters.remove(message.id)
             body.text = formatMessageText(content)
             messageRenderedContent[message.id] = content
+        }
+    }
+
+    private fun streamingFormatter(messageId: String): StreamFormatState {
+        return messageStreamFormatters.getOrPut(messageId) {
+            StreamFormatState(
+                quoteColor = color(R.color.chat_accent3),
+                starColor = color(R.color.chat_accent)
+            )
         }
     }
 
@@ -1991,6 +2024,117 @@ class MainActivity : AppCompatActivity() {
         val pattern: FieldRef,
         val replacement: FieldRef
     )
+
+    private enum class StreamMode {
+        PLAIN,
+        DOUBLE_QUOTE,
+        CHINESE_QUOTE,
+        STAR
+    }
+
+    private class StreamFormatState(
+        @ColorInt private val quoteColor: Int,
+        @ColorInt private val starColor: Int
+    ) {
+        private val prefix = SpannableStringBuilder()
+        private val buffer = StringBuilder()
+        private var raw = ""
+        private var mode = StreamMode.PLAIN
+        private var opener = '\u0000'
+
+        fun render(text: String): CharSequence {
+            if (!text.startsWith(raw)) reset()
+            feed(text.substring(raw.length))
+            raw = text
+            return SpannableStringBuilder(prefix).append(tail())
+        }
+
+        private fun reset() {
+            prefix.clear()
+            buffer.clear()
+            raw = ""
+            mode = StreamMode.PLAIN
+            opener = '\u0000'
+        }
+
+        private fun feed(delta: String) {
+            delta.forEach { ch ->
+                when {
+                    mode == StreamMode.PLAIN && isDoubleQuote(ch) -> open(StreamMode.DOUBLE_QUOTE, ch)
+                    mode == StreamMode.DOUBLE_QUOTE && isQuote(ch) -> closeQuote(ch)
+                    mode == StreamMode.PLAIN && isChineseOpenQuote(ch) -> open(StreamMode.CHINESE_QUOTE, ch)
+                    mode == StreamMode.CHINESE_QUOTE && (isChineseCloseQuote(ch) || isQuote(ch)) -> closeQuote(ch)
+                    mode == StreamMode.PLAIN && isStar(ch) -> open(StreamMode.STAR, ch)
+                    mode == StreamMode.STAR && isStar(ch) -> closeStar()
+                    else -> buffer.append(ch)
+                }
+                if (mode == StreamMode.PLAIN && buffer.length > 512) commitPlain()
+            }
+        }
+
+        private fun open(nextMode: StreamMode, ch: Char) {
+            commitPlain()
+            mode = nextMode
+            opener = ch
+        }
+
+        private fun closeQuote(closer: Char) {
+            val start = prefix.length
+            prefix.append(opener)
+            prefix.append(buffer)
+            prefix.append(closer)
+            prefix.setSpan(ForegroundColorSpan(quoteColor), start, prefix.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            prefix.setSpan(StyleSpan(Typeface.ITALIC), start, prefix.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            buffer.clear()
+            mode = StreamMode.PLAIN
+            opener = '\u0000'
+        }
+
+        private fun closeStar() {
+            if (buffer.isEmpty()) {
+                mode = StreamMode.PLAIN
+                opener = '\u0000'
+                return
+            }
+            val start = prefix.length
+            prefix.append(buffer)
+            prefix.setSpan(ForegroundColorSpan(starColor), start, prefix.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            prefix.setSpan(StyleSpan(Typeface.BOLD_ITALIC), start, prefix.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            buffer.clear()
+            mode = StreamMode.PLAIN
+            opener = '\u0000'
+        }
+
+        private fun commitPlain() {
+            if (buffer.isNotEmpty()) {
+                prefix.append(buffer)
+                buffer.clear()
+            }
+        }
+
+        private fun tail(): CharSequence {
+            val out = SpannableStringBuilder()
+            if (mode != StreamMode.PLAIN && opener != '\u0000') out.append(opener)
+            out.append(buffer)
+            return out
+        }
+
+        private fun isDoubleQuote(ch: Char): Boolean {
+            return ch == '"' || ch == '\uFF02'
+        }
+
+        private fun isChineseOpenQuote(ch: Char): Boolean = ch == '\u201C'
+
+        private fun isChineseCloseQuote(ch: Char): Boolean = ch == '\u201D'
+
+        private fun isQuote(ch: Char): Boolean {
+            return isDoubleQuote(ch) || isChineseOpenQuote(ch) || isChineseCloseQuote(ch)
+        }
+
+        private fun isStar(ch: Char): Boolean {
+            return ch == '*' || ch == '\uFF0A'
+        }
+    }
 
     private data class PromptPresetEditor(
         val key: String,
