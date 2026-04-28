@@ -771,9 +771,29 @@ class NativeAiClient {
             val pattern = rule.optString("pattern")
             if (pattern.isBlank()) continue
             val replacement = rule.optString("replacement")
-            result = runCatching { Regex(pattern).replace(result, replacement) }.getOrDefault(result)
+            val compiled = compileRegexRule(pattern, rule.optString("flags"))
+            result = compiled?.let {
+                runCatching {
+                    if (it.second) it.first.replace(result, replacement) else it.first.replaceFirst(result, replacement)
+                }.getOrDefault(result)
+            } ?: result
         }
         return result
+    }
+
+    private fun compileRegexRule(rawPattern: String, rawFlags: String): Pair<Regex, Boolean>? {
+        var pattern = rawPattern
+        var flags = rawFlags
+        val literal = Regex("^/([\\s\\S]*)/([a-zA-Z]*)$").matchEntire(pattern)
+        if (literal != null) {
+            pattern = literal.groupValues[1]
+            flags = literal.groupValues[2]
+        }
+        val options = mutableSetOf<RegexOption>()
+        if ('i' in flags) options.add(RegexOption.IGNORE_CASE)
+        if ('m' in flags) options.add(RegexOption.MULTILINE)
+        if ('s' in flags) options.add(RegexOption.DOT_MATCHES_ALL)
+        return runCatching { Regex(pattern, options) to ('g' in flags) }.getOrNull()
     }
 
     private fun sendOpenAICompatible(

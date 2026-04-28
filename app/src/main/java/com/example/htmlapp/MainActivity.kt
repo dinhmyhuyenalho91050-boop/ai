@@ -48,6 +48,7 @@ import androidx.core.view.doOnLayout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -71,14 +72,21 @@ class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val messageBodyViews = mutableMapOf<String, TextView>()
     private val messageThinkingViews = mutableMapOf<String, TextView>()
+    private val messageThinkingContainers = mutableMapOf<String, View>()
+    private val messageThinkingSummaries = mutableMapOf<String, TextView>()
+    private val messageRenderedContent = mutableMapOf<String, String>()
+    private val messageRenderedThinking = mutableMapOf<String, String>()
+    private val messageThinkingExpanded = mutableSetOf<String>()
     private var isSending = false
     private var pendingImportReplace = false
     private var followBottom = true
     private var bottomScrollScheduled = false
+    private var programmaticScroll = false
+    private var lastBottomTargetY = -1
     private var settingsCompact = false
 
     private var renderMessageLimit = 80
-    private val streamFrameMs = 48L
+    private val streamFrameMs = 64L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -132,7 +140,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupScrollTracking() {
         messagesScroll.setOnScrollChangeListener { _, _, _, _, _ ->
-            followBottom = isNearBottom()
+            if (!programmaticScroll) {
+                followBottom = isNearBottom()
+            }
         }
     }
 
@@ -454,8 +464,8 @@ class MainActivity : AppCompatActivity() {
         session.history.add(assistant)
         followBottom = true
         repository.save(state)
-        renderMessages(scrollToBottom = true)
         setSendingUi(true)
+        renderMessages(scrollToBottom = true)
 
         Thread {
             var lastFrameAt = 0L
@@ -469,9 +479,9 @@ class MainActivity : AppCompatActivity() {
                     if (now - lastFrameAt >= streamFrameMs) {
                         lastFrameAt = now
                         mainHandler.post {
-                            assistant.content = applyPromptRegex(latestContent)
+                            assistant.content = latestContent
                             assistant.thinking = latestThinking
-                            updateMessageViews(assistant)
+                            updateMessageViews(assistant, streaming = true)
                         }
                     }
                 }
@@ -480,18 +490,18 @@ class MainActivity : AppCompatActivity() {
                     assistant.content = applyPromptRegex(result.content)
                     assistant.thinking = result.thinking
                     repository.save(state)
-                    updateMessageViews(assistant)
-                    renderSessions()
                     setSendingUi(false)
+                    updateMessageViews(assistant, final = true)
+                    renderSessions()
                 }
             }.onFailure { error ->
                 mainHandler.post {
                     assistant.content = if (error.message.isNullOrBlank()) "请求失败" else "请求失败: ${error.message}"
                     assistant.thinking = ""
                     repository.save(state)
-                    updateMessageViews(assistant)
-                    renderSessions()
                     setSendingUi(false)
+                    updateMessageViews(assistant, final = true)
+                    renderSessions()
                 }
             }
         }.start()
@@ -614,6 +624,10 @@ class MainActivity : AppCompatActivity() {
     private fun renderMessages(scrollToBottom: Boolean = false) {
         messageBodyViews.clear()
         messageThinkingViews.clear()
+        messageThinkingContainers.clear()
+        messageThinkingSummaries.clear()
+        messageRenderedContent.clear()
+        messageRenderedThinking.clear()
         messagesContainer.removeAllViews()
         val session = state.ensureSession()
         val startIndex = max(0, session.history.size - renderMessageLimit)
@@ -676,23 +690,16 @@ class MainActivity : AppCompatActivity() {
         contentColumn.addView(messageHeader(message, index))
         contentColumn.addView(separator())
 
-        val thinkingView = TextView(this).apply {
-            text = message.thinking
-            visibility = if (message.thinking.isBlank()) View.GONE else View.VISIBLE
-            setTextColor(color(R.color.chat_accent))
-            textSize = 13f
-            setLineSpacing(dp(2).toFloat(), 1f)
-            setPadding(dp(16), dp(14), dp(16), 0)
-        }
-        messageThinkingViews[message.id] = thinkingView
-        contentColumn.addView(thinkingView)
+        contentColumn.addView(thinkingPanel(message))
 
         val body = TextView(this).apply {
-            text = formatMessageText(displayContent(message))
+            val content = displayContent(message)
+            text = if (isLiveAssistant(message)) content else formatMessageText(content)
             setTextColor(Color.WHITE)
             textSize = 16f
             setLineSpacing(dp(2).toFloat(), 1f)
             setPadding(dp(16), dp(18), dp(16), dp(18))
+            messageRenderedContent[message.id] = content
         }
         messageBodyViews[message.id] = body
         contentColumn.addView(body)
@@ -702,18 +709,129 @@ class MainActivity : AppCompatActivity() {
         return card
     }
 
+    private fun thinkingPanel(message: ChatMessage): View {
+        val expanded = message.id in messageThinkingExpanded
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (message.thinking.isBlank()) View.GONE else View.VISIBLE
+            background = rounded(Color.argb(22, 96, 165, 250), dp(8), dp(1), Color.argb(88, 96, 165, 250))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(dp(16), dp(14), dp(16), 0)
+            }
+        }
+        val summary = TextView(this).apply {
+            text = thinkingSummaryText(message.thinking, expanded)
+            setTextColor(color(R.color.chat_accent_blue))
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setOnClickListener { setThinkingExpanded(message.id, message.id !in messageThinkingExpanded) }
+        }
+        val content = TextView(this).apply {
+            text = if (expanded) message.thinking else ""
+            visibility = if (expanded) View.VISIBLE else View.GONE
+            setTextColor(color(R.color.chat_muted))
+            textSize = 13f
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setPadding(0, dp(10), 0, 0)
+        }
+        panel.addView(summary)
+        panel.addView(content)
+        messageThinkingContainers[message.id] = panel
+        messageThinkingSummaries[message.id] = summary
+        messageThinkingViews[message.id] = content
+        messageRenderedThinking[message.id] = message.thinking
+        return panel
+    }
+
+    private fun thinkingSummaryText(thinking: String, expanded: Boolean): String {
+        val suffix = if (expanded) "点击折叠" else "点击展开"
+        return "💭 思维链 (${thinking.length}字) · $suffix"
+    }
+
+    private fun setThinkingExpanded(messageId: String, expanded: Boolean) {
+        if (expanded) {
+            messageThinkingExpanded.add(messageId)
+        } else {
+            messageThinkingExpanded.remove(messageId)
+        }
+        val thinking = messageRenderedThinking[messageId].orEmpty()
+        messageThinkingSummaries[messageId]?.text = thinkingSummaryText(thinking, expanded)
+        messageThinkingViews[messageId]?.apply {
+            text = if (expanded) thinking else ""
+            visibility = if (expanded) View.VISIBLE else View.GONE
+        }
+        if (expanded && followBottom) scrollToBottomSoon()
+    }
+
     private fun displayContent(message: ChatMessage): String {
         return if (message.role == "assistant" && message.content.isBlank() && isSending) "正在思考..." else message.content
     }
 
-    private fun updateMessageViews(message: ChatMessage) {
+    private fun updateMessageViews(message: ChatMessage, streaming: Boolean = false, final: Boolean = false) {
         val stick = followBottom || isNearBottom()
-        messageBodyViews[message.id]?.text = formatMessageText(displayContent(message))
-        messageThinkingViews[message.id]?.apply {
-            text = message.thinking
-            visibility = if (message.thinking.isBlank()) View.GONE else View.VISIBLE
-        }
+        updateBodyText(message, streaming, final)
+        updateThinkingPanel(message)
         if (stick) scrollToBottomSoon()
+    }
+
+    private fun updateBodyText(message: ChatMessage, streaming: Boolean, final: Boolean) {
+        val body = messageBodyViews[message.id] ?: return
+        val content = displayContent(message)
+        val previous = messageRenderedContent[message.id]
+        if (streaming && !final) {
+            if (previous == content) return
+            if (!previous.isNullOrEmpty() && content.startsWith(previous)) {
+                body.append(content.substring(previous.length))
+            } else {
+                body.text = content
+            }
+            messageRenderedContent[message.id] = content
+            return
+        }
+        if (final || previous != content) {
+            body.text = formatMessageText(content)
+            messageRenderedContent[message.id] = content
+        }
+    }
+
+    private fun updateThinkingPanel(message: ChatMessage) {
+        val panel = messageThinkingContainers[message.id] ?: return
+        val summary = messageThinkingSummaries[message.id] ?: return
+        val content = messageThinkingViews[message.id] ?: return
+        val thinking = message.thinking
+        val expanded = message.id in messageThinkingExpanded
+        messageRenderedThinking[message.id] = thinking
+        panel.visibility = if (thinking.isBlank()) View.GONE else View.VISIBLE
+        summary.text = thinkingSummaryText(thinking, expanded)
+        if (thinking.isBlank()) {
+            content.text = ""
+            content.visibility = View.GONE
+        } else if (expanded) {
+            if (content.text.toString() != thinking) {
+                content.text = thinking
+            }
+            content.visibility = View.VISIBLE
+        } else {
+            if (content.text.isNotEmpty()) {
+                content.text = ""
+            }
+            content.visibility = View.GONE
+        }
+    }
+
+    private fun isLiveAssistant(message: ChatMessage): Boolean {
+        return isSending &&
+            message.role == "assistant" &&
+            state.activeSession()?.history?.lastOrNull()?.id == message.id
     }
 
     private fun formatMessageText(text: String): CharSequence {
@@ -768,13 +886,17 @@ class MainActivity : AppCompatActivity() {
             val pattern = rule.optString("pattern")
             if (pattern.isBlank()) continue
             val replacement = rule.optString("replacement")
-            val regex = compilePromptRegex(pattern, rule.optString("flags"))
-            result = regex?.let { runCatching { it.replace(result, replacement) }.getOrDefault(result) } ?: result
+            val compiled = compilePromptRegex(pattern, rule.optString("flags"))
+            result = compiled?.let {
+                runCatching {
+                    if (it.second) it.first.replace(result, replacement) else it.first.replaceFirst(result, replacement)
+                }.getOrDefault(result)
+            } ?: result
         }
         return result
     }
 
-    private fun compilePromptRegex(rawPattern: String, rawFlags: String): Regex? {
+    private fun compilePromptRegex(rawPattern: String, rawFlags: String): Pair<Regex, Boolean>? {
         var pattern = rawPattern
         var flags = rawFlags
         val literal = Regex("^/([\\s\\S]*)/([a-zA-Z]*)$").matchEntire(pattern)
@@ -787,7 +909,7 @@ class MainActivity : AppCompatActivity() {
             if ('m' in flags) add(RegexOption.MULTILINE)
             if ('s' in flags) add(RegexOption.DOT_MATCHES_ALL)
         }
-        return runCatching { Regex(pattern, options) }.getOrNull()
+        return runCatching { Regex(pattern, options) to ('g' in flags) }.getOrNull()
     }
 
     private fun isQuote(ch: Char): Boolean {
@@ -814,16 +936,28 @@ class MainActivity : AppCompatActivity() {
     private fun scrollToBottomSoon(animated: Boolean = false) {
         if (bottomScrollScheduled) return
         bottomScrollScheduled = true
-        messagesScroll.post {
+        ViewCompat.postOnAnimation(messagesScroll) {
             bottomScrollScheduled = false
-            val child = messagesScroll.getChildAt(0) ?: return@post
-            val targetY = max(0, child.bottom - messagesScroll.height)
-            if (animated) {
-                messagesScroll.smoothScrollTo(0, targetY)
-            } else {
-                messagesScroll.scrollTo(0, targetY)
+            val child = messagesScroll.getChildAt(0)
+            if (child != null) {
+                val targetY = max(0, child.bottom - messagesScroll.height)
+                if (targetY == lastBottomTargetY && abs(messagesScroll.scrollY - targetY) <= dp(1)) {
+                    followBottom = true
+                } else {
+                    lastBottomTargetY = targetY
+                    programmaticScroll = true
+                    if (animated) {
+                        messagesScroll.smoothScrollTo(0, targetY)
+                    } else {
+                        messagesScroll.scrollTo(0, targetY)
+                    }
+                    followBottom = true
+                    ViewCompat.postOnAnimation(messagesScroll) {
+                        programmaticScroll = false
+                        followBottom = isNearBottom()
+                    }
+                }
             }
-            followBottom = true
         }
     }
 
