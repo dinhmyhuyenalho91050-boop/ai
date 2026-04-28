@@ -104,24 +104,24 @@ class MainActivity : AppCompatActivity() {
     private var settingsCompact = false
     private var streamHeightAnimationSeed = 0
 
-    private val defaultRenderMessageLimit = 56
-    private val loadOlderMessageBatch = 32
+    private val defaultRenderMessageLimit = 80
+    private val loadOlderMessageBatch = 40
     private var renderMessageLimit = defaultRenderMessageLimit
     private val scrollTrackFrameMs = 96L
-    private val streamFrameMs = 160L
-    private val streamDetachedFrameMs = 520L
-    private val streamLineFlushChars = 160
-    private val streamThinkingFlushChars = 700
-    private val streamMaxWaitMs = 760L
-    private val streamRevealFrameMs = 128L
-    private val streamRevealTouchFrameMs = 360L
-    private val streamUiCommitFrameMs = 128L
-    private val streamFadeFrameMs = 160L
-    private val streamContentCharsPerSecond = 54f
-    private val streamThinkingCharsPerSecond = 720f
-    private val streamMaxContentCharsPerFrame = 16
-    private val streamMaxThinkingCharsPerFrame = 220
-    private val streamFadeMs = 280L
+    private val streamFrameMs = 96L
+    private val streamDetachedFrameMs = 260L
+    private val streamLineFlushChars = 80
+    private val streamThinkingFlushChars = 360
+    private val streamMaxWaitMs = 220L
+    private val streamRevealFrameMs = 40L
+    private val streamRevealTouchFrameMs = 120L
+    private val streamUiCommitFrameMs = 48L
+    private val streamFadeFrameMs = 64L
+    private val streamContentCharsPerSecond = 48f
+    private val streamThinkingCharsPerSecond = 420f
+    private val streamMaxContentCharsPerFrame = 4
+    private val streamMaxThinkingCharsPerFrame = 96
+    private val streamFadeMs = 420L
     private val streamParagraphHoldMs = 900L
     private val streamParagraphSoftChars = 120
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
@@ -594,7 +594,7 @@ class MainActivity : AppCompatActivity() {
                         latestThinking.indexOf('\n', thinkingStart) >= 0
                     val hasLineChunk = contentDelta >= streamLineFlushChars ||
                         thinkingDelta >= streamThinkingFlushChars
-                    val waitedLongEnough = now - lastFrameAt >= max(frameMs, streamMaxWaitMs)
+                    val waitedLongEnough = now - lastFrameAt >= min(frameMs, streamMaxWaitMs)
                     if ((hasLineBreak || hasLineChunk || waitedLongEnough) &&
                         uiUpdatePosted.compareAndSet(false, true)
                     ) {
@@ -1131,9 +1131,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val delta = toHeight - fromHeight
-        val steps = (delta / dp(42)).coerceIn(2, 4)
-        val durationMs = (delta * 2L).coerceIn(120L, 220L)
-        val stepDelay = (durationMs / steps).coerceAtLeast(48L)
+        val steps = (delta / dp(28)).coerceIn(3, 6)
+        val durationMs = (delta * 2L).coerceIn(160L, 260L)
+        val stepDelay = (durationMs / steps).coerceAtLeast(32L)
         fun runStep(step: Int): Unit {
             if (streamBodyHeightAnimationTokens[messageId] != token) return
             val progress = (step.toFloat() / steps).coerceIn(0f, 1f)
@@ -2365,7 +2365,7 @@ class MainActivity : AppCompatActivity() {
                 if (danger) 0 else dp(1),
                 color(R.color.chat_border)
             )
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setPadding(dp(10), dp(5), dp(10), dp(5))
             installPressAnimation(this)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2394,7 +2394,7 @@ class MainActivity : AppCompatActivity() {
             includeFontPadding = false
             gravity = Gravity.CENTER
             background = rounded(color(R.color.chat_panel), dp(8), dp(1), color(R.color.chat_border))
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setPadding(dp(16), dp(8), dp(16), dp(8))
             installPressAnimation(this)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
