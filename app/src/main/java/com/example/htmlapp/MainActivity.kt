@@ -54,6 +54,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.doOnLayout
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
@@ -88,6 +89,7 @@ class MainActivity : AppCompatActivity() {
     private val streamBodyHeightAnimators = mutableMapOf<String, ValueAnimator>()
     private val streamBodyHeightTargets = mutableMapOf<String, Int>()
     private val streamBodyLayoutLengths = mutableMapOf<String, Int>()
+    private val streamBodyMeasureStates = mutableMapOf<String, StreamBodyMeasureState>()
     private val streamTargets = mutableMapOf<String, StreamRenderTarget>()
     private val messageThinkingExpanded = mutableSetOf<String>()
     private val stoppedAssistantIds = mutableSetOf<String>()
@@ -112,6 +114,7 @@ class MainActivity : AppCompatActivity() {
     private val streamMaxWaitMs = 380L
     private val streamRevealFrameMs = 16L
     private val streamRevealTouchFrameMs = 80L
+    private val streamUiCommitFrameMs = 32L
     private val streamContentCharsPerSecond = 46f
     private val streamThinkingCharsPerSecond = 260f
     private val streamMaxContentCharsPerFrame = 2
@@ -559,6 +562,7 @@ class MainActivity : AppCompatActivity() {
             session.history.add(it)
         }
         val continuationPrefill = continueMessage?.content.orEmpty()
+        val promptForRegex = state.promptFor(session).copy()
         assistant.modelName = preset?.name.orEmpty()
         followBottom = true
         activeAssistantId = assistant.id
@@ -602,13 +606,17 @@ class MainActivity : AppCompatActivity() {
                             renderedThinkingLength = assistant.thinking.length
                             updateStreamTarget(assistant, latestDisplayContent, latestThinking)
                         }
-                    }
                 }
+            }
             }.onSuccess { result ->
+                val finalContent = applyPromptRegex(
+                    mergeContinuationContent(continuationPrefill, result.content),
+                    promptForRegex
+                )
                 mainHandler.post {
                     stoppedAssistantIds.remove(assistant.id)
                     if (activeAssistantId == assistant.id) activeAssistantId = null
-                    assistant.content = applyPromptRegex(mergeContinuationContent(continuationPrefill, result.content))
+                    assistant.content = finalContent
                     assistant.thinking = result.thinking
                     repository.save(state)
                     setSendingUi(false)
@@ -818,6 +826,7 @@ class MainActivity : AppCompatActivity() {
         streamBodyHeightAnimators.clear()
         streamBodyHeightTargets.clear()
         streamBodyLayoutLengths.clear()
+        streamBodyMeasureStates.clear()
         messageBodyViews.clear()
         messageThinkingViews.clear()
         messageThinkingContainers.clear()
@@ -892,7 +901,7 @@ class MainActivity : AppCompatActivity() {
         val body = TextView(this).apply {
             val content = displayContent(message)
             if (isLiveAssistant(message)) {
-                setText(streamingFormatter(message.id).render(content), TextView.BufferType.SPANNABLE)
+                setText(streamingFormatter(message.id).render(content).text, TextView.BufferType.SPANNABLE)
             } else {
                 text = formatMessageText(content)
             }
@@ -1000,11 +1009,16 @@ class MainActivity : AppCompatActivity() {
         val previous = messageRenderedContent[message.id]
         if (streaming && !final) {
             if (previous == content) return
+            val renderResult = streamingFormatter(message.id).render(content)
+            val hasNewLine = previous == null ||
+                content.length < previous.length ||
+                content.indexOf('\n', previous.length.coerceIn(0, content.length)) >= 0
             setStreamingBodyText(
                 message.id,
                 body,
-                streamingFormatter(message.id).render(content),
-                visibleLength = content.length
+                renderResult.text,
+                visibleLength = content.length,
+                hasNewLine = hasNewLine
             )
             messageRenderedContent[message.id] = content
             return
@@ -1012,6 +1026,7 @@ class MainActivity : AppCompatActivity() {
         if (final || previous != content) {
             messageStreamFormatters.remove(message.id)
             streamBodyLayoutLengths.remove(message.id)
+            streamBodyMeasureStates.remove(message.id)
             stopStreamingBodyHeightAnimation(message.id, body)
             body.text = formatMessageText(content)
             messageRenderedContent[message.id] = content
@@ -1022,7 +1037,8 @@ class MainActivity : AppCompatActivity() {
         messageId: String,
         body: TextView,
         text: CharSequence,
-        visibleLength: Int
+        visibleLength: Int,
+        hasNewLine: Boolean
     ) {
         val oldHeight = body.height
         val oldWidth = body.width
@@ -1031,7 +1047,18 @@ class MainActivity : AppCompatActivity() {
             ensureBodyWrapContent(body)
             return
         }
-        val targetHeight = measureTextHeight(body, oldWidth, text)
+        val releasedPinnedHeight = releasePinnedBodyHeight(messageId, body, visibleLength)
+        if (!shouldMeasureStreamingHeight(messageId, body, oldWidth, visibleLength, hasNewLine)) {
+            if (!releasedPinnedHeight &&
+                streamBodyHeightTargets[messageId] == null &&
+                streamBodyHeightAnimators[messageId] == null
+            ) {
+                ensureBodyWrapContent(body)
+            }
+            return
+        }
+        val targetHeight = measureCurrentTextHeight(body, oldWidth)
+        rememberStreamingMeasure(messageId, body, oldWidth, visibleLength, targetHeight)
         val layoutLength = visibleLength
         val activeTarget = streamBodyHeightTargets[messageId]
         val activeAnimator = streamBodyHeightAnimators[messageId]
@@ -1043,20 +1070,53 @@ class MainActivity : AppCompatActivity() {
             animateStreamingBodyHeight(messageId, body, oldHeight, targetHeight)
             return
         }
-        if (!releasePinnedBodyHeight(messageId, body, visibleLength) && activeTarget == null && activeAnimator == null) {
+        if (!releasedPinnedHeight && activeTarget == null && activeAnimator == null) {
             ensureBodyWrapContent(body)
         }
     }
 
-    private fun measureTextHeight(body: TextView, width: Int, text: CharSequence): Int {
-        val visibleText = body.text
-        body.setText(text, TextView.BufferType.SPANNABLE)
+    private fun shouldMeasureStreamingHeight(
+        messageId: String,
+        body: TextView,
+        width: Int,
+        visibleLength: Int,
+        hasNewLine: Boolean
+    ): Boolean {
+        val state = streamBodyMeasureStates[messageId] ?: return true
+        if (state.width != width || visibleLength < state.measuredLength) return true
+        if (state.measuredHeight <= 0 || hasNewLine) return true
+        if (streamBodyHeightTargets[messageId] != null && visibleLength >= (streamBodyLayoutLengths[messageId] ?: Int.MAX_VALUE)) {
+            return true
+        }
+        return visibleLength >= state.nextCheckLength
+    }
+
+    private fun rememberStreamingMeasure(
+        messageId: String,
+        body: TextView,
+        width: Int,
+        visibleLength: Int,
+        height: Int
+    ) {
+        val state = streamBodyMeasureStates.getOrPut(messageId) { StreamBodyMeasureState() }
+        state.width = width
+        state.measuredLength = visibleLength
+        state.measuredHeight = height
+        state.nextCheckLength = visibleLength + streamingHeightCheckStep(body, width)
+    }
+
+    private fun streamingHeightCheckStep(body: TextView, width: Int): Int {
+        val contentWidth = (width - body.paddingLeft - body.paddingRight).coerceAtLeast(dp(80))
+        val averageCharWidth = body.paint.measureText("中").coerceAtLeast(1f)
+        val estimatedCharsPerLine = (contentWidth / averageCharWidth).toInt().coerceAtLeast(8)
+        return (estimatedCharsPerLine / 2).coerceIn(8, 24)
+    }
+
+    private fun measureCurrentTextHeight(body: TextView, width: Int): Int {
         val widthSpec = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY)
         val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         body.measure(widthSpec, heightSpec)
-        val measured = body.measuredHeight
-        body.setText(visibleText, TextView.BufferType.SPANNABLE)
-        return measured
+        return body.measuredHeight
     }
 
     private fun animateStreamingBodyHeight(messageId: String, body: TextView, fromHeight: Int, toHeight: Int) {
@@ -1094,6 +1154,7 @@ class MainActivity : AppCompatActivity() {
         streamBodyHeightAnimators.remove(messageId)?.cancel()
         streamBodyHeightTargets.remove(messageId)
         streamBodyLayoutLengths.remove(messageId)
+        streamBodyMeasureStates.remove(messageId)
         ensureBodyWrapContent(body)
     }
 
@@ -1138,11 +1199,18 @@ class MainActivity : AppCompatActivity() {
             )
         }
         target.message = message
+        target.contentPrefixValid = contentHasVisiblePrefix(target, content)
+        target.thinkingPrefixValid = thinkingHasVisiblePrefix(target, thinking)
+        if (content != target.targetContent) {
+            target.releaseScanStart = -1
+            target.releaseScanLength = -1
+            target.releaseScanBoundary = -1
+        }
         target.targetContent = content
         target.targetThinking = thinking
         target.lastTargetUpdateAt = android.os.SystemClock.uptimeMillis()
-        if (target.targetContent.startsWith(target.visibleContent)) {
-            target.contentReleaseEnd = max(target.contentReleaseEnd, target.visibleContent.length)
+        if (target.contentPrefixValid) {
+            target.contentReleaseEnd = max(target.contentReleaseEnd, target.visibleContentLength)
                 .coerceAtMost(target.targetContent.length)
         }
         if (target.targetContent.length > target.contentReleaseEnd && target.unreleasedContentSince == 0L) {
@@ -1152,20 +1220,51 @@ class MainActivity : AppCompatActivity() {
         scheduleStreamAnimator()
     }
 
+    private fun contentHasVisiblePrefix(target: StreamRenderTarget, content: String): Boolean {
+        if (content.length < target.visibleContentLength) return false
+        if (target.targetContent.isNotEmpty() &&
+            content.length >= target.targetContent.length &&
+            content.startsWith(target.targetContent)
+        ) {
+            return true
+        }
+        if (target.visibleContentLength > target.visibleContent.length) return false
+        return content.startsWith(target.visibleContent)
+    }
+
+    private fun thinkingHasVisiblePrefix(target: StreamRenderTarget, thinking: String): Boolean {
+        if (thinking.length < target.visibleThinkingLength) return false
+        if (target.targetThinking.isNotEmpty() &&
+            thinking.length >= target.targetThinking.length &&
+            thinking.startsWith(target.targetThinking)
+        ) {
+            return true
+        }
+        if (target.visibleThinkingLength > target.visibleThinking.length) return false
+        return thinking.startsWith(target.visibleThinking)
+    }
+
     private fun scheduleStreamAnimator() {
         if (streamAnimatorScheduled) return
         streamAnimatorScheduled = true
         val delayMs = if (userTouchingMessages) streamRevealTouchFrameMs else streamRevealFrameMs
-        mainHandler.postDelayed({
+        val tick = Runnable {
             streamAnimatorScheduled = false
             tickStreamAnimator()
-        }, delayMs)
+        }
+        if (!userTouchingMessages && delayMs <= streamRevealFrameMs) {
+            ViewCompat.postOnAnimation(messagesScroll, tick)
+        } else {
+            mainHandler.postDelayed(tick, delayMs)
+        }
     }
 
     private fun tickStreamAnimator() {
         val now = android.os.SystemClock.uptimeMillis()
         var needsNextFrame = false
-        streamTargets.values.toList().forEach { target ->
+        val iterator = streamTargets.entries.iterator()
+        while (iterator.hasNext()) {
+            val target = iterator.next().value
             refreshContentReleaseEnd(target, now)
             val elapsedMs = revealElapsedMs(target, now)
             val contentBudget = revealBudget(
@@ -1183,23 +1282,43 @@ class MainActivity : AppCompatActivity() {
             target.contentRevealCarry = contentBudget.carry
             target.thinkingRevealCarry = thinkingBudget.carry
             val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
-            val playableContent = target.targetContent.substring(0, contentEnd)
-            val nextContent = advanceVisibleText(target.visibleContent, playableContent, contentBudget.chars)
-            val nextThinking = advanceVisibleText(target.visibleThinking, target.targetThinking, thinkingBudget.chars)
-            val changed = nextContent != target.visibleContent || nextThinking != target.visibleThinking
-            target.visibleContent = nextContent
-            target.visibleThinking = nextThinking
-            if (changed) {
-                target.lastRevealAt = now
-                val display = target.message.copy(content = nextContent, thinking = nextThinking)
-                updateMessageViews(display, streaming = true)
+            val nextContentLength = if (target.contentPrefixValid) {
+                advanceVisibleLength(target.visibleContentLength, contentEnd, contentBudget.chars)
+            } else {
+                contentEnd
             }
-            val caughtUp = nextContent == target.targetContent && nextThinking == target.targetThinking
+            val nextThinkingLength = if (target.thinkingPrefixValid) {
+                advanceVisibleLength(target.visibleThinkingLength, target.targetThinking.length, thinkingBudget.chars)
+            } else {
+                target.targetThinking.length
+            }
+            val contentChanged = nextContentLength != target.visibleContentLength || !target.contentPrefixValid
+            val thinkingChanged = nextThinkingLength != target.visibleThinkingLength || !target.thinkingPrefixValid
+            val changed = contentChanged || thinkingChanged
+            target.visibleContentLength = nextContentLength
+            target.visibleThinkingLength = nextThinkingLength
+            if (changed) {
+                if (shouldCommitStreamFrame(target, now, contentChanged, thinkingChanged, nextContentLength, nextThinkingLength)) {
+                    val nextContent = target.targetContent.prefixAt(nextContentLength)
+                    val nextThinking = target.targetThinking.prefixAt(nextThinkingLength)
+                    target.visibleContent = nextContent
+                    target.visibleThinking = nextThinking
+                    target.contentPrefixValid = true
+                    target.thinkingPrefixValid = true
+                    target.lastUiCommitAt = now
+                    target.lastRevealAt = now
+                    val display = target.message.copy(content = nextContent, thinking = nextThinking)
+                    updateMessageViews(display, streaming = true)
+                } else {
+                    needsNextFrame = true
+                }
+            }
+            val caughtUp = nextContentLength == target.targetContent.length && nextThinkingLength == target.targetThinking.length
             if (caughtUp && target.finishWhenCaught) {
                 if (now - target.lastRevealAt < streamFadeMs) {
                     needsNextFrame = true
                 } else {
-                    streamTargets.remove(target.message.id)
+                    iterator.remove()
                     messageStreamFormatters.remove(target.message.id)
                     updateMessageViews(target.message, final = true)
                 }
@@ -1208,7 +1327,7 @@ class MainActivity : AppCompatActivity() {
             }
             messageBodyViews[target.message.id]?.let { body ->
                 if (now - target.lastRevealAt < streamFadeMs) {
-                    body.invalidate()
+                    ViewCompat.postInvalidateOnAnimation(body)
                     needsNextFrame = true
                 }
             }
@@ -1219,10 +1338,10 @@ class MainActivity : AppCompatActivity() {
     private fun refreshContentReleaseEnd(target: StreamRenderTarget, now: Long) {
         val length = target.targetContent.length
         target.contentReleaseEnd = target.contentReleaseEnd.coerceIn(0, length)
-        if (target.targetContent.startsWith(target.visibleContent)) {
-            target.contentReleaseEnd = max(target.contentReleaseEnd, target.visibleContent.length).coerceAtMost(length)
+        if (target.contentPrefixValid) {
+            target.contentReleaseEnd = max(target.contentReleaseEnd, target.visibleContentLength).coerceAtMost(length)
         }
-        if (target.finishWhenCaught || !target.targetContent.startsWith(target.visibleContent)) {
+        if (target.finishWhenCaught || !target.contentPrefixValid) {
             target.contentReleaseEnd = length
             target.unreleasedContentSince = 0L
             return
@@ -1233,8 +1352,8 @@ class MainActivity : AppCompatActivity() {
         }
         if (target.unreleasedContentSince == 0L) target.unreleasedContentSince = now
         val before = target.contentReleaseEnd
-        val searchStart = max(target.visibleContent.length, target.contentReleaseEnd)
-        val paragraphEnd = paragraphBoundaryAfter(target.targetContent, searchStart)
+        val searchStart = max(target.visibleContentLength, target.contentReleaseEnd)
+        val paragraphEnd = cachedParagraphBoundaryAfter(target, searchStart)
         target.contentReleaseEnd = when {
             paragraphEnd > before -> paragraphEnd
             length - before >= streamParagraphSoftChars -> softReleaseEnd(target.targetContent, before, length)
@@ -1247,7 +1366,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun paragraphBoundaryAfter(text: String, start: Int): Int {
+    private fun cachedParagraphBoundaryAfter(target: StreamRenderTarget, start: Int): Int {
+        val length = target.targetContent.length
+        if (target.releaseScanStart == start && target.releaseScanLength == length) {
+            return target.releaseScanBoundary
+        }
+        val boundary = findParagraphBoundaryAfter(target.targetContent, start)
+        target.releaseScanStart = start
+        target.releaseScanLength = length
+        target.releaseScanBoundary = boundary
+        return boundary
+    }
+
+    private fun findParagraphBoundaryAfter(text: String, start: Int): Int {
         for (i in start until text.length) {
             if (text[i] == '\n') {
                 var end = i + 1
@@ -1285,14 +1416,41 @@ class MainActivity : AppCompatActivity() {
         return RevealBudget(chars, nextCarry)
     }
 
-    private fun advanceVisibleText(current: String, target: String, maxChars: Int): String {
-        if (current == target) return current
-        if (!target.startsWith(current)) return target
+    private fun shouldCommitStreamFrame(
+        target: StreamRenderTarget,
+        now: Long,
+        contentChanged: Boolean,
+        thinkingChanged: Boolean,
+        nextContentLength: Int,
+        nextThinkingLength: Int
+    ): Boolean {
+        if (!contentChanged && !thinkingChanged) return false
+        if (!target.contentPrefixValid || !target.thinkingPrefixValid) return true
+        if (target.lastUiCommitAt == 0L) return true
+        if (target.finishWhenCaught &&
+            nextContentLength == target.targetContent.length &&
+            nextThinkingLength == target.targetThinking.length
+        ) {
+            return true
+        }
+        if (contentChanged && nextContentLength > 0 && target.targetContent.getOrNull(nextContentLength - 1) == '\n') return true
+        val minInterval = if (userTouchingMessages) streamRevealTouchFrameMs else streamUiCommitFrameMs
+        return now - target.lastUiCommitAt >= minInterval
+    }
+
+    private fun advanceVisibleLength(current: Int, targetEnd: Int, maxChars: Int): Int {
+        val end = targetEnd.coerceAtLeast(0)
+        if (current == end) return current
+        if (current > end) return end
         if (maxChars <= 0) return current
-        val start = current.length
-        val remaining = target.length - start
-        if (remaining <= maxChars) return target
-        return target.substring(0, min(target.length, start + maxChars))
+        val remaining = end - current
+        if (remaining <= maxChars) return end
+        return min(end, current + maxChars)
+    }
+
+    private fun String.prefixAt(length: Int): String {
+        val end = length.coerceIn(0, this.length)
+        return if (end == this.length) this else substring(0, end)
     }
 
     private fun streamingFormatter(messageId: String): StreamFormatState {
@@ -1378,8 +1536,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyPromptRegex(content: String): String {
+        return applyPromptRegex(content, state.promptFor(state.activeSession()))
+    }
+
+    private fun applyPromptRegex(content: String, prompt: PromptPreset): String {
         if (content.isBlank()) return content
-        val prompt = state.promptFor(state.activeSession())
         val rules = runCatching { JSONArray(prompt.regexRulesJson) }.getOrNull() ?: return content
         var result = content
         for (i in 0 until rules.length()) {
@@ -2598,6 +2759,8 @@ class MainActivity : AppCompatActivity() {
         var targetThinking: String = "",
         var visibleContent: String = "",
         var visibleThinking: String = "",
+        var visibleContentLength: Int = visibleContent.length,
+        var visibleThinkingLength: Int = visibleThinking.length,
         var finishWhenCaught: Boolean = false,
         var lastRevealAt: Long = 0L,
         var lastTargetUpdateAt: Long = 0L,
@@ -2605,12 +2768,31 @@ class MainActivity : AppCompatActivity() {
         var contentReleaseEnd: Int = 0,
         var unreleasedContentSince: Long = 0L,
         var contentRevealCarry: Float = 0f,
-        var thinkingRevealCarry: Float = 0f
+        var thinkingRevealCarry: Float = 0f,
+        var lastUiCommitAt: Long = 0L,
+        var contentPrefixValid: Boolean = true,
+        var thinkingPrefixValid: Boolean = true,
+        var releaseScanStart: Int = -1,
+        var releaseScanLength: Int = -1,
+        var releaseScanBoundary: Int = -1
     )
 
     private data class RevealBudget(
         val chars: Int,
         val carry: Float
+    )
+
+    private data class StreamRenderResult(
+        val text: CharSequence,
+        val changedStart: Int,
+        val changedEnd: Int
+    )
+
+    private data class StreamBodyMeasureState(
+        var width: Int = 0,
+        var measuredLength: Int = 0,
+        var measuredHeight: Int = 0,
+        var nextCheckLength: Int = 0
     )
 
     private enum class StreamMode {
@@ -2626,109 +2808,98 @@ class MainActivity : AppCompatActivity() {
         private val fadeMs: Long
     ) {
         private val rendered = SpannableStringBuilder()
-        private val buffer = StringBuilder()
+        private val fadeSpans = ArrayDeque<FadeInSpan>()
         private var raw = ""
-        private var stableEnd = 0
         private var mode = StreamMode.PLAIN
-        private var opener = '\u0000'
-        private var previousDisplay = ""
+        private var specialStart = -1
 
-        fun render(text: String): CharSequence {
-            var previous = previousDisplay
+        fun render(text: String): StreamRenderResult {
+            val previousRenderedLength = rendered.length
+            var appendOnly = true
             if (!text.startsWith(raw)) {
                 reset()
-                previous = ""
+                appendOnly = false
             }
-            if (rendered.length > stableEnd) {
-                rendered.delete(stableEnd, rendered.length)
-            }
-            feed(text.substring(raw.length))
+            val changedStart = feed(text.substring(raw.length), if (appendOnly) previousRenderedLength else 0)
             raw = text
-            stableEnd = rendered.length
-            appendTail()
             val now = android.os.SystemClock.uptimeMillis()
             pruneFinishedFadeSpans(now)
-            val current = rendered.toString()
-            val fadeStart = commonPrefixLength(previous, current)
+            val fadeStart = changedStart.coerceIn(0, rendered.length)
             if (fadeStart < rendered.length && fadeMs > 0L) {
-                rendered.setSpan(FadeInSpan(now, fadeMs), fadeStart, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                val span = FadeInSpan(now, fadeMs)
+                rendered.setSpan(span, fadeStart, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                fadeSpans.addLast(span)
             }
-            previousDisplay = current
-            return rendered
+            return StreamRenderResult(rendered, fadeStart, rendered.length)
         }
 
         private fun reset() {
             rendered.clear()
-            buffer.clear()
+            fadeSpans.clear()
             raw = ""
-            stableEnd = 0
             mode = StreamMode.PLAIN
-            opener = '\u0000'
-            previousDisplay = ""
+            specialStart = -1
         }
 
         private fun pruneFinishedFadeSpans(now: Long) {
-            rendered.getSpans(0, rendered.length, FadeInSpan::class.java).forEach { span ->
-                if (span.isFinished(now)) rendered.removeSpan(span)
+            while (true) {
+                val span = fadeSpans.peekFirst() ?: return
+                if (!span.isFinished(now)) return
+                rendered.removeSpan(span)
+                fadeSpans.removeFirst()
             }
         }
 
-        private fun feed(delta: String) {
+        private fun feed(delta: String, initialChangedStart: Int): Int {
+            var changedStart = initialChangedStart
             delta.forEach { ch ->
                 when {
-                    mode == StreamMode.PLAIN && isDoubleQuote(ch) -> open(StreamMode.DOUBLE_QUOTE, ch)
+                    mode == StreamMode.PLAIN && isDoubleQuote(ch) -> {
+                        changedStart = min(changedStart, rendered.length)
+                        open(StreamMode.DOUBLE_QUOTE, ch)
+                    }
                     mode == StreamMode.DOUBLE_QUOTE && isQuote(ch) -> closeQuote(ch)
-                    mode == StreamMode.PLAIN && isChineseOpenQuote(ch) -> open(StreamMode.CHINESE_QUOTE, ch)
+                    mode == StreamMode.PLAIN && isChineseOpenQuote(ch) -> {
+                        changedStart = min(changedStart, rendered.length)
+                        open(StreamMode.CHINESE_QUOTE, ch)
+                    }
                     mode == StreamMode.CHINESE_QUOTE && (isChineseCloseQuote(ch) || isQuote(ch)) -> closeQuote(ch)
-                    mode == StreamMode.PLAIN && isStar(ch) -> open(StreamMode.STAR, ch)
+                    mode == StreamMode.PLAIN && isStar(ch) -> {
+                        changedStart = min(changedStart, rendered.length)
+                        open(StreamMode.STAR, ch)
+                    }
                     mode == StreamMode.STAR && isStar(ch) -> closeStar()
-                    else -> buffer.append(ch)
+                    else -> {
+                        changedStart = min(changedStart, rendered.length)
+                        rendered.append(ch)
+                    }
                 }
-                if (mode == StreamMode.PLAIN && buffer.length > 512) commitPlain()
             }
+            return changedStart
         }
 
         private fun open(nextMode: StreamMode, ch: Char) {
-            commitPlain()
             mode = nextMode
-            opener = ch
+            specialStart = rendered.length
+            rendered.append(ch)
         }
 
         private fun closeQuote(closer: Char) {
-            val start = rendered.length
-            rendered.append(opener)
-            rendered.append(buffer)
+            val start = specialStart.coerceAtLeast(0)
             rendered.append(closer)
             rendered.setSpan(ForegroundColorSpan(quoteColor), start, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            buffer.clear()
             mode = StreamMode.PLAIN
-            opener = '\u0000'
+            specialStart = -1
         }
 
         private fun closeStar() {
-            if (buffer.isEmpty()) {
-                mode = StreamMode.PLAIN
-                opener = '\u0000'
-                return
+            val start = specialStart.coerceAtLeast(0)
+            if (start < rendered.length) rendered.delete(start, start + 1)
+            if (start < rendered.length) {
+                rendered.setSpan(ForegroundColorSpan(starColor), start, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
-            val start = rendered.length
-            rendered.append(buffer)
-            rendered.setSpan(ForegroundColorSpan(starColor), start, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            buffer.clear()
             mode = StreamMode.PLAIN
-            opener = '\u0000'
-        }
-
-        private fun commitPlain() {
-            if (buffer.isNotEmpty()) {
-                rendered.append(buffer)
-                buffer.clear()
-            }
-        }
-
-        private fun appendTail() {
-            if (mode != StreamMode.PLAIN && opener != '\u0000') rendered.append(opener)
-            rendered.append(buffer)
+            specialStart = -1
         }
 
         private fun isDoubleQuote(ch: Char): Boolean {
@@ -2745,13 +2916,6 @@ class MainActivity : AppCompatActivity() {
 
         private fun isStar(ch: Char): Boolean {
             return ch == '*' || ch == '\uFF0A'
-        }
-
-        private fun commonPrefixLength(first: String, second: String): Int {
-            val end = min(first.length, second.length)
-            var index = 0
-            while (index < end && first[index] == second[index]) index++
-            return index
         }
     }
 

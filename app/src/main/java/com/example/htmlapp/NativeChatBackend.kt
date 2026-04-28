@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
@@ -499,6 +500,12 @@ class NativeChatRepository(private val context: Context) {
 data class NativeAiResult(val content: String, val thinking: String = "")
 
 class NativeAiClient {
+    private companion object {
+        private const val STREAM_DELTA_EMIT_MS = 72L
+        private const val STREAM_DELTA_CONTENT_CHARS = 96
+        private const val STREAM_DELTA_THINKING_CHARS = 256
+    }
+
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -1004,6 +1011,9 @@ class NativeAiClient {
     ): NativeAiResult {
         val call = client.newCall(request)
         activeCall = call
+        var streamFull: StringBuilder? = null
+        var streamThinking: StringBuilder? = null
+        var streamEmitter: StreamDeltaEmitter? = null
         try {
             call.execute().use { response ->
                 if (!response.isSuccessful) {
@@ -1017,13 +1027,17 @@ class NativeAiClient {
 
                 val full = StringBuilder()
                 val thinking = StringBuilder()
+                val emitter = StreamDeltaEmitter(onDelta)
+                streamFull = full
+                streamThinking = thinking
+                streamEmitter = emitter
                 var pendingEvent = StringBuilder()
                 body.charStream().buffered().useLines { lines ->
                     lines.forEach { raw ->
                         val line = raw.trimEnd()
                         if (line.isBlank()) {
                             if (pendingEvent.isNotEmpty()) {
-                                consumeSseJson(pendingEvent.toString(), parseStreamLine, full, thinking, onDelta)
+                                consumeSseJson(pendingEvent.toString(), parseStreamLine, full, thinking, emitter)
                                 pendingEvent = StringBuilder()
                             }
                             return@forEach
@@ -1035,11 +1049,18 @@ class NativeAiClient {
                     }
                 }
                 if (pendingEvent.isNotEmpty()) {
-                    consumeSseJson(pendingEvent.toString(), parseStreamLine, full, thinking, onDelta)
+                    consumeSseJson(pendingEvent.toString(), parseStreamLine, full, thinking, emitter)
                 }
+                emitter.emit(full, thinking, force = true)
                 return NativeAiResult(full.toString().ifBlank { "(空响应)" }, thinking.toString())
             }
         } finally {
+            val full = streamFull
+            val thinking = streamThinking
+            val emitter = streamEmitter
+            if (full != null && thinking != null && emitter != null) {
+                emitter.emit(full, thinking, force = true)
+            }
             activeCall = null
         }
     }
@@ -1049,7 +1070,7 @@ class NativeAiClient {
         parser: (JSONObject) -> NativeAiResult,
         full: StringBuilder,
         thinking: StringBuilder,
-        onDelta: (content: String, thinking: String) -> Unit
+        emitter: StreamDeltaEmitter
     ) {
         runCatching {
             val delta = parser(JSONObject(data))
@@ -1057,7 +1078,52 @@ class NativeAiClient {
             val thinkingPart = cleanStreamPart(delta.thinking)
             if (contentPart.isNotBlank() && contentPart != "(空响应)") full.append(contentPart)
             if (thinkingPart.isNotBlank()) thinking.append(thinkingPart)
-            if (contentPart.isNotBlank() || thinkingPart.isNotBlank()) onDelta(full.toString(), thinking.toString())
+            if (contentPart.isNotBlank() || thinkingPart.isNotBlank()) {
+                emitter.maybeEmit(full, thinking, contentPart, thinkingPart)
+            }
+        }
+    }
+
+    private class StreamDeltaEmitter(
+        private val onDelta: (content: String, thinking: String) -> Unit
+    ) {
+        private var lastEmitAt = 0L
+        private var lastContentLength = 0
+        private var lastThinkingLength = 0
+
+        fun maybeEmit(
+            content: StringBuilder,
+            thinking: StringBuilder,
+            contentPart: String,
+            thinkingPart: String
+        ) {
+            val now = SystemClock.uptimeMillis()
+            val contentDelta = content.length - lastContentLength
+            val thinkingDelta = thinking.length - lastThinkingLength
+            if (contentDelta <= 0 && thinkingDelta <= 0) return
+            val hasLineBreak = contentPart.indexOf('\n') >= 0 || thinkingPart.indexOf('\n') >= 0
+            val waited = lastEmitAt == 0L || now - lastEmitAt >= STREAM_DELTA_EMIT_MS
+            if (hasLineBreak ||
+                waited ||
+                contentDelta >= STREAM_DELTA_CONTENT_CHARS ||
+                thinkingDelta >= STREAM_DELTA_THINKING_CHARS
+            ) {
+                emit(content, thinking, force = false, now = now)
+            }
+        }
+
+        fun emit(
+            content: StringBuilder,
+            thinking: StringBuilder,
+            force: Boolean,
+            now: Long = SystemClock.uptimeMillis()
+        ) {
+            if (content.length == lastContentLength && thinking.length == lastThinkingLength) return
+            if (!force && lastEmitAt != 0L && now - lastEmitAt < STREAM_DELTA_EMIT_MS) return
+            lastEmitAt = now
+            lastContentLength = content.length
+            lastThinkingLength = thinking.length
+            onDelta(content.toString(), thinking.toString())
         }
     }
 
