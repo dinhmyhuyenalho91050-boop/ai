@@ -13,8 +13,11 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.Layout
 import android.text.SpannableStringBuilder
 import android.text.Spanned
+import android.text.TextPaint
+import android.text.style.CharacterStyle
 import android.text.style.ForegroundColorSpan
 import android.text.style.StyleSpan
 import android.view.Gravity
@@ -90,6 +93,8 @@ class MainActivity : AppCompatActivity() {
     private var bottomScrollScheduled = false
     private var scrollTrackScheduled = false
     private var streamAnimatorScheduled = false
+    private var userTouchingMessages = false
+    private var messageTouchToken = 0
     private var programmaticScroll = false
     private var lastBottomTargetY = -1
     private var settingsCompact = false
@@ -97,14 +102,20 @@ class MainActivity : AppCompatActivity() {
     private var renderMessageLimit = 80
     private val streamFrameMs = 48L
     private val streamDetachedFrameMs = 160L
-    private val streamLineFlushChars = 48
+    private val streamLineFlushChars = 24
     private val streamThinkingFlushChars = 96
-    private val streamMaxWaitMs = 360L
-    private val streamRevealFrameMs = 32L
-    private val streamRevealChars = 12
+    private val streamMaxWaitMs = 220L
+    private val streamRevealFrameMs = 24L
+    private val streamRevealTouchFrameMs = 120L
+    private val streamRevealChars = 4
     private val streamThinkingRevealChars = 48
+    private val streamFadeMs = 220L
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
     private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
+    private val readingRegularTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.NORMAL) }
+    private val readingBoldTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.BOLD) }
+    private val readingItalicTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.ITALIC) }
+    private val readingBoldItalicTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.BOLD_ITALIC) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -157,7 +168,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun setupScrollTracking() {
+        messagesScroll.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    messageTouchToken++
+                    userTouchingMessages = true
+                    followBottom = isNearBottom()
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    followBottom = isNearBottom()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val token = ++messageTouchToken
+                    followBottom = isNearBottom()
+                    mainHandler.postDelayed({
+                        if (token == messageTouchToken) userTouchingMessages = false
+                    }, 120L)
+                }
+            }
+            false
+        }
         messagesScroll.setOnScrollChangeListener { _, _, _, _, _ ->
             if (!programmaticScroll && !scrollTrackScheduled) {
                 scrollTrackScheduled = true
@@ -170,7 +202,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         messagesContainer.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, oldBottom ->
-            if (followBottom && bottom != oldBottom) {
+            if (followBottom && !userTouchingMessages && bottom != oldBottom) {
                 scrollToBottomSoon()
             }
         }
@@ -190,6 +222,10 @@ class MainActivity : AppCompatActivity() {
             findViewById(R.id.sidebar_model_gpt),
             findViewById(R.id.sidebar_model_deepseek)
         )
+        inputMessage.includeFontPadding = true
+        inputMessage.setLineSpacing(dp(3).toFloat(), 1.04f)
+        inputMessage.breakStrategy = Layout.BREAK_STRATEGY_SIMPLE
+        inputMessage.hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
     }
 
     private fun setupEdgeToEdge() {
@@ -436,20 +472,23 @@ class MainActivity : AppCompatActivity() {
             backdrop.alpha = 0f
             backdrop.visibility = View.VISIBLE
             sidebar.translationX = -sidebarWidth
+            sidebar.alpha = 0.96f
             sidebar.visibility = View.VISIBLE
-            backdrop.animate().alpha(1f).setDuration(240).setInterpolator(softInterpolator).start()
+            backdrop.animate().alpha(1f).setDuration(280).setInterpolator(softInterpolator).start()
             sidebar.animate()
+                .alpha(1f)
                 .translationX(0f)
-                .setDuration(320)
-                .setInterpolator(softInterpolator)
+                .setDuration(380)
+                .setInterpolator(entranceInterpolator)
                 .start()
         } else {
-            backdrop.animate().alpha(0f).setDuration(220).setInterpolator(softInterpolator).withEndAction {
+            backdrop.animate().alpha(0f).setDuration(260).setInterpolator(softInterpolator).withEndAction {
                 backdrop.visibility = View.GONE
             }.start()
             sidebar.animate()
+                .alpha(0.96f)
                 .translationX(-sidebarWidth)
-                .setDuration(260)
+                .setDuration(300)
                 .setInterpolator(softInterpolator)
                 .withEndAction { sidebar.visibility = View.GONE }
                 .start()
@@ -475,6 +514,7 @@ class MainActivity : AppCompatActivity() {
         if (isSending) return
         val text = inputMessage.text.toString().trim()
         if (text.isEmpty()) return
+        animateSendAction()
         val session = state.ensureSession()
         val preset = state.currentPreset()
         session.modelName = preset?.name ?: session.modelName
@@ -597,6 +637,28 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun animateSendAction() {
+        sendButton.animate().cancel()
+        sendButton.pivotX = sendButton.width / 2f
+        sendButton.pivotY = sendButton.height / 2f
+        sendButton.animate()
+            .scaleX(0.92f)
+            .scaleY(0.92f)
+            .translationY(dp(2).toFloat())
+            .setDuration(70)
+            .setInterpolator(softInterpolator)
+            .withEndAction {
+                sendButton.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .translationY(0f)
+                    .setDuration(260)
+                    .setInterpolator(android.view.animation.OvershootInterpolator(1.6f))
+                    .start()
+            }
+            .start()
+    }
+
     private fun showPromptSelector() {
         if (isSending) return
         val dialog = Dialog(this)
@@ -629,6 +691,18 @@ class MainActivity : AppCompatActivity() {
                 min(resources.displayMetrics.widthPixels - dp(32), dp(700)),
                 min(resources.displayMetrics.heightPixels - dp(96), dp(620))
             )
+            scroll.alpha = 0f
+            scroll.scaleX = 0.96f
+            scroll.scaleY = 0.96f
+            scroll.translationY = dp(10).toFloat()
+            scroll.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .translationY(0f)
+                .setDuration(360)
+                .setInterpolator(entranceInterpolator)
+                .start()
         }
         dialog.show()
     }
@@ -779,7 +853,10 @@ class MainActivity : AppCompatActivity() {
             setTextColor(color(R.color.chat_fg))
             textSize = 16f
             typeface = systemTypeface()
-            setLineSpacing(dp(2).toFloat(), 1f)
+            includeFontPadding = true
+            setLineSpacing(dp(4).toFloat(), 1.04f)
+            breakStrategy = Layout.BREAK_STRATEGY_SIMPLE
+            hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
             setPadding(dp(16), dp(18), dp(16), dp(18))
             messageRenderedContent[message.id] = content
         }
@@ -823,7 +900,10 @@ class MainActivity : AppCompatActivity() {
             setTextColor(color(R.color.chat_muted))
             textSize = 13f
             typeface = systemTypeface()
-            setLineSpacing(dp(2).toFloat(), 1f)
+            includeFontPadding = true
+            setLineSpacing(dp(3).toFloat(), 1.04f)
+            breakStrategy = Layout.BREAK_STRATEGY_SIMPLE
+            hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
             setPadding(0, dp(10), 0, 0)
         }
         panel.addView(summary)
@@ -860,7 +940,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateMessageViews(message: ChatMessage, streaming: Boolean = false, final: Boolean = false) {
-        val stick = followBottom || isNearBottom()
+        val stick = !userTouchingMessages && (followBottom || isNearBottom())
         updateBodyText(message, streaming, final)
         updateThinkingPanel(message)
         if (stick) scrollToBottomSoon()
@@ -906,10 +986,11 @@ class MainActivity : AppCompatActivity() {
     private fun scheduleStreamAnimator() {
         if (streamAnimatorScheduled) return
         streamAnimatorScheduled = true
+        val delayMs = if (userTouchingMessages) streamRevealTouchFrameMs else streamRevealFrameMs
         mainHandler.postDelayed({
             streamAnimatorScheduled = false
             tickStreamAnimator()
-        }, streamRevealFrameMs)
+        }, delayMs)
     }
 
     private fun tickStreamAnimator() {
@@ -921,6 +1002,7 @@ class MainActivity : AppCompatActivity() {
             target.visibleContent = nextContent
             target.visibleThinking = nextThinking
             if (changed) {
+                target.lastRevealAt = android.os.SystemClock.uptimeMillis()
                 val display = target.message.copy(content = nextContent, thinking = nextThinking)
                 updateMessageViews(display, streaming = true)
             }
@@ -931,6 +1013,12 @@ class MainActivity : AppCompatActivity() {
                 updateMessageViews(target.message, final = true)
             } else if (!caughtUp) {
                 needsNextFrame = true
+            }
+            messageBodyViews[target.message.id]?.let { body ->
+                if (android.os.SystemClock.uptimeMillis() - target.lastRevealAt < streamFadeMs) {
+                    body.invalidate()
+                    needsNextFrame = true
+                }
             }
         }
         if (needsNextFrame) scheduleStreamAnimator()
@@ -967,7 +1055,8 @@ class MainActivity : AppCompatActivity() {
         return messageStreamFormatters.getOrPut(messageId) {
             StreamFormatState(
                 quoteColor = color(R.color.chat_accent3),
-                starColor = color(R.color.chat_accent)
+                starColor = color(R.color.chat_accent),
+                fadeMs = streamFadeMs
             )
         }
     }
@@ -1104,6 +1193,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun scrollToBottomSoon(animated: Boolean = false) {
+        if (userTouchingMessages) return
         if (bottomScrollScheduled) return
         bottomScrollScheduled = true
         messagesScroll.post {
@@ -1135,12 +1225,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun animateIn(view: View) {
         view.alpha = 0f
-        view.translationY = dp(12).toFloat()
+        view.scaleX = 0.985f
+        view.scaleY = 0.985f
+        view.translationY = dp(18).toFloat()
         view.animate()
             .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
             .translationY(0f)
-            .setDuration(360)
-            .setInterpolator(entranceInterpolator)
+            .setDuration(420)
+            .setInterpolator(android.view.animation.OvershootInterpolator(0.8f))
             .start()
     }
 
@@ -1413,8 +1507,8 @@ class MainActivity : AppCompatActivity() {
             contentHost.animate()
                 .alpha(1f)
                 .translationY(0f)
-                .setDuration(240)
-                .setInterpolator(softInterpolator)
+                .setDuration(280)
+                .setInterpolator(entranceInterpolator)
                 .start()
         }
         tabViews.forEachIndexed { index, tab ->
@@ -1438,7 +1532,7 @@ class MainActivity : AppCompatActivity() {
                 .scaleX(1f)
                 .scaleY(1f)
                 .translationY(0f)
-                .setDuration(320)
+                .setDuration(380)
                 .setInterpolator(entranceInterpolator)
                 .start()
         }
@@ -2148,10 +2242,10 @@ class MainActivity : AppCompatActivity() {
         val wantsBold = style and Typeface.BOLD != 0
         val wantsItalic = style and Typeface.ITALIC != 0
         return when {
-            wantsBold && !wantsItalic -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            wantsBold && wantsItalic -> Typeface.create("sans-serif", Typeface.BOLD_ITALIC)
-            wantsItalic -> Typeface.create("sans-serif", Typeface.ITALIC)
-            else -> Typeface.create("sans-serif", Typeface.NORMAL)
+            wantsBold && wantsItalic -> readingBoldItalicTypeface
+            wantsBold -> readingBoldTypeface
+            wantsItalic -> readingItalicTypeface
+            else -> readingRegularTypeface
         }
     }
 
@@ -2162,10 +2256,11 @@ class MainActivity : AppCompatActivity() {
                 MotionEvent.ACTION_DOWN -> {
                     target.animate().cancel()
                     target.animate()
-                        .scaleX(0.975f)
-                        .scaleY(0.975f)
-                        .alpha(0.86f)
-                        .setDuration(80)
+                        .scaleX(0.962f)
+                        .scaleY(0.962f)
+                        .translationY(dp(1).toFloat())
+                        .alpha(0.9f)
+                        .setDuration(90)
                         .setInterpolator(softInterpolator)
                         .start()
                 }
@@ -2174,9 +2269,10 @@ class MainActivity : AppCompatActivity() {
                     target.animate()
                         .scaleX(1f)
                         .scaleY(1f)
+                        .translationY(0f)
                         .alpha(1f)
-                        .setDuration(180)
-                        .setInterpolator(entranceInterpolator)
+                        .setDuration(280)
+                        .setInterpolator(android.view.animation.OvershootInterpolator(1.4f))
                         .start()
                 }
             }
@@ -2242,7 +2338,8 @@ class MainActivity : AppCompatActivity() {
         var targetThinking: String = "",
         var visibleContent: String = "",
         var visibleThinking: String = "",
-        var finishWhenCaught: Boolean = false
+        var finishWhenCaught: Boolean = false,
+        var lastRevealAt: Long = 0L
     )
 
     private enum class StreamMode {
@@ -2254,7 +2351,8 @@ class MainActivity : AppCompatActivity() {
 
     private class StreamFormatState(
         @ColorInt private val quoteColor: Int,
-        @ColorInt private val starColor: Int
+        @ColorInt private val starColor: Int,
+        private val fadeMs: Long
     ) {
         private val rendered = SpannableStringBuilder()
         private val buffer = StringBuilder()
@@ -2262,9 +2360,14 @@ class MainActivity : AppCompatActivity() {
         private var stableEnd = 0
         private var mode = StreamMode.PLAIN
         private var opener = '\u0000'
+        private var previousDisplay = ""
 
         fun render(text: String): CharSequence {
-            if (!text.startsWith(raw)) reset()
+            var previous = previousDisplay
+            if (!text.startsWith(raw)) {
+                reset()
+                previous = ""
+            }
             if (rendered.length > stableEnd) {
                 rendered.delete(stableEnd, rendered.length)
             }
@@ -2272,6 +2375,14 @@ class MainActivity : AppCompatActivity() {
             raw = text
             stableEnd = rendered.length
             appendTail()
+            val now = android.os.SystemClock.uptimeMillis()
+            pruneFinishedFadeSpans(now)
+            val current = rendered.toString()
+            val fadeStart = commonPrefixLength(previous, current)
+            if (fadeStart < rendered.length && fadeMs > 0L) {
+                rendered.setSpan(FadeInSpan(now, fadeMs), fadeStart, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            previousDisplay = current
             return rendered
         }
 
@@ -2282,6 +2393,13 @@ class MainActivity : AppCompatActivity() {
             stableEnd = 0
             mode = StreamMode.PLAIN
             opener = '\u0000'
+            previousDisplay = ""
+        }
+
+        private fun pruneFinishedFadeSpans(now: Long) {
+            rendered.getSpans(0, rendered.length, FadeInSpan::class.java).forEach { span ->
+                if (span.isFinished(now)) rendered.removeSpan(span)
+            }
         }
 
         private fun feed(delta: String) {
@@ -2359,6 +2477,30 @@ class MainActivity : AppCompatActivity() {
         private fun isStar(ch: Char): Boolean {
             return ch == '*' || ch == '\uFF0A'
         }
+
+        private fun commonPrefixLength(first: String, second: String): Int {
+            val end = min(first.length, second.length)
+            var index = 0
+            while (index < end && first[index] == second[index]) index++
+            return index
+        }
+    }
+
+    private class FadeInSpan(
+        private val startedAt: Long,
+        private val durationMs: Long
+    ) : CharacterStyle() {
+        override fun updateDrawState(tp: TextPaint) {
+            val elapsed = android.os.SystemClock.uptimeMillis() - startedAt
+            val progress = (elapsed.toFloat() / durationMs.coerceAtLeast(1L)).coerceIn(0f, 1f)
+            val eased = 1f - (1f - progress) * (1f - progress)
+            val baseAlpha = Color.alpha(tp.color)
+            val floorAlpha = min(28, baseAlpha)
+            val alpha = (baseAlpha * eased).toInt().coerceIn(floorAlpha, baseAlpha)
+            tp.color = (tp.color and 0x00FFFFFF) or (alpha shl 24)
+        }
+
+        fun isFinished(now: Long): Boolean = now - startedAt >= durationMs
     }
 
     private data class PromptPresetEditor(
