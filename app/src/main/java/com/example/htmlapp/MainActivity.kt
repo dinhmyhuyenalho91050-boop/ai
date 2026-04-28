@@ -86,7 +86,10 @@ class MainActivity : AppCompatActivity() {
     private val messageRenderedContent = mutableMapOf<String, String>()
     private val messageRenderedThinking = mutableMapOf<String, String>()
     private val messageStreamFormatters = mutableMapOf<String, StreamFormatState>()
+    private val messageStreamLayoutContent = mutableMapOf<String, String>()
     private val streamBodyHeightAnimators = mutableMapOf<String, ValueAnimator>()
+    private val streamBodyHeightTargets = mutableMapOf<String, Int>()
+    private val streamBodyLayoutLengths = mutableMapOf<String, Int>()
     private val streamTargets = mutableMapOf<String, StreamRenderTarget>()
     private val messageThinkingExpanded = mutableSetOf<String>()
     private val stoppedAssistantIds = mutableSetOf<String>()
@@ -109,13 +112,15 @@ class MainActivity : AppCompatActivity() {
     private val streamLineFlushChars = 80
     private val streamThinkingFlushChars = 320
     private val streamMaxWaitMs = 380L
-    private val streamRevealFrameMs = 50L
-    private val streamRevealTouchFrameMs = 180L
-    private val streamContentCharsPerSecond = 40f
+    private val streamRevealFrameMs = 16L
+    private val streamRevealTouchFrameMs = 80L
+    private val streamContentCharsPerSecond = 46f
     private val streamThinkingCharsPerSecond = 260f
     private val streamMaxContentCharsPerFrame = 2
     private val streamMaxThinkingCharsPerFrame = 48
     private val streamFadeMs = 560L
+    private val streamParagraphHoldMs = 900L
+    private val streamParagraphSoftChars = 120
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
     private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
     private val streamHeightInterpolator by lazy { LinearInterpolator() }
@@ -210,7 +215,7 @@ class MainActivity : AppCompatActivity() {
         }
         messagesContainer.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, oldBottom ->
             if (followBottom && !userTouchingMessages && bottom != oldBottom) {
-                scrollToBottomSoon()
+                scrollToBottomNow()
             }
         }
     }
@@ -520,11 +525,26 @@ class MainActivity : AppCompatActivity() {
     private fun submitMessage() {
         if (isSending) return
         val text = inputMessage.text.toString().trim()
-        if (text.isEmpty()) return
-        animateSendAction()
         val session = state.ensureSession()
         val preset = state.currentPreset()
         session.modelName = preset?.name ?: session.modelName
+        val last = session.history.lastOrNull()
+        if (text.isEmpty()) {
+            when (last?.role) {
+                "user" -> {
+                    animateSendAction()
+                    followBottom = true
+                    requestAssistant()
+                }
+                "assistant" -> {
+                    animateSendAction()
+                    followBottom = true
+                    requestAssistant(continueMessage = last)
+                }
+            }
+            return
+        }
+        animateSendAction()
         session.history.add(ChatMessage(role = "user", content = text, modelName = preset?.name.orEmpty()))
         followBottom = true
         inputMessage.setText("")
@@ -534,11 +554,14 @@ class MainActivity : AppCompatActivity() {
         requestAssistant()
     }
 
-    private fun requestAssistant() {
+    private fun requestAssistant(continueMessage: ChatMessage? = null) {
         val session = state.activeSession() ?: return
         val preset = state.currentPreset()
-        val assistant = ChatMessage(role = "assistant", content = "", modelName = preset?.name.orEmpty())
-        session.history.add(assistant)
+        val assistant = continueMessage ?: ChatMessage(role = "assistant", content = "", modelName = preset?.name.orEmpty()).also {
+            session.history.add(it)
+        }
+        val continuationPrefill = continueMessage?.content.orEmpty()
+        assistant.modelName = preset?.name.orEmpty()
         followBottom = true
         activeAssistantId = assistant.id
         repository.save(state)
@@ -549,20 +572,22 @@ class MainActivity : AppCompatActivity() {
             var lastFrameAt = 0L
             var latestContent = ""
             var latestThinking = ""
-            var renderedContentLength = 0
-            var renderedThinkingLength = 0
+            var latestDisplayContent = continuationPrefill
+            var renderedContentLength = continuationPrefill.length
+            var renderedThinkingLength = assistant.thinking.length
             val uiUpdatePosted = AtomicBoolean(false)
             runCatching {
-                aiClient.send(state, session) { content, thinking ->
+                aiClient.send(state, session, continuationPrefill.takeIf { it.isNotBlank() }) { content, thinking ->
                     latestContent = content
                     latestThinking = thinking
+                    latestDisplayContent = mergeContinuationContent(continuationPrefill, content)
                     val now = android.os.SystemClock.uptimeMillis()
                     val frameMs = if (followBottom) streamFrameMs else streamDetachedFrameMs
-                    val contentDelta = (latestContent.length - renderedContentLength).coerceAtLeast(0)
+                    val contentDelta = (latestDisplayContent.length - renderedContentLength).coerceAtLeast(0)
                     val thinkingDelta = (latestThinking.length - renderedThinkingLength).coerceAtLeast(0)
-                    val contentStart = renderedContentLength.coerceIn(0, latestContent.length)
+                    val contentStart = renderedContentLength.coerceIn(0, latestDisplayContent.length)
                     val thinkingStart = renderedThinkingLength.coerceIn(0, latestThinking.length)
-                    val hasLineBreak = latestContent.indexOf('\n', contentStart) >= 0 ||
+                    val hasLineBreak = latestDisplayContent.indexOf('\n', contentStart) >= 0 ||
                         latestThinking.indexOf('\n', thinkingStart) >= 0
                     val hasLineChunk = contentDelta >= streamLineFlushChars ||
                         thinkingDelta >= streamThinkingFlushChars
@@ -573,11 +598,11 @@ class MainActivity : AppCompatActivity() {
                         lastFrameAt = now
                         mainHandler.post {
                             uiUpdatePosted.set(false)
-                            assistant.content = latestContent
+                            assistant.content = latestDisplayContent
                             assistant.thinking = latestThinking
                             renderedContentLength = assistant.content.length
                             renderedThinkingLength = assistant.thinking.length
-                            updateStreamTarget(assistant, latestContent, latestThinking)
+                            updateStreamTarget(assistant, latestDisplayContent, latestThinking)
                         }
                     }
                 }
@@ -585,7 +610,7 @@ class MainActivity : AppCompatActivity() {
                 mainHandler.post {
                     stoppedAssistantIds.remove(assistant.id)
                     if (activeAssistantId == assistant.id) activeAssistantId = null
-                    assistant.content = applyPromptRegex(result.content)
+                    assistant.content = applyPromptRegex(mergeContinuationContent(continuationPrefill, result.content))
                     assistant.thinking = result.thinking
                     repository.save(state)
                     setSendingUi(false)
@@ -601,9 +626,9 @@ class MainActivity : AppCompatActivity() {
                     val stopped = stoppedAssistantIds.remove(assistant.id)
                     if (activeAssistantId == assistant.id) activeAssistantId = null
                     if (stopped) {
-                        val partialContent = latestContent.ifBlank { assistant.content }
+                        val partialContent = latestDisplayContent.ifBlank { assistant.content }
                         val partialThinking = latestThinking.ifBlank { assistant.thinking }
-                        if (partialContent.isBlank() && partialThinking.isBlank()) {
+                        if (continueMessage == null && partialContent.isBlank() && partialThinking.isBlank()) {
                             session.history.removeAll { it.id == assistant.id }
                             repository.save(state)
                             setSendingUi(false)
@@ -617,8 +642,14 @@ class MainActivity : AppCompatActivity() {
                         }
                     } else {
                         streamTargets.remove(assistant.id)
-                        assistant.content = if (error.message.isNullOrBlank()) "请求失败" else "请求失败: ${error.message}"
-                        assistant.thinking = ""
+                        val failureText = if (error.message.isNullOrBlank()) "请求失败" else "请求失败: ${error.message}"
+                        if (continueMessage == null) {
+                            assistant.content = failureText
+                            assistant.thinking = ""
+                        } else {
+                            assistant.content = latestDisplayContent.ifBlank { continuationPrefill }
+                            toast(failureText)
+                        }
                         repository.save(state)
                         setSendingUi(false)
                         updateMessageViews(assistant, final = true)
@@ -627,6 +658,12 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }.start()
+    }
+
+    private fun mergeContinuationContent(prefix: String, generated: String): String {
+        if (prefix.isBlank()) return generated
+        if (generated.isBlank()) return prefix
+        return if (generated.startsWith(prefix)) generated else prefix + generated
     }
 
     private fun stopSending() {
@@ -781,6 +818,9 @@ class MainActivity : AppCompatActivity() {
     private fun renderMessages(scrollToBottom: Boolean = false) {
         streamBodyHeightAnimators.values.toList().forEach { it.cancel() }
         streamBodyHeightAnimators.clear()
+        streamBodyHeightTargets.clear()
+        streamBodyLayoutLengths.clear()
+        messageStreamLayoutContent.clear()
         messageBodyViews.clear()
         messageThinkingViews.clear()
         messageThinkingContainers.clear()
@@ -952,7 +992,9 @@ class MainActivity : AppCompatActivity() {
         val stick = !userTouchingMessages && (followBottom || isNearBottom())
         updateBodyText(message, streaming, final)
         updateThinkingPanel(message)
-        if (stick) scrollToBottomSoon()
+        if (stick) {
+            if (streaming) scrollToBottomNow() else scrollToBottomSoon()
+        }
     }
 
     private fun updateBodyText(message: ChatMessage, streaming: Boolean, final: Boolean) {
@@ -961,47 +1003,77 @@ class MainActivity : AppCompatActivity() {
         val previous = messageRenderedContent[message.id]
         if (streaming && !final) {
             if (previous == content) return
-            setStreamingBodyText(message.id, body, streamingFormatter(message.id).render(content))
+            val layoutContent = messageStreamLayoutContent[message.id]
+                ?.takeIf { it.startsWith(content) && it.length >= content.length }
+                ?: content
+            setStreamingBodyText(
+                message.id,
+                body,
+                streamingFormatter(message.id).render(content),
+                formatMessageText(layoutContent)
+            )
             messageRenderedContent[message.id] = content
             return
         }
         if (final || previous != content) {
             messageStreamFormatters.remove(message.id)
+            messageStreamLayoutContent.remove(message.id)
+            streamBodyLayoutLengths.remove(message.id)
             stopStreamingBodyHeightAnimation(message.id, body)
             body.text = formatMessageText(content)
             messageRenderedContent[message.id] = content
         }
     }
 
-    private fun setStreamingBodyText(messageId: String, body: TextView, text: CharSequence) {
+    private fun setStreamingBodyText(
+        messageId: String,
+        body: TextView,
+        text: CharSequence,
+        layoutText: CharSequence
+    ) {
         val oldHeight = body.height
         val oldWidth = body.width
-        streamBodyHeightAnimators.remove(messageId)?.cancel()
         body.setText(text, TextView.BufferType.SPANNABLE)
+        val layoutLength = layoutText.length
+        if (streamBodyLayoutLengths[messageId] == layoutLength) {
+            return
+        }
         if (oldHeight <= 0 || oldWidth <= 0) {
             ensureBodyWrapContent(body)
             return
         }
-        val targetHeight = measureTextHeight(body, oldWidth)
+        val targetHeight = measureTextHeight(body, oldWidth, layoutText)
+        streamBodyLayoutLengths[messageId] = layoutLength
+        val activeTarget = streamBodyHeightTargets[messageId]
+        val activeAnimator = streamBodyHeightAnimators[messageId]
+        if (activeTarget == targetHeight && activeAnimator?.isRunning == true) {
+            return
+        }
         if (targetHeight <= oldHeight + dp(1)) {
-            ensureBodyWrapContent(body)
+            if (activeAnimator == null) ensureBodyWrapContent(body)
             return
         }
         animateStreamingBodyHeight(messageId, body, oldHeight, targetHeight)
     }
 
-    private fun measureTextHeight(body: TextView, width: Int): Int {
+    private fun measureTextHeight(body: TextView, width: Int, text: CharSequence): Int {
+        val visibleText = body.text
+        body.setText(text, TextView.BufferType.SPANNABLE)
         val widthSpec = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY)
         val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         body.measure(widthSpec, heightSpec)
-        return body.measuredHeight
+        val measured = body.measuredHeight
+        body.setText(visibleText, TextView.BufferType.SPANNABLE)
+        return measured
     }
 
     private fun animateStreamingBodyHeight(messageId: String, body: TextView, fromHeight: Int, toHeight: Int) {
+        streamBodyHeightAnimators.remove(messageId)?.cancel()
+        streamBodyHeightTargets[messageId] = toHeight
         val params = body.layoutParams
         params.height = fromHeight
         body.layoutParams = params
-        val durationMs = ((toHeight - fromHeight) * 5L).coerceIn(260L, 620L)
+        val durationMs = ((toHeight - fromHeight) * 2L).coerceIn(90L, 190L)
         val animator = ValueAnimator.ofInt(fromHeight, toHeight).apply {
             duration = durationMs
             interpolator = streamHeightInterpolator
@@ -1009,14 +1081,15 @@ class MainActivity : AppCompatActivity() {
                 val nextParams = body.layoutParams
                 nextParams.height = valueAnimator.animatedValue as Int
                 body.layoutParams = nextParams
-                if (followBottom && !userTouchingMessages) scrollToBottomSoon()
+                if (followBottom && !userTouchingMessages) scrollToBottomNow()
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
                     if (streamBodyHeightAnimators[messageId] !== animation) return
                     streamBodyHeightAnimators.remove(messageId)
+                    streamBodyHeightTargets.remove(messageId)
                     ensureBodyWrapContent(body)
-                    if (followBottom && !userTouchingMessages) scrollToBottomSoon()
+                    if (followBottom && !userTouchingMessages) scrollToBottomNow()
                 }
             })
         }
@@ -1026,6 +1099,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopStreamingBodyHeightAnimation(messageId: String, body: TextView) {
         streamBodyHeightAnimators.remove(messageId)?.cancel()
+        streamBodyHeightTargets.remove(messageId)
+        streamBodyLayoutLengths.remove(messageId)
         ensureBodyWrapContent(body)
     }
 
@@ -1053,6 +1128,14 @@ class MainActivity : AppCompatActivity() {
         target.message = message
         target.targetContent = content
         target.targetThinking = thinking
+        target.lastTargetUpdateAt = android.os.SystemClock.uptimeMillis()
+        if (target.targetContent.startsWith(target.visibleContent)) {
+            target.contentReleaseEnd = max(target.contentReleaseEnd, target.visibleContent.length)
+                .coerceAtMost(target.targetContent.length)
+        }
+        if (target.targetContent.length > target.contentReleaseEnd && target.unreleasedContentSince == 0L) {
+            target.unreleasedContentSince = target.lastTargetUpdateAt
+        }
         target.finishWhenCaught = target.finishWhenCaught || finishWhenCaught
         scheduleStreamAnimator()
     }
@@ -1071,6 +1154,7 @@ class MainActivity : AppCompatActivity() {
         val now = android.os.SystemClock.uptimeMillis()
         var needsNextFrame = false
         streamTargets.values.toList().forEach { target ->
+            refreshContentReleaseEnd(target, now)
             val elapsedMs = revealElapsedMs(target, now)
             val contentBudget = revealBudget(
                 target.contentRevealCarry,
@@ -1086,13 +1170,16 @@ class MainActivity : AppCompatActivity() {
             )
             target.contentRevealCarry = contentBudget.carry
             target.thinkingRevealCarry = thinkingBudget.carry
-            val nextContent = advanceVisibleText(target.visibleContent, target.targetContent, contentBudget.chars)
+            val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
+            val playableContent = target.targetContent.substring(0, contentEnd)
+            val nextContent = advanceVisibleText(target.visibleContent, playableContent, contentBudget.chars)
             val nextThinking = advanceVisibleText(target.visibleThinking, target.targetThinking, thinkingBudget.chars)
             val changed = nextContent != target.visibleContent || nextThinking != target.visibleThinking
             target.visibleContent = nextContent
             target.visibleThinking = nextThinking
             if (changed) {
                 target.lastRevealAt = now
+                messageStreamLayoutContent[target.message.id] = playableContent.ifBlank { nextContent }
                 val display = target.message.copy(content = nextContent, thinking = nextThinking)
                 updateMessageViews(display, streaming = true)
             }
@@ -1105,7 +1192,7 @@ class MainActivity : AppCompatActivity() {
                     messageStreamFormatters.remove(target.message.id)
                     updateMessageViews(target.message, final = true)
                 }
-            } else if (!caughtUp) {
+            } else if (!caughtUp || target.targetContent.length > target.contentReleaseEnd) {
                 needsNextFrame = true
             }
             messageBodyViews[target.message.id]?.let { body ->
@@ -1116,6 +1203,61 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (needsNextFrame) scheduleStreamAnimator()
+    }
+
+    private fun refreshContentReleaseEnd(target: StreamRenderTarget, now: Long) {
+        val length = target.targetContent.length
+        target.contentReleaseEnd = target.contentReleaseEnd.coerceIn(0, length)
+        if (target.targetContent.startsWith(target.visibleContent)) {
+            target.contentReleaseEnd = max(target.contentReleaseEnd, target.visibleContent.length).coerceAtMost(length)
+        }
+        if (target.finishWhenCaught || !target.targetContent.startsWith(target.visibleContent)) {
+            target.contentReleaseEnd = length
+            target.unreleasedContentSince = 0L
+            return
+        }
+        if (length <= target.contentReleaseEnd) {
+            target.unreleasedContentSince = 0L
+            return
+        }
+        if (target.unreleasedContentSince == 0L) target.unreleasedContentSince = now
+        val before = target.contentReleaseEnd
+        val searchStart = max(target.visibleContent.length, target.contentReleaseEnd)
+        val paragraphEnd = paragraphBoundaryAfter(target.targetContent, searchStart)
+        target.contentReleaseEnd = when {
+            paragraphEnd > before -> paragraphEnd
+            length - before >= streamParagraphSoftChars -> softReleaseEnd(target.targetContent, before, length)
+            now - target.unreleasedContentSince >= streamParagraphHoldMs -> softReleaseEnd(target.targetContent, before, length)
+            else -> before
+        }.coerceIn(0, length)
+        if (target.contentReleaseEnd > before) {
+            target.contentRevealCarry = max(target.contentRevealCarry, 1f)
+            target.unreleasedContentSince = if (length > target.contentReleaseEnd) now else 0L
+        }
+    }
+
+    private fun paragraphBoundaryAfter(text: String, start: Int): Int {
+        for (i in start until text.length) {
+            if (text[i] == '\n') {
+                var end = i + 1
+                while (end < text.length && text[end] == '\n') end++
+                return end
+            }
+        }
+        return -1
+    }
+
+    private fun softReleaseEnd(text: String, start: Int, end: Int): Int {
+        var boundary = -1
+        val minEnd = min(end, start + 32)
+        for (i in start until end) {
+            if (i >= minEnd && isSentenceEnd(text[i])) boundary = i + 1
+        }
+        return if (boundary > start) boundary else end
+    }
+
+    private fun isSentenceEnd(ch: Char): Boolean {
+        return ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?'
     }
 
     private fun revealElapsedMs(target: StreamRenderTarget, now: Long): Long {
@@ -1309,6 +1451,24 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+        }
+    }
+
+    private fun scrollToBottomNow() {
+        if (userTouchingMessages) return
+        val child = messagesScroll.getChildAt(0) ?: return
+        val targetY = max(0, child.bottom - messagesScroll.height)
+        if (targetY == lastBottomTargetY && abs(messagesScroll.scrollY - targetY) <= dp(1)) {
+            followBottom = true
+            return
+        }
+        lastBottomTargetY = targetY
+        programmaticScroll = true
+        messagesScroll.scrollTo(0, targetY)
+        followBottom = true
+        ViewCompat.postOnAnimation(messagesScroll) {
+            programmaticScroll = false
+            followBottom = true
         }
     }
 
@@ -2429,7 +2589,10 @@ class MainActivity : AppCompatActivity() {
         var visibleThinking: String = "",
         var finishWhenCaught: Boolean = false,
         var lastRevealAt: Long = 0L,
+        var lastTargetUpdateAt: Long = 0L,
         var lastTickAt: Long = 0L,
+        var contentReleaseEnd: Int = 0,
+        var unreleasedContentSince: Long = 0L,
         var contentRevealCarry: Float = 0f,
         var thinkingRevealCarry: Float = 0f
     )

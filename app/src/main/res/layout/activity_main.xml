@@ -44,6 +44,7 @@
                     android:layout_width="61dp"
                     android:layout_height="30dp"
                     android:layout_marginStart="10dp"
+                    android:visibility="gone"
                     android:gravity="center"
                     android:includeFontPadding="false"
                     android:text="@string/app_version"

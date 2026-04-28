@@ -518,15 +518,19 @@ class NativeAiClient {
     fun send(
         state: NativeChatState,
         session: ChatSession,
+        continuationPrefill: String? = null,
         onDelta: (content: String, thinking: String) -> Unit
     ): NativeAiResult {
         val preset = state.currentPreset() ?: throw IllegalStateException("无可用模型预设")
         val prompt = state.promptFor(session)
         val runner = runCatching { JSONObject(prompt.multiStepRunnerJson) }.getOrNull()
-        if (runner?.optBoolean("enabled") == true && (runner.optJSONArray("steps")?.length() ?: 0) > 0) {
+        if (continuationPrefill == null &&
+            runner?.optBoolean("enabled") == true &&
+            (runner.optJSONArray("steps")?.length() ?: 0) > 0
+        ) {
             return runMultiStep(state, session, prompt, preset, runner, onDelta)
         }
-        return sendWithMessages(buildMessages(session, prompt, preset), preset, onDelta)
+        return sendWithMessages(buildMessages(session, prompt, preset, continuationPrefill), preset, onDelta)
     }
 
     private fun sendWithMessages(
@@ -544,7 +548,8 @@ class NativeAiClient {
     private fun buildMessages(
         session: ChatSession,
         prompt: PromptPreset,
-        preset: ModelPreset
+        preset: ModelPreset,
+        continuationPrefill: String? = null
     ): List<JSONObject> {
         val messages = mutableListOf<JSONObject>()
         if (prompt.sysPrompt.isNotBlank()) {
@@ -558,6 +563,9 @@ class NativeAiClient {
                 if (message.role == "assistant" && message.content.isBlank() && index == session.history.lastIndex) {
                     return@forEachIndexed
                 }
+                if (continuationPrefill != null && message.role == "assistant" && index == session.history.lastIndex) {
+                    return@forEachIndexed
+                }
                 val lastUser = message.role == "user" && index == session.history.lastIndex
                 val content = if (lastUser && prompt.messagePrefix.isNotBlank()) {
                     prompt.messagePrefix + message.content
@@ -567,10 +575,12 @@ class NativeAiClient {
                 messages.add(JSONObject().put("role", message.role).put("content", content))
             }
         }
-        if (prompt.assistantPrefill.isNotBlank()) {
-            val prefill = JSONObject().put("role", "assistant").put("content", prompt.assistantPrefill)
-            if (preset.type == "deepseek") prefill.put("prefix", true)
-            if (preset.type == "kimi") prefill.put("partial", true)
+        val prefillContent = continuationPrefill ?: prompt.assistantPrefill
+        if (prefillContent.isNotBlank()) {
+            val prefill = JSONObject().put("role", "assistant").put("content", prefillContent)
+            val type = preset.type.lowercase(Locale.ROOT)
+            if (type == "deepseek") prefill.put("prefix", true)
+            if (type == "kimi") prefill.put("partial", true)
             messages.add(prefill)
         }
         return messages
