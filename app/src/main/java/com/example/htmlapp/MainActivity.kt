@@ -118,15 +118,12 @@ class MainActivity : AppCompatActivity() {
     private val streamLineFlushChars = 64
     private val streamThinkingFlushChars = 320
     private val streamMaxWaitMs = 180L
-    private val streamRevealFrameMs = 16L
+    private val streamRevealFrameMs = 24L
     private val streamRevealTouchFrameMs = 80L
-    private val streamUiCommitFrameMs = 16L
-    private val streamContentCharsPerSecond = 72f
-    private val streamThinkingCharsPerSecond = 600f
-    private val streamMaxContentCharsPerFrame = 2
+    private val streamUiCommitFrameMs = 24L
+    private val streamContentCharsPerTick = 1
+    private val streamThinkingCharsPerSecond = 300f
     private val streamMaxThinkingCharsPerFrame = 96
-    private val streamParagraphHoldMs = 900L
-    private val streamParagraphSoftChars = 120
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
     private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
     private val streamHeightInterpolator by lazy { PathInterpolator(0.2f, 0f, 0.2f, 1f) }
@@ -1023,7 +1020,8 @@ class MainActivity : AppCompatActivity() {
                 body,
                 renderResult.text,
                 visibleLength = content.length,
-                hasNewLine = hasNewLine
+                hasNewLine = hasNewLine,
+                changedStart = renderResult.changedStart
             )
             messageRenderedContent[message.id] = content
             return
@@ -1043,7 +1041,8 @@ class MainActivity : AppCompatActivity() {
         body: TextView,
         text: CharSequence,
         visibleLength: Int,
-        hasNewLine: Boolean
+        hasNewLine: Boolean,
+        changedStart: Int
     ) {
         val oldHeight = currentBodyHeight(body)
         val oldWidth = body.width
@@ -1055,12 +1054,7 @@ class MainActivity : AppCompatActivity() {
             ensureBodyWrapContent(body)
             return
         }
-        if (!shouldMeasureStreamingHeight(messageId, body, oldWidth, visibleLength, hasNewLine)) {
-            return
-        }
-        val targetHeight = measureCurrentTextHeight(body, oldWidth)
-        rememberStreamingMeasure(messageId, body, oldWidth, visibleLength, targetHeight)
-        val layoutLength = visibleLength
+        val targetHeight = estimateStreamingTextHeight(messageId, body, oldWidth, text, changedStart, hasNewLine)
         val activeTarget = streamBodyHeightTargets[messageId]
         val activeAnimation = streamBodyHeightAnimationTokens[messageId]
         if (activeTarget == targetHeight && activeAnimation != null) {
@@ -1068,7 +1062,7 @@ class MainActivity : AppCompatActivity() {
         }
         val fromHeight = currentBodyHeight(body)
         if (targetHeight > fromHeight + dp(1) && targetHeight > (activeTarget ?: 0) + dp(1)) {
-            streamBodyLayoutLengths[messageId] = layoutLength
+            streamBodyLayoutLengths[messageId] = text.length
             animateStreamingBodyHeight(messageId, body, fromHeight, targetHeight)
             return
         }
@@ -1082,34 +1076,73 @@ class MainActivity : AppCompatActivity() {
         return if (pinned > 0) pinned else body.height
     }
 
-    private fun shouldMeasureStreamingHeight(
+    private fun estimateStreamingTextHeight(
         messageId: String,
         body: TextView,
         width: Int,
-        visibleLength: Int,
+        text: CharSequence,
+        changedStart: Int,
         hasNewLine: Boolean
-    ): Boolean {
-        val state = streamBodyMeasureStates[messageId] ?: return true
-        if (state.width != width || visibleLength < state.measuredLength) return true
-        if (state.measuredHeight <= 0 || hasNewLine) return true
-        if (streamBodyHeightTargets[messageId] != null && visibleLength >= (streamBodyLayoutLengths[messageId] ?: Int.MAX_VALUE)) {
-            return true
+    ): Int {
+        val state = streamBodyMeasureStates.getOrPut(messageId) { StreamBodyMeasureState() }
+        val reset = state.width != width ||
+            text.length < state.textLength ||
+            changedStart < state.textLength ||
+            state.lineHeight <= 0 ||
+            hasNewLine
+        val start = if (reset) {
+            resetStreamingLineEstimate(state, body, width)
+            0
+        } else {
+            state.textLength
         }
-        return visibleLength >= state.nextCheckLength
+        for (index in start until text.length) {
+            addEstimatedChar(state, text[index])
+        }
+        state.textLength = text.length
+        state.targetHeight = state.baseHeight + state.estimatedLines * state.lineHeight
+        return state.targetHeight
     }
 
-    private fun rememberStreamingMeasure(
-        messageId: String,
-        body: TextView,
-        width: Int,
-        visibleLength: Int,
-        height: Int
-    ) {
-        val state = streamBodyMeasureStates.getOrPut(messageId) { StreamBodyMeasureState() }
+    private fun resetStreamingLineEstimate(state: StreamBodyMeasureState, body: TextView, width: Int) {
+        val contentWidth = (width - body.paddingLeft - body.paddingRight).coerceAtLeast(dp(80))
+        val averageCharWidth = body.paint.measureText("中").coerceAtLeast(1f)
         state.width = width
-        state.measuredLength = visibleLength
-        state.measuredHeight = height
-        state.nextCheckLength = visibleLength + streamingHeightCheckStep(body, width)
+        state.textLength = 0
+        state.estimatedLines = 1
+        state.lineUnits = 0f
+        state.unitsPerLine = (contentWidth / averageCharWidth).coerceAtLeast(4f)
+        state.lineHeight = body.lineHeight.coerceAtLeast(1)
+        state.baseHeight = body.paddingTop + body.paddingBottom + dp(3)
+        state.targetHeight = state.baseHeight + state.lineHeight
+    }
+
+    private fun addEstimatedChar(state: StreamBodyMeasureState, ch: Char) {
+        if (ch == '\r') return
+        if (ch == '\n') {
+            state.estimatedLines += 1
+            state.lineUnits = 0f
+            return
+        }
+        val units = estimatedCharUnits(ch)
+        if (state.lineUnits > 0f && state.lineUnits + units > state.unitsPerLine) {
+            state.estimatedLines += 1
+            state.lineUnits = units
+        } else {
+            state.lineUnits += units
+        }
+    }
+
+    private fun estimatedCharUnits(ch: Char): Float {
+        if (Character.isLowSurrogate(ch)) return 0f
+        if (Character.isHighSurrogate(ch)) return 1.1f
+        return when {
+            ch.code <= 0x7F && ch.isWhitespace() -> 0.35f
+            ch.code <= 0x7F && ch.isLetterOrDigit() -> 0.68f
+            ch.code <= 0x7F -> 0.5f
+            ch in '\uFF61'..'\uFF9F' -> 0.65f
+            else -> 1f
+        }
     }
 
     private fun streamingHeightCheckStep(body: TextView, width: Int): Int {
@@ -1289,25 +1322,19 @@ class MainActivity : AppCompatActivity() {
         val iterator = streamTargets.entries.iterator()
         while (iterator.hasNext()) {
             val target = iterator.next().value
-            refreshContentReleaseEnd(target, now)
+            refreshContentReleaseEnd(target)
             val elapsedMs = revealElapsedMs(target, now)
-            val contentBudget = revealBudget(
-                target.contentRevealCarry,
-                streamContentCharsPerSecond,
-                elapsedMs,
-                streamMaxContentCharsPerFrame
-            )
             val thinkingBudget = revealBudget(
                 target.thinkingRevealCarry,
                 streamThinkingCharsPerSecond,
                 elapsedMs,
                 streamMaxThinkingCharsPerFrame
             )
-            target.contentRevealCarry = contentBudget.carry
             target.thinkingRevealCarry = thinkingBudget.carry
             val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
             val nextContentLength = if (target.contentPrefixValid) {
-                advanceVisibleLength(target.visibleContentLength, contentEnd, contentBudget.chars)
+                val step = if (target.visibleContentLength < contentEnd) streamContentCharsPerTick else 0
+                advanceVisibleLength(target.visibleContentLength, contentEnd, step)
             } else {
                 contentEnd
             }
@@ -1349,35 +1376,10 @@ class MainActivity : AppCompatActivity() {
         if (needsNextFrame) scheduleStreamAnimator()
     }
 
-    private fun refreshContentReleaseEnd(target: StreamRenderTarget, now: Long) {
+    private fun refreshContentReleaseEnd(target: StreamRenderTarget) {
         val length = target.targetContent.length
-        target.contentReleaseEnd = target.contentReleaseEnd.coerceIn(0, length)
-        if (target.contentPrefixValid) {
-            target.contentReleaseEnd = max(target.contentReleaseEnd, target.visibleContentLength).coerceAtMost(length)
-        }
-        if (target.finishWhenCaught || !target.contentPrefixValid) {
-            target.contentReleaseEnd = length
-            target.unreleasedContentSince = 0L
-            return
-        }
-        if (length <= target.contentReleaseEnd) {
-            target.unreleasedContentSince = 0L
-            return
-        }
-        if (target.unreleasedContentSince == 0L) target.unreleasedContentSince = now
-        val before = target.contentReleaseEnd
-        val searchStart = max(target.visibleContentLength, target.contentReleaseEnd)
-        val paragraphEnd = cachedParagraphBoundaryAfter(target, searchStart)
-        target.contentReleaseEnd = when {
-            paragraphEnd > before -> paragraphEnd
-            length - before >= streamParagraphSoftChars -> softReleaseEnd(target.targetContent, before, length)
-            now - target.unreleasedContentSince >= streamParagraphHoldMs -> softReleaseEnd(target.targetContent, before, length)
-            else -> before
-        }.coerceIn(0, length)
-        if (target.contentReleaseEnd > before) {
-            target.contentRevealCarry = max(target.contentRevealCarry, 1f)
-            target.unreleasedContentSince = if (length > target.contentReleaseEnd) now else 0L
-        }
+        target.contentReleaseEnd = length
+        target.unreleasedContentSince = 0L
     }
 
     private fun cachedParagraphBoundaryAfter(target: StreamRenderTarget, start: Int): Int {
@@ -2809,9 +2811,13 @@ class MainActivity : AppCompatActivity() {
 
     private data class StreamBodyMeasureState(
         var width: Int = 0,
-        var measuredLength: Int = 0,
-        var measuredHeight: Int = 0,
-        var nextCheckLength: Int = 0
+        var textLength: Int = 0,
+        var estimatedLines: Int = 1,
+        var lineUnits: Float = 0f,
+        var unitsPerLine: Float = 1f,
+        var lineHeight: Int = 0,
+        var baseHeight: Int = 0,
+        var targetHeight: Int = 0
     )
 
     private enum class StreamMode {
