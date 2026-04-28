@@ -48,6 +48,7 @@ import androidx.core.view.doOnLayout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -84,12 +85,17 @@ class MainActivity : AppCompatActivity() {
     private var pendingImportReplace = false
     private var followBottom = true
     private var bottomScrollScheduled = false
+    private var scrollTrackScheduled = false
     private var programmaticScroll = false
     private var lastBottomTargetY = -1
     private var settingsCompact = false
 
     private var renderMessageLimit = 80
-    private val streamFrameMs = 64L
+    private val streamFrameMs = 48L
+    private val streamDetachedFrameMs = 160L
+    private val streamLineFlushChars = 28
+    private val streamThinkingFlushChars = 80
+    private val streamMaxWaitMs = 140L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -102,6 +108,7 @@ class MainActivity : AppCompatActivity() {
         state = repository.load()
         registerImportLauncher()
         bindViews()
+        applySystemFontTree(root)
         setupEdgeToEdge()
         setupTitleGradient()
         setupClicks()
@@ -143,8 +150,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupScrollTracking() {
         messagesScroll.setOnScrollChangeListener { _, _, _, _, _ ->
-            if (!programmaticScroll) {
-                followBottom = isNearBottom()
+            if (!programmaticScroll && !scrollTrackScheduled) {
+                scrollTrackScheduled = true
+                ViewCompat.postOnAnimation(messagesScroll) {
+                    scrollTrackScheduled = false
+                    if (!programmaticScroll) {
+                        followBottom = isNearBottom()
+                    }
+                }
             }
         }
     }
@@ -475,16 +488,34 @@ class MainActivity : AppCompatActivity() {
             var lastFrameAt = 0L
             var latestContent = ""
             var latestThinking = ""
+            var renderedContentLength = 0
+            var renderedThinkingLength = 0
+            val uiUpdatePosted = AtomicBoolean(false)
             runCatching {
                 aiClient.send(state, session) { content, thinking ->
                     latestContent = content
                     latestThinking = thinking
                     val now = android.os.SystemClock.uptimeMillis()
-                    if (now - lastFrameAt >= streamFrameMs) {
+                    val frameMs = if (followBottom) streamFrameMs else streamDetachedFrameMs
+                    val contentDelta = (latestContent.length - renderedContentLength).coerceAtLeast(0)
+                    val thinkingDelta = (latestThinking.length - renderedThinkingLength).coerceAtLeast(0)
+                    val contentStart = renderedContentLength.coerceIn(0, latestContent.length)
+                    val thinkingStart = renderedThinkingLength.coerceIn(0, latestThinking.length)
+                    val hasLineBreak = latestContent.indexOf('\n', contentStart) >= 0 ||
+                        latestThinking.indexOf('\n', thinkingStart) >= 0
+                    val hasLineChunk = contentDelta >= streamLineFlushChars ||
+                        thinkingDelta >= streamThinkingFlushChars
+                    val waitedLongEnough = now - lastFrameAt >= max(frameMs, streamMaxWaitMs)
+                    if ((hasLineBreak || hasLineChunk || waitedLongEnough) &&
+                        uiUpdatePosted.compareAndSet(false, true)
+                    ) {
                         lastFrameAt = now
                         mainHandler.post {
+                            uiUpdatePosted.set(false)
                             assistant.content = latestContent
                             assistant.thinking = latestThinking
+                            renderedContentLength = assistant.content.length
+                            renderedThinkingLength = assistant.thinking.length
                             updateMessageViews(assistant, streaming = true)
                         }
                     }
@@ -601,7 +632,7 @@ class MainActivity : AppCompatActivity() {
                 text = preset.name.ifBlank { key }
                 setTextColor(Color.WHITE)
                 textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
             })
             addView(TextView(context).apply {
@@ -721,9 +752,14 @@ class MainActivity : AppCompatActivity() {
 
         val body = TextView(this).apply {
             val content = displayContent(message)
-            text = if (isLiveAssistant(message)) streamingFormatter(message.id).render(content) else formatMessageText(content)
+            if (isLiveAssistant(message)) {
+                setText(streamingFormatter(message.id).render(content), TextView.BufferType.SPANNABLE)
+            } else {
+                text = formatMessageText(content)
+            }
             setTextColor(Color.WHITE)
             textSize = 16f
+            typeface = systemTypeface()
             setLineSpacing(dp(2).toFloat(), 1f)
             setPadding(dp(16), dp(18), dp(16), dp(18))
             messageRenderedContent[message.id] = content
@@ -754,7 +790,7 @@ class MainActivity : AppCompatActivity() {
             text = thinkingSummaryText(message.thinking, expanded)
             setTextColor(color(R.color.chat_accent_blue))
             textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
+            typeface = systemTypeface(Typeface.BOLD)
             includeFontPadding = false
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -767,6 +803,7 @@ class MainActivity : AppCompatActivity() {
             visibility = if (expanded) View.VISIBLE else View.GONE
             setTextColor(color(R.color.chat_muted))
             textSize = 13f
+            typeface = systemTypeface()
             setLineSpacing(dp(2).toFloat(), 1f)
             setPadding(0, dp(10), 0, 0)
         }
@@ -816,7 +853,7 @@ class MainActivity : AppCompatActivity() {
         val previous = messageRenderedContent[message.id]
         if (streaming && !final) {
             if (previous == content) return
-            body.text = streamingFormatter(message.id).render(content)
+            body.setText(streamingFormatter(message.id).render(content), TextView.BufferType.SPANNABLE)
             messageRenderedContent[message.id] = content
             return
         }
@@ -842,6 +879,7 @@ class MainActivity : AppCompatActivity() {
         val content = messageThinkingViews[message.id] ?: return
         val thinking = message.thinking
         val expanded = message.id in messageThinkingExpanded
+        if (messageRenderedThinking[message.id] == thinking) return
         messageRenderedThinking[message.id] = thinking
         panel.visibility = if (thinking.isBlank()) View.GONE else View.VISIBLE
         summary.text = thinkingSummaryText(thinking, expanded)
@@ -1017,14 +1055,14 @@ class MainActivity : AppCompatActivity() {
                 text = roleLabel
                 setTextColor(Color.WHITE)
                 textSize = 12f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
             })
             addView(TextView(context).apply {
                 text = modelLabel.uppercase(Locale.ROOT)
                 setTextColor(color(R.color.chat_accent_blue))
                 textSize = 10f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
                 gravity = Gravity.CENTER
                 background = rounded(Color.argb(48, 96, 165, 250), dp(999), dp(1), color(R.color.chat_accent_blue))
@@ -1039,7 +1077,7 @@ class MainActivity : AppCompatActivity() {
                 text = "#$index"
                 setTextColor(color(R.color.chat_muted))
                 textSize = 11f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
                 gravity = Gravity.CENTER
                 background = rounded(color(R.color.chat_panel), dp(999), dp(1), color(R.color.chat_border))
@@ -1137,7 +1175,7 @@ class MainActivity : AppCompatActivity() {
                 text = session.name
                 setTextColor(Color.WHITE)
                 textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
             })
             addView(TextView(context).apply {
@@ -1204,7 +1242,7 @@ class MainActivity : AppCompatActivity() {
                 gravity = if (settingsCompact) Gravity.CENTER else Gravity.CENTER_VERTICAL
                 setTextColor(if (index == 0) color(R.color.chat_accent_blue) else color(R.color.chat_muted))
                 textSize = 13f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
                 setPadding(dp(16), 0, dp(10), 0)
                 background = if (index == 0) solid(Color.argb(38, 96, 165, 250)) else null
@@ -1449,7 +1487,7 @@ class MainActivity : AppCompatActivity() {
                 text = preset.name.ifBlank { key }
                 setTextColor(if (selected) color(R.color.chat_accent_blue) else Color.WHITE)
                 textSize = 13f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
             })
             addView(TextView(context).apply {
@@ -1519,7 +1557,7 @@ class MainActivity : AppCompatActivity() {
             text = textValue
             setTextColor(color(R.color.chat_muted))
             textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
+            typeface = systemTypeface(Typeface.BOLD)
             includeFontPadding = false
             setPadding(0, dp(12), 0, dp(10))
         }
@@ -1679,7 +1717,7 @@ class MainActivity : AppCompatActivity() {
             text = label
             setTextColor(Color.WHITE)
             textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
+            typeface = systemTypeface(Typeface.BOLD)
             includeFontPadding = false
             gravity = Gravity.CENTER
             background = rounded(
@@ -1701,7 +1739,7 @@ class MainActivity : AppCompatActivity() {
             text = title
             setTextColor(Color.WHITE)
             textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
+            typeface = systemTypeface(Typeface.BOLD)
             includeFontPadding = false
             setPadding(0, 0, 0, dp(18))
         }
@@ -1712,7 +1750,7 @@ class MainActivity : AppCompatActivity() {
             text = label
             setTextColor(Color.WHITE)
             textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
+            typeface = systemTypeface(Typeface.BOLD)
             includeFontPadding = false
             gravity = Gravity.CENTER
             background = rounded(color(R.color.chat_panel), dp(8), dp(1), color(R.color.chat_border))
@@ -1753,7 +1791,7 @@ class MainActivity : AppCompatActivity() {
                 text = label
                 setTextColor(color(R.color.chat_muted))
                 textSize = 13f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
                 layoutParams = if (settingsCompact) {
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -1810,7 +1848,7 @@ class MainActivity : AppCompatActivity() {
                 text = label
                 setTextColor(color(R.color.chat_muted))
                 textSize = 13f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
                 layoutParams = if (settingsCompact) {
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -1973,6 +2011,28 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun applySystemFontTree(view: View) {
+        if (view is TextView) {
+            view.typeface = systemTypeface(view.typeface?.style ?: Typeface.NORMAL)
+        }
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                applySystemFontTree(view.getChildAt(i))
+            }
+        }
+    }
+
+    private fun systemTypeface(style: Int = Typeface.NORMAL): Typeface {
+        val wantsBold = style and Typeface.BOLD != 0
+        val wantsItalic = style and Typeface.ITALIC != 0
+        return when {
+            wantsBold && !wantsItalic -> Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            wantsBold && wantsItalic -> Typeface.create("sans-serif", Typeface.BOLD_ITALIC)
+            wantsItalic -> Typeface.create("sans-serif", Typeface.ITALIC)
+            else -> Typeface.create("sans-serif", Typeface.NORMAL)
+        }
+    }
+
     private fun separator(height: Int = dp(1)): View {
         return View(this).apply {
             setBackgroundColor(Color.argb(16, 255, 255, 255))
@@ -2036,23 +2096,30 @@ class MainActivity : AppCompatActivity() {
         @ColorInt private val quoteColor: Int,
         @ColorInt private val starColor: Int
     ) {
-        private val prefix = SpannableStringBuilder()
+        private val rendered = SpannableStringBuilder()
         private val buffer = StringBuilder()
         private var raw = ""
+        private var stableEnd = 0
         private var mode = StreamMode.PLAIN
         private var opener = '\u0000'
 
         fun render(text: String): CharSequence {
             if (!text.startsWith(raw)) reset()
+            if (rendered.length > stableEnd) {
+                rendered.delete(stableEnd, rendered.length)
+            }
             feed(text.substring(raw.length))
             raw = text
-            return SpannableStringBuilder(prefix).append(tail())
+            stableEnd = rendered.length
+            appendTail()
+            return rendered
         }
 
         private fun reset() {
-            prefix.clear()
+            rendered.clear()
             buffer.clear()
             raw = ""
+            stableEnd = 0
             mode = StreamMode.PLAIN
             opener = '\u0000'
         }
@@ -2079,12 +2146,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         private fun closeQuote(closer: Char) {
-            val start = prefix.length
-            prefix.append(opener)
-            prefix.append(buffer)
-            prefix.append(closer)
-            prefix.setSpan(ForegroundColorSpan(quoteColor), start, prefix.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            prefix.setSpan(StyleSpan(Typeface.ITALIC), start, prefix.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            val start = rendered.length
+            rendered.append(opener)
+            rendered.append(buffer)
+            rendered.append(closer)
+            rendered.setSpan(ForegroundColorSpan(quoteColor), start, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            rendered.setSpan(StyleSpan(Typeface.ITALIC), start, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             buffer.clear()
             mode = StreamMode.PLAIN
             opener = '\u0000'
@@ -2096,10 +2163,10 @@ class MainActivity : AppCompatActivity() {
                 opener = '\u0000'
                 return
             }
-            val start = prefix.length
-            prefix.append(buffer)
-            prefix.setSpan(ForegroundColorSpan(starColor), start, prefix.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            prefix.setSpan(StyleSpan(Typeface.BOLD_ITALIC), start, prefix.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            val start = rendered.length
+            rendered.append(buffer)
+            rendered.setSpan(ForegroundColorSpan(starColor), start, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            rendered.setSpan(StyleSpan(Typeface.BOLD_ITALIC), start, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             buffer.clear()
             mode = StreamMode.PLAIN
             opener = '\u0000'
@@ -2107,16 +2174,14 @@ class MainActivity : AppCompatActivity() {
 
         private fun commitPlain() {
             if (buffer.isNotEmpty()) {
-                prefix.append(buffer)
+                rendered.append(buffer)
                 buffer.clear()
             }
         }
 
-        private fun tail(): CharSequence {
-            val out = SpannableStringBuilder()
-            if (mode != StreamMode.PLAIN && opener != '\u0000') out.append(opener)
-            out.append(buffer)
-            return out
+        private fun appendTail() {
+            if (mode != StreamMode.PLAIN && opener != '\u0000') rendered.append(opener)
+            rendered.append(buffer)
         }
 
         private fun isDoubleQuote(ch: Char): Boolean {
