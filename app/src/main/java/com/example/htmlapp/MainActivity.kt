@@ -85,7 +85,6 @@ class MainActivity : AppCompatActivity() {
     private val messageRenderedContent = mutableMapOf<String, String>()
     private val messageRenderedThinking = mutableMapOf<String, String>()
     private val messageStreamFormatters = mutableMapOf<String, StreamFormatState>()
-    private val messageStreamLayoutContent = mutableMapOf<String, String>()
     private val streamBodyHeightAnimators = mutableMapOf<String, ValueAnimator>()
     private val streamBodyHeightTargets = mutableMapOf<String, Int>()
     private val streamBodyLayoutLengths = mutableMapOf<String, Int>()
@@ -819,7 +818,6 @@ class MainActivity : AppCompatActivity() {
         streamBodyHeightAnimators.clear()
         streamBodyHeightTargets.clear()
         streamBodyLayoutLengths.clear()
-        messageStreamLayoutContent.clear()
         messageBodyViews.clear()
         messageThinkingViews.clear()
         messageThinkingContainers.clear()
@@ -1002,23 +1000,17 @@ class MainActivity : AppCompatActivity() {
         val previous = messageRenderedContent[message.id]
         if (streaming && !final) {
             if (previous == content) return
-            val layoutContent = messageStreamLayoutContent[message.id]
-                ?.takeIf { it.startsWith(content) && it.length >= content.length }
-                ?: content
             setStreamingBodyText(
                 message.id,
                 body,
                 streamingFormatter(message.id).render(content),
-                formatMessageText(layoutContent),
-                visibleLength = content.length,
-                layoutLength = layoutContent.length
+                visibleLength = content.length
             )
             messageRenderedContent[message.id] = content
             return
         }
         if (final || previous != content) {
             messageStreamFormatters.remove(message.id)
-            messageStreamLayoutContent.remove(message.id)
             streamBodyLayoutLengths.remove(message.id)
             stopStreamingBodyHeightAnimation(message.id, body)
             body.text = formatMessageText(content)
@@ -1030,35 +1022,30 @@ class MainActivity : AppCompatActivity() {
         messageId: String,
         body: TextView,
         text: CharSequence,
-        layoutText: CharSequence,
-        visibleLength: Int,
-        layoutLength: Int
+        visibleLength: Int
     ) {
         val oldHeight = body.height
         val oldWidth = body.width
         body.setText(text, TextView.BufferType.SPANNABLE)
-        if (streamBodyLayoutLengths[messageId] == layoutLength) {
-            if (visibleLength >= layoutLength) {
-                releasePinnedBodyHeight(messageId, body, visibleLength)
-            }
-            return
-        }
         if (oldHeight <= 0 || oldWidth <= 0) {
             ensureBodyWrapContent(body)
             return
         }
-        val targetHeight = measureTextHeight(body, oldWidth, layoutText)
-        streamBodyLayoutLengths[messageId] = layoutLength
+        val targetHeight = measureTextHeight(body, oldWidth, text)
+        val layoutLength = visibleLength
         val activeTarget = streamBodyHeightTargets[messageId]
         val activeAnimator = streamBodyHeightAnimators[messageId]
         if (activeTarget == targetHeight && activeAnimator?.isRunning == true) {
             return
         }
-        if (targetHeight <= oldHeight + dp(1)) {
-            if (activeAnimator == null) ensureBodyWrapContent(body)
+        if (targetHeight > oldHeight + dp(1) && targetHeight > (activeTarget ?: 0) + dp(1)) {
+            streamBodyLayoutLengths[messageId] = layoutLength
+            animateStreamingBodyHeight(messageId, body, oldHeight, targetHeight)
             return
         }
-        animateStreamingBodyHeight(messageId, body, oldHeight, targetHeight)
+        if (!releasePinnedBodyHeight(messageId, body, visibleLength) && activeTarget == null && activeAnimator == null) {
+            ensureBodyWrapContent(body)
+        }
     }
 
     private fun measureTextHeight(body: TextView, width: Int, text: CharSequence): Int {
@@ -1204,7 +1191,6 @@ class MainActivity : AppCompatActivity() {
             target.visibleThinking = nextThinking
             if (changed) {
                 target.lastRevealAt = now
-                messageStreamLayoutContent[target.message.id] = playableContent.ifBlank { nextContent }
                 val display = target.message.copy(content = nextContent, thinking = nextThinking)
                 updateMessageViews(display, streaming = true)
             }
