@@ -28,7 +28,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.inputmethod.EditorInfo
-import android.view.animation.LinearInterpolator
 import android.view.animation.PathInterpolator
 import android.webkit.JavascriptInterface
 import android.webkit.WebSettings
@@ -123,7 +122,7 @@ class MainActivity : AppCompatActivity() {
     private val streamParagraphSoftChars = 120
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
     private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
-    private val streamHeightInterpolator by lazy { LinearInterpolator() }
+    private val streamHeightInterpolator by lazy { PathInterpolator(0.2f, 0f, 0.2f, 1f) }
     private val readingRegularTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.NORMAL) }
     private val readingBoldTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.BOLD) }
     private val readingItalicTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.ITALIC) }
@@ -1010,7 +1009,9 @@ class MainActivity : AppCompatActivity() {
                 message.id,
                 body,
                 streamingFormatter(message.id).render(content),
-                formatMessageText(layoutContent)
+                formatMessageText(layoutContent),
+                visibleLength = content.length,
+                layoutLength = layoutContent.length
             )
             messageRenderedContent[message.id] = content
             return
@@ -1029,13 +1030,17 @@ class MainActivity : AppCompatActivity() {
         messageId: String,
         body: TextView,
         text: CharSequence,
-        layoutText: CharSequence
+        layoutText: CharSequence,
+        visibleLength: Int,
+        layoutLength: Int
     ) {
         val oldHeight = body.height
         val oldWidth = body.width
         body.setText(text, TextView.BufferType.SPANNABLE)
-        val layoutLength = layoutText.length
         if (streamBodyLayoutLengths[messageId] == layoutLength) {
+            if (visibleLength >= layoutLength) {
+                releasePinnedBodyHeight(messageId, body, visibleLength)
+            }
             return
         }
         if (oldHeight <= 0 || oldWidth <= 0) {
@@ -1073,7 +1078,7 @@ class MainActivity : AppCompatActivity() {
         val params = body.layoutParams
         params.height = fromHeight
         body.layoutParams = params
-        val durationMs = ((toHeight - fromHeight) * 2L).coerceIn(90L, 190L)
+        val durationMs = ((toHeight - fromHeight) * 3L).coerceIn(160L, 280L)
         val animator = ValueAnimator.ofInt(fromHeight, toHeight).apply {
             duration = durationMs
             interpolator = streamHeightInterpolator
@@ -1087,8 +1092,9 @@ class MainActivity : AppCompatActivity() {
                 override fun onAnimationEnd(animation: Animator) {
                     if (streamBodyHeightAnimators[messageId] !== animation) return
                     streamBodyHeightAnimators.remove(messageId)
-                    streamBodyHeightTargets.remove(messageId)
-                    ensureBodyWrapContent(body)
+                    if (!releasePinnedBodyHeight(messageId, body)) {
+                        pinBodyHeight(body, streamBodyHeightTargets[messageId] ?: toHeight)
+                    }
                     if (followBottom && !userTouchingMessages) scrollToBottomNow()
                 }
             })
@@ -1102,6 +1108,25 @@ class MainActivity : AppCompatActivity() {
         streamBodyHeightTargets.remove(messageId)
         streamBodyLayoutLengths.remove(messageId)
         ensureBodyWrapContent(body)
+    }
+
+    private fun releasePinnedBodyHeight(messageId: String, body: TextView, visibleLengthOverride: Int? = null): Boolean {
+        val layoutLength = streamBodyLayoutLengths[messageId] ?: return false
+        val visibleLength = visibleLengthOverride ?: messageRenderedContent[messageId]?.length ?: 0
+        if (visibleLength < layoutLength) return false
+        streamBodyHeightAnimators.remove(messageId)?.cancel()
+        streamBodyHeightTargets.remove(messageId)
+        streamBodyLayoutLengths.remove(messageId)
+        ensureBodyWrapContent(body)
+        return true
+    }
+
+    private fun pinBodyHeight(body: TextView, height: Int) {
+        val params = body.layoutParams ?: return
+        if (params.height != height) {
+            params.height = height
+            body.layoutParams = params
+        }
     }
 
     private fun ensureBodyWrapContent(body: TextView) {
