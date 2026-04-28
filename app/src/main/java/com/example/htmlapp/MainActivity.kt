@@ -19,8 +19,6 @@ import android.os.Looper
 import android.text.Layout
 import android.text.SpannableStringBuilder
 import android.text.Spanned
-import android.text.TextPaint
-import android.text.style.CharacterStyle
 import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.MotionEvent
@@ -119,15 +117,13 @@ class MainActivity : AppCompatActivity() {
     private val streamLineFlushChars = 64
     private val streamThinkingFlushChars = 320
     private val streamMaxWaitMs = 180L
-    private val streamRevealFrameMs = 8L
+    private val streamRevealFrameMs = 16L
     private val streamRevealTouchFrameMs = 80L
-    private val streamUiCommitFrameMs = 8L
-    private val streamFadeFrameMs = 8L
+    private val streamUiCommitFrameMs = 16L
     private val streamContentCharsPerSecond = 72f
     private val streamThinkingCharsPerSecond = 600f
     private val streamMaxContentCharsPerFrame = 2
     private val streamMaxThinkingCharsPerFrame = 96
-    private val streamFadeMs = 420L
     private val streamParagraphHoldMs = 900L
     private val streamParagraphSoftChars = 120
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
@@ -1050,25 +1046,15 @@ class MainActivity : AppCompatActivity() {
     ) {
         val oldHeight = currentBodyHeight(body)
         val oldWidth = body.width
+        if (oldHeight > 0 && oldWidth > 0) {
+            pinBodyHeight(body, oldHeight)
+        }
         body.setText(text, TextView.BufferType.SPANNABLE)
         if (oldHeight <= 0 || oldWidth <= 0) {
             ensureBodyWrapContent(body)
             return
         }
-        val hasActiveHeightAnimation = streamBodyHeightAnimationTokens[messageId] != null ||
-            streamBodyHeightTargets[messageId] != null
-        val releasedPinnedHeight = if (hasActiveHeightAnimation) {
-            false
-        } else {
-            releasePinnedBodyHeight(messageId, body, visibleLength)
-        }
         if (!shouldMeasureStreamingHeight(messageId, body, oldWidth, visibleLength, hasNewLine)) {
-            if (!releasedPinnedHeight &&
-                streamBodyHeightTargets[messageId] == null &&
-                streamBodyHeightAnimationTokens[messageId] == null
-            ) {
-                ensureBodyWrapContent(body)
-            }
             return
         }
         val targetHeight = measureCurrentTextHeight(body, oldWidth)
@@ -1085,8 +1071,8 @@ class MainActivity : AppCompatActivity() {
             animateStreamingBodyHeight(messageId, body, fromHeight, targetHeight)
             return
         }
-        if (!releasedPinnedHeight && activeTarget == null && activeAnimation == null) {
-            ensureBodyWrapContent(body)
+        if (activeTarget == null && activeAnimation == null) {
+            pinBodyHeight(body, max(fromHeight, targetHeight))
         }
     }
 
@@ -1129,7 +1115,7 @@ class MainActivity : AppCompatActivity() {
         val contentWidth = (width - body.paddingLeft - body.paddingRight).coerceAtLeast(dp(80))
         val averageCharWidth = body.paint.measureText("中").coerceAtLeast(1f)
         val estimatedCharsPerLine = (contentWidth / averageCharWidth).toInt().coerceAtLeast(8)
-        return (estimatedCharsPerLine / 2).coerceIn(8, 24)
+        return (estimatedCharsPerLine / 6).coerceIn(3, 8)
     }
 
     private fun measureCurrentTextHeight(body: TextView, width: Int): Int {
@@ -1185,9 +1171,9 @@ class MainActivity : AppCompatActivity() {
         if (streamBodyHeightAnimationTokens[messageId] != token) return
         streamBodyHeightAnimators.remove(messageId)
         streamBodyHeightAnimationTokens.remove(messageId)
-        if (!releasePinnedBodyHeight(messageId, body)) {
-            pinBodyHeight(body, streamBodyHeightTargets[messageId] ?: toHeight)
-        }
+        streamBodyHeightTargets.remove(messageId)
+        streamBodyLayoutLengths.remove(messageId)
+        pinBodyHeight(body, toHeight)
         if (followBottom && !userTouchingMessages) scrollToBottomNow()
     }
 
@@ -1198,17 +1184,6 @@ class MainActivity : AppCompatActivity() {
         streamBodyLayoutLengths.remove(messageId)
         streamBodyMeasureStates.remove(messageId)
         ensureBodyWrapContent(body)
-    }
-
-    private fun releasePinnedBodyHeight(messageId: String, body: TextView, visibleLengthOverride: Int? = null): Boolean {
-        val layoutLength = streamBodyLayoutLengths[messageId] ?: return false
-        val visibleLength = visibleLengthOverride ?: messageRenderedContent[messageId]?.length ?: 0
-        if (visibleLength < layoutLength) return false
-        streamBodyHeightAnimationTokens.remove(messageId)
-        streamBodyHeightTargets.remove(messageId)
-        streamBodyLayoutLengths.remove(messageId)
-        ensureBodyWrapContent(body)
-        return true
     }
 
     private fun pinBodyHeight(body: TextView, height: Int) {
@@ -1349,7 +1324,6 @@ class MainActivity : AppCompatActivity() {
                     target.thinkingPrefixValid = true
                     target.lastUiCommitAt = now
                     target.lastRevealAt = now
-                    target.lastFadeInvalidateAt = now
                     val display = target.message.copy(content = nextContent, thinking = nextThinking)
                     updateMessageViews(display, streaming = true)
                 } else {
@@ -1358,24 +1332,11 @@ class MainActivity : AppCompatActivity() {
             }
             val caughtUp = nextContentLength == target.targetContent.length && nextThinkingLength == target.targetThinking.length
             if (caughtUp && target.finishWhenCaught) {
-                if (now - target.lastRevealAt < streamFadeMs) {
-                    needsNextFrame = true
-                } else {
-                    iterator.remove()
-                    messageStreamFormatters.remove(target.message.id)
-                    updateMessageViews(target.message, final = true)
-                }
+                iterator.remove()
+                messageStreamFormatters.remove(target.message.id)
+                updateMessageViews(target.message, final = true)
             } else if (!caughtUp || target.targetContent.length > target.contentReleaseEnd) {
                 needsNextFrame = true
-            }
-            messageBodyViews[target.message.id]?.let { body ->
-                if (!userTouchingMessages && now - target.lastRevealAt < streamFadeMs) {
-                    if (now - target.lastFadeInvalidateAt >= streamFadeFrameMs) {
-                        target.lastFadeInvalidateAt = now
-                        ViewCompat.postInvalidateOnAnimation(body)
-                    }
-                    needsNextFrame = true
-                }
             }
         }
         if (needsNextFrame) scheduleStreamAnimator()
@@ -1502,8 +1463,7 @@ class MainActivity : AppCompatActivity() {
         return messageStreamFormatters.getOrPut(messageId) {
             StreamFormatState(
                 quoteColor = color(R.color.chat_accent3),
-                starColor = color(R.color.chat_accent),
-                fadeMs = streamFadeMs
+                starColor = color(R.color.chat_accent)
             )
         }
     }
@@ -2822,7 +2782,6 @@ class MainActivity : AppCompatActivity() {
         var contentRevealCarry: Float = 0f,
         var thinkingRevealCarry: Float = 0f,
         var lastUiCommitAt: Long = 0L,
-        var lastFadeInvalidateAt: Long = 0L,
         var contentPrefixValid: Boolean = true,
         var thinkingPrefixValid: Boolean = true,
         var releaseScanStart: Int = -1,
@@ -2857,11 +2816,9 @@ class MainActivity : AppCompatActivity() {
 
     private class StreamFormatState(
         @ColorInt private val quoteColor: Int,
-        @ColorInt private val starColor: Int,
-        private val fadeMs: Long
+        @ColorInt private val starColor: Int
     ) {
         private val rendered = SpannableStringBuilder()
-        private val fadeSpans = ArrayDeque<FadeInSpan>()
         private var raw = ""
         private var mode = StreamMode.PLAIN
         private var specialStart = -1
@@ -2875,32 +2832,14 @@ class MainActivity : AppCompatActivity() {
             }
             val changedStart = feed(text.substring(raw.length), if (appendOnly) previousRenderedLength else 0)
             raw = text
-            val now = android.os.SystemClock.uptimeMillis()
-            pruneFinishedFadeSpans(now)
-            val fadeStart = changedStart.coerceIn(0, rendered.length)
-            if (fadeStart < rendered.length && fadeMs > 0L) {
-                val span = FadeInSpan(now, fadeMs)
-                rendered.setSpan(span, fadeStart, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                fadeSpans.addLast(span)
-            }
-            return StreamRenderResult(rendered, fadeStart, rendered.length)
+            return StreamRenderResult(rendered, changedStart.coerceIn(0, rendered.length), rendered.length)
         }
 
         private fun reset() {
             rendered.clear()
-            fadeSpans.clear()
             raw = ""
             mode = StreamMode.PLAIN
             specialStart = -1
-        }
-
-        private fun pruneFinishedFadeSpans(now: Long) {
-            while (true) {
-                val span = fadeSpans.peekFirst() ?: return
-                if (!span.isFinished(now)) return
-                rendered.removeSpan(span)
-                fadeSpans.removeFirst()
-            }
         }
 
         private fun feed(delta: String, initialChangedStart: Int): Int {
@@ -2970,23 +2909,6 @@ class MainActivity : AppCompatActivity() {
         private fun isStar(ch: Char): Boolean {
             return ch == '*' || ch == '\uFF0A'
         }
-    }
-
-    private class FadeInSpan(
-        private val startedAt: Long,
-        private val durationMs: Long
-    ) : CharacterStyle() {
-        override fun updateDrawState(tp: TextPaint) {
-            val elapsed = android.os.SystemClock.uptimeMillis() - startedAt
-            val progress = (elapsed.toFloat() / durationMs.coerceAtLeast(1L)).coerceIn(0f, 1f)
-            val eased = 1f - (1f - progress) * (1f - progress)
-            val baseAlpha = Color.alpha(tp.color)
-            val floorAlpha = min(28, baseAlpha)
-            val alpha = (baseAlpha * eased).toInt().coerceIn(floorAlpha, baseAlpha)
-            tp.color = (tp.color and 0x00FFFFFF) or (alpha shl 24)
-        }
-
-        fun isFinished(now: Long): Boolean = now - startedAt >= durationMs
     }
 
     private data class PromptPresetEditor(
