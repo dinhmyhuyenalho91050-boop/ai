@@ -3,7 +3,7 @@
     android:id="@+id/root_container"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@android:color/black"
+    android:background="@color/chat_bg"
     android:fitsSystemWindows="false">
 
     <LinearLayout
@@ -153,7 +153,7 @@
                     android:paddingEnd="16dp"
                     android:paddingBottom="12dp"
                     android:scrollbars="none"
-                    android:textColor="@android:color/white"
+                    android:textColor="@color/chat_fg"
                     android:textColorHint="@color/chat_muted"
                     android:textSize="16sp" />
 

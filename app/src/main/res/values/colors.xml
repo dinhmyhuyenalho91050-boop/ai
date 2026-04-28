@@ -1,14 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="chat_bg">#000000</color>
-    <color name="chat_fg">#E6E8EB</color>
-    <color name="chat_muted">#9CA3AF</color>
-    <color name="chat_panel">#151921</color>
-    <color name="chat_panel_deep">#0A0E14</color>
-    <color name="chat_border">#1F2937</color>
-    <color name="chat_accent">#FBBF24</color>
-    <color name="chat_accent_blue">#60A5FA</color>
-    <color name="chat_accent3">#10B981</color>
-    <color name="chat_title">#8CC9F8</color>
-    <color name="chat_danger">#EF4444</color>
+    <color name="chat_bg">#F5F7FB</color>
+    <color name="chat_fg">#111827</color>
+    <color name="chat_muted">#64748B</color>
+    <color name="chat_panel">#FFFFFF</color>
+    <color name="chat_panel_deep">#EEF2F7</color>
+    <color name="chat_border">#CBD5E1</color>
+    <color name="chat_accent">#B45309</color>
+    <color name="chat_accent_blue">#2563EB</color>
+    <color name="chat_accent3">#059669</color>
+    <color name="chat_title">#1D4ED8</color>
+    <color name="chat_danger">#DC2626</color>
+    <color name="chat_header_start">#F8FAFC</color>
+    <color name="chat_header_end">#FFFFFF</color>
+    <color name="chat_composer_start">#FFFFFF</color>
+    <color name="chat_composer_end">#F1F5F9</color>
+    <color name="chat_model_selector">#E2E8F0</color>
+    <color name="chat_button_pressed">#DBEAFE</color>
+    <color name="chat_sidebar_header">#EAF1FB</color>
+    <color name="chat_card">#FFFFFF</color>
+    <color name="chat_subtle_surface">#EEF2F7</color>
+    <color name="chat_separator">#1ACBD5E1</color>
+    <color name="chat_thinking_bg">#1460A5FA</color>
+    <color name="chat_thinking_border">#5560A5FA</color>
 </resources>

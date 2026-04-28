@@ -18,10 +18,12 @@ import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import android.text.style.StyleSpan
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.inputmethod.EditorInfo
+import android.view.animation.PathInterpolator
 import android.webkit.JavascriptInterface
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -78,6 +80,7 @@ class MainActivity : AppCompatActivity() {
     private val messageRenderedContent = mutableMapOf<String, String>()
     private val messageRenderedThinking = mutableMapOf<String, String>()
     private val messageStreamFormatters = mutableMapOf<String, StreamFormatState>()
+    private val streamTargets = mutableMapOf<String, StreamRenderTarget>()
     private val messageThinkingExpanded = mutableSetOf<String>()
     private val stoppedAssistantIds = mutableSetOf<String>()
     private var activeAssistantId: String? = null
@@ -86,6 +89,7 @@ class MainActivity : AppCompatActivity() {
     private var followBottom = true
     private var bottomScrollScheduled = false
     private var scrollTrackScheduled = false
+    private var streamAnimatorScheduled = false
     private var programmaticScroll = false
     private var lastBottomTargetY = -1
     private var settingsCompact = false
@@ -93,9 +97,14 @@ class MainActivity : AppCompatActivity() {
     private var renderMessageLimit = 80
     private val streamFrameMs = 48L
     private val streamDetachedFrameMs = 160L
-    private val streamLineFlushChars = 28
-    private val streamThinkingFlushChars = 80
-    private val streamMaxWaitMs = 140L
+    private val streamLineFlushChars = 48
+    private val streamThinkingFlushChars = 96
+    private val streamMaxWaitMs = 360L
+    private val streamRevealFrameMs = 32L
+    private val streamRevealChars = 12
+    private val streamThinkingRevealChars = 48
+    private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
+    private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -108,10 +117,10 @@ class MainActivity : AppCompatActivity() {
         state = repository.load()
         registerImportLauncher()
         bindViews()
-        applySystemFontTree(root)
         setupEdgeToEdge()
         setupTitleGradient()
         setupClicks()
+        applySystemFontTree(root)
         setupScrollTracking()
         setupBackNavigation()
         renderAll()
@@ -158,6 +167,11 @@ class MainActivity : AppCompatActivity() {
                         followBottom = isNearBottom()
                     }
                 }
+            }
+        }
+        messagesContainer.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, oldBottom ->
+            if (followBottom && bottom != oldBottom) {
+                scrollToBottomSoon()
             }
         }
     }
@@ -423,20 +437,20 @@ class MainActivity : AppCompatActivity() {
             backdrop.visibility = View.VISIBLE
             sidebar.translationX = -sidebarWidth
             sidebar.visibility = View.VISIBLE
-            backdrop.animate().alpha(1f).setDuration(180).start()
+            backdrop.animate().alpha(1f).setDuration(240).setInterpolator(softInterpolator).start()
             sidebar.animate()
                 .translationX(0f)
-                .setDuration(240)
-                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .setDuration(320)
+                .setInterpolator(softInterpolator)
                 .start()
         } else {
-            backdrop.animate().alpha(0f).setDuration(180).withEndAction {
+            backdrop.animate().alpha(0f).setDuration(220).setInterpolator(softInterpolator).withEndAction {
                 backdrop.visibility = View.GONE
             }.start()
             sidebar.animate()
                 .translationX(-sidebarWidth)
-                .setDuration(220)
-                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .setDuration(260)
+                .setInterpolator(softInterpolator)
                 .withEndAction { sidebar.visibility = View.GONE }
                 .start()
         }
@@ -516,7 +530,7 @@ class MainActivity : AppCompatActivity() {
                             assistant.thinking = latestThinking
                             renderedContentLength = assistant.content.length
                             renderedThinkingLength = assistant.thinking.length
-                            updateMessageViews(assistant, streaming = true)
+                            updateStreamTarget(assistant, latestContent, latestThinking)
                         }
                     }
                 }
@@ -528,7 +542,11 @@ class MainActivity : AppCompatActivity() {
                     assistant.thinking = result.thinking
                     repository.save(state)
                     setSendingUi(false)
-                    updateMessageViews(assistant, final = true)
+                    if (preset?.config?.stream == true || streamTargets.containsKey(assistant.id)) {
+                        updateStreamTarget(assistant, assistant.content, assistant.thinking, finishWhenCaught = true)
+                    } else {
+                        updateMessageViews(assistant, final = true)
+                    }
                     renderSessions()
                 }
             }.onFailure { error ->
@@ -548,9 +566,10 @@ class MainActivity : AppCompatActivity() {
                             assistant.thinking = partialThinking
                             repository.save(state)
                             setSendingUi(false)
-                            updateMessageViews(assistant, final = true)
+                            updateStreamTarget(assistant, assistant.content, assistant.thinking, finishWhenCaught = true)
                         }
                     } else {
+                        streamTargets.remove(assistant.id)
                         assistant.content = if (error.message.isNullOrBlank()) "请求失败" else "请求失败: ${error.message}"
                         assistant.thinking = ""
                         repository.save(state)
@@ -622,7 +641,7 @@ class MainActivity : AppCompatActivity() {
         val rules = runCatching { JSONArray(preset.regexRulesJson).length() }.getOrDefault(0)
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(Color.argb(154, 21, 25, 33), dp(12), dp(1), color(R.color.chat_border))
+            background = rounded(color(R.color.chat_card), dp(12), dp(1), color(R.color.chat_border))
             setPadding(dp(14), dp(13), dp(14), dp(13))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -630,7 +649,7 @@ class MainActivity : AppCompatActivity() {
             ).apply { bottomMargin = dp(12) }
             addView(TextView(context).apply {
                 text = preset.name.ifBlank { key }
-                setTextColor(Color.WHITE)
+                setTextColor(color(R.color.chat_fg))
                 textSize = 14f
                 typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
@@ -710,7 +729,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(color(R.color.chat_muted))
             textSize = 12f
             gravity = Gravity.CENTER
-            background = rounded(Color.argb(72, 0, 0, 0), dp(12), dp(1), color(R.color.chat_border))
+            background = rounded(color(R.color.chat_subtle_surface), dp(12), dp(1), color(R.color.chat_border))
             setPadding(dp(12), dp(10), dp(12), dp(10))
             setOnClickListener {
                 renderMessageLimit += 40
@@ -729,7 +748,7 @@ class MainActivity : AppCompatActivity() {
 
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            background = rounded(Color.BLACK, dp(14), dp(1), Color.argb(28, 255, 255, 255))
+            background = rounded(color(R.color.chat_card), dp(14), dp(1), color(R.color.chat_border))
             clipToOutline = true
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -757,7 +776,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 text = formatMessageText(content)
             }
-            setTextColor(Color.WHITE)
+            setTextColor(color(R.color.chat_fg))
             textSize = 16f
             typeface = systemTypeface()
             setLineSpacing(dp(2).toFloat(), 1f)
@@ -777,7 +796,7 @@ class MainActivity : AppCompatActivity() {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = if (message.thinking.isBlank()) View.GONE else View.VISIBLE
-            background = rounded(Color.argb(22, 96, 165, 250), dp(8), dp(1), Color.argb(88, 96, 165, 250))
+            background = rounded(color(R.color.chat_thinking_bg), dp(8), dp(1), color(R.color.chat_thinking_border))
             setPadding(dp(12), dp(10), dp(12), dp(10))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -862,6 +881,86 @@ class MainActivity : AppCompatActivity() {
             body.text = formatMessageText(content)
             messageRenderedContent[message.id] = content
         }
+    }
+
+    private fun updateStreamTarget(
+        message: ChatMessage,
+        content: String,
+        thinking: String,
+        finishWhenCaught: Boolean = false
+    ) {
+        val target = streamTargets.getOrPut(message.id) {
+            StreamRenderTarget(
+                message = message,
+                visibleContent = messageRenderedContent[message.id].orEmpty().takeIf { content.startsWith(it) }.orEmpty(),
+                visibleThinking = messageRenderedThinking[message.id].orEmpty().takeIf { thinking.startsWith(it) }.orEmpty()
+            )
+        }
+        target.message = message
+        target.targetContent = content
+        target.targetThinking = thinking
+        target.finishWhenCaught = target.finishWhenCaught || finishWhenCaught
+        scheduleStreamAnimator()
+    }
+
+    private fun scheduleStreamAnimator() {
+        if (streamAnimatorScheduled) return
+        streamAnimatorScheduled = true
+        mainHandler.postDelayed({
+            streamAnimatorScheduled = false
+            tickStreamAnimator()
+        }, streamRevealFrameMs)
+    }
+
+    private fun tickStreamAnimator() {
+        var needsNextFrame = false
+        streamTargets.values.toList().forEach { target ->
+            val nextContent = advanceVisibleText(target.visibleContent, target.targetContent, streamRevealChars)
+            val nextThinking = advanceVisibleText(target.visibleThinking, target.targetThinking, streamThinkingRevealChars)
+            val changed = nextContent != target.visibleContent || nextThinking != target.visibleThinking
+            target.visibleContent = nextContent
+            target.visibleThinking = nextThinking
+            if (changed) {
+                val display = target.message.copy(content = nextContent, thinking = nextThinking)
+                updateMessageViews(display, streaming = true)
+            }
+            val caughtUp = nextContent == target.targetContent && nextThinking == target.targetThinking
+            if (caughtUp && target.finishWhenCaught) {
+                streamTargets.remove(target.message.id)
+                messageStreamFormatters.remove(target.message.id)
+                updateMessageViews(target.message, final = true)
+            } else if (!caughtUp) {
+                needsNextFrame = true
+            }
+        }
+        if (needsNextFrame) scheduleStreamAnimator()
+    }
+
+    private fun advanceVisibleText(current: String, target: String, maxChars: Int): String {
+        if (current == target) return current
+        if (!target.startsWith(current)) return target
+        val start = current.length
+        val remaining = target.length - start
+        if (remaining <= maxChars) return target
+        val searchEnd = min(target.length, start + maxChars * 2)
+        val newline = target.indexOf('\n', start)
+        if (newline >= start && newline < searchEnd) {
+            return target.substring(0, newline + 1)
+        }
+        val sentence = firstSentenceBoundary(target, start, searchEnd)
+        if (sentence > start) {
+            return target.substring(0, sentence)
+        }
+        return target.substring(0, min(target.length, start + maxChars))
+    }
+
+    private fun firstSentenceBoundary(text: String, start: Int, end: Int): Int {
+        for (i in start until end) {
+            if (text[i] == '。' || text[i] == '！' || text[i] == '？' || text[i] == '.' || text[i] == '!' || text[i] == '?') {
+                return i + 1
+            }
+        }
+        return -1
     }
 
     private fun streamingFormatter(messageId: String): StreamFormatState {
@@ -1007,25 +1106,27 @@ class MainActivity : AppCompatActivity() {
     private fun scrollToBottomSoon(animated: Boolean = false) {
         if (bottomScrollScheduled) return
         bottomScrollScheduled = true
-        ViewCompat.postOnAnimation(messagesScroll) {
-            bottomScrollScheduled = false
-            val child = messagesScroll.getChildAt(0)
-            if (child != null) {
-                val targetY = max(0, child.bottom - messagesScroll.height)
-                if (targetY == lastBottomTargetY && abs(messagesScroll.scrollY - targetY) <= dp(1)) {
-                    followBottom = true
-                } else {
-                    lastBottomTargetY = targetY
-                    programmaticScroll = true
-                    if (animated) {
-                        messagesScroll.smoothScrollTo(0, targetY)
+        messagesScroll.post {
+            ViewCompat.postOnAnimation(messagesScroll) {
+                bottomScrollScheduled = false
+                val child = messagesScroll.getChildAt(0)
+                if (child != null) {
+                    val targetY = max(0, child.bottom - messagesScroll.height)
+                    if (targetY == lastBottomTargetY && abs(messagesScroll.scrollY - targetY) <= dp(1)) {
+                        followBottom = true
                     } else {
-                        messagesScroll.scrollTo(0, targetY)
-                    }
-                    followBottom = true
-                    ViewCompat.postOnAnimation(messagesScroll) {
-                        programmaticScroll = false
-                        followBottom = isNearBottom()
+                        lastBottomTargetY = targetY
+                        programmaticScroll = true
+                        if (animated) {
+                            messagesScroll.smoothScrollTo(0, targetY)
+                        } else {
+                            messagesScroll.scrollTo(0, targetY)
+                        }
+                        followBottom = true
+                        ViewCompat.postOnAnimation(messagesScroll) {
+                            programmaticScroll = false
+                            followBottom = true
+                        }
                     }
                 }
             }
@@ -1034,12 +1135,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun animateIn(view: View) {
         view.alpha = 0f
-        view.translationY = dp(8).toFloat()
+        view.translationY = dp(12).toFloat()
         view.animate()
             .alpha(1f)
             .translationY(0f)
-            .setDuration(220)
-            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .setDuration(360)
+            .setInterpolator(entranceInterpolator)
             .start()
     }
 
@@ -1050,10 +1151,10 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(16), dp(14), dp(14), dp(14))
-            background = solid(Color.argb(8, 255, 255, 255))
+            background = solid(color(R.color.chat_subtle_surface))
             addView(TextView(context).apply {
                 text = roleLabel
-                setTextColor(Color.WHITE)
+                setTextColor(color(R.color.chat_fg))
                 textSize = 12f
                 typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
@@ -1091,7 +1192,7 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(12), dp(12), dp(12), dp(12))
-            background = solid(Color.argb(7, 255, 255, 255))
+            background = solid(color(R.color.chat_subtle_surface))
             addView(tinyButton("编辑").apply { setOnClickListener { editMessage(message) } })
             if (message.role == "assistant") {
                 addView(tinyButton("重新生成").apply { setOnClickListener { regenerateAssistant(message) } })
@@ -1104,9 +1205,9 @@ class MainActivity : AppCompatActivity() {
         val edit = EditText(this).apply {
             setText(message.content)
             minLines = 6
-            setTextColor(Color.WHITE)
+            setTextColor(color(R.color.chat_fg))
             setHintTextColor(color(R.color.chat_muted))
-            background = rounded(Color.argb(72, 0, 0, 0), dp(8), dp(1), color(R.color.chat_border))
+            background = rounded(color(R.color.chat_subtle_surface), dp(8), dp(1), color(R.color.chat_border))
             setPadding(dp(12), dp(12), dp(12), dp(12))
         }
         AlertDialog.Builder(this)
@@ -1152,7 +1253,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(13), dp(14), dp(13))
             background = rounded(
-                Color.argb(154, 21, 25, 33),
+                color(R.color.chat_card),
                 dp(12),
                 dp(1),
                 if (active) color(R.color.chat_accent_blue) else color(R.color.chat_border)
@@ -1173,7 +1274,7 @@ class MainActivity : AppCompatActivity() {
 
             addView(TextView(context).apply {
                 text = session.name
-                setTextColor(Color.WHITE)
+                setTextColor(color(R.color.chat_fg))
                 textSize = 14f
                 typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
@@ -1229,7 +1330,7 @@ class MainActivity : AppCompatActivity() {
         }
         val tabColumn = LinearLayout(this).apply {
             orientation = if (settingsCompact) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
-            background = solid(Color.argb(36, 0, 0, 0))
+            background = solid(color(R.color.chat_subtle_surface))
             layoutParams = if (settingsCompact) {
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56))
             } else {
@@ -1272,7 +1373,7 @@ class MainActivity : AppCompatActivity() {
         val footer = LinearLayout(this).apply {
             gravity = Gravity.END
             setPadding(dp(18), dp(14), dp(18), dp(14))
-            background = solid(Color.argb(24, 0, 0, 0))
+            background = solid(color(R.color.chat_subtle_surface))
         }
         footer.addView(dialogButton("保存").apply {
             setOnClickListener {
@@ -1300,6 +1401,7 @@ class MainActivity : AppCompatActivity() {
                 tab.setTextColor(if (i == index) color(R.color.chat_accent_blue) else color(R.color.chat_muted))
                 tab.background = if (i == index) solid(Color.argb(38, 96, 165, 250)) else null
             }
+            contentHost.animate().cancel()
             contentHost.removeAllViews()
             saveCurrentPane = when (index) {
                 0 -> fillModelsPane(contentHost)
@@ -1307,9 +1409,18 @@ class MainActivity : AppCompatActivity() {
                 else -> fillBackupPane(contentHost, dialog)
             }
             contentHost.alpha = 0f
-            contentHost.animate().alpha(1f).setDuration(160).start()
+            contentHost.translationY = dp(4).toFloat()
+            contentHost.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(240)
+                .setInterpolator(softInterpolator)
+                .start()
         }
-        tabViews.forEachIndexed { index, tab -> tab.setOnClickListener { selectTab(index) } }
+        tabViews.forEachIndexed { index, tab ->
+            tab.setOnClickListener { selectTab(index) }
+            installPressAnimation(tab)
+        }
         selectTab(0)
 
         dialog.setContentView(shell)
@@ -1319,9 +1430,17 @@ class MainActivity : AppCompatActivity() {
             val height = min(resources.displayMetrics.heightPixels - dp(72), dp(720))
             dialog.window?.setLayout(width, height)
             shell.alpha = 0f
-            shell.scaleX = 0.98f
-            shell.scaleY = 0.98f
-            shell.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(220).start()
+            shell.scaleX = 0.96f
+            shell.scaleY = 0.96f
+            shell.translationY = dp(8).toFloat()
+            shell.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .translationY(0f)
+                .setDuration(320)
+                .setInterpolator(entranceInterpolator)
+                .start()
         }
         dialog.show()
     }
@@ -1592,7 +1711,7 @@ class MainActivity : AppCompatActivity() {
         val replacement = field("替换为", rule.optString("replacement"), multiLine = true)
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(Color.argb(154, 21, 25, 33), dp(10), dp(1), color(R.color.chat_border))
+            background = rounded(color(R.color.chat_card), dp(10), dp(1), color(R.color.chat_border))
             setPadding(dp(12), dp(12), dp(12), dp(12))
             tag = RegexRuleRefs(name, pattern, replacement)
             layoutParams = LinearLayout.LayoutParams(
@@ -1702,7 +1821,7 @@ class MainActivity : AppCompatActivity() {
     private fun modelPresetCard(editor: ModelPresetEditor): View {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(Color.argb(178, 15, 18, 25), dp(12), dp(1), color(R.color.chat_border))
+            background = rounded(color(R.color.chat_card), dp(12), dp(1), color(R.color.chat_border))
             setPadding(dp(14), dp(14), dp(14), dp(14))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1715,7 +1834,7 @@ class MainActivity : AppCompatActivity() {
     private fun tinyButton(label: String, danger: Boolean = false): TextView {
         return TextView(this).apply {
             text = label
-            setTextColor(Color.WHITE)
+            setTextColor(if (danger) Color.WHITE else color(R.color.chat_fg))
             textSize = 12f
             typeface = systemTypeface(Typeface.BOLD)
             includeFontPadding = false
@@ -1727,6 +1846,7 @@ class MainActivity : AppCompatActivity() {
                 color(R.color.chat_border)
             )
             setPadding(dp(12), dp(8), dp(12), dp(8))
+            installPressAnimation(this)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1737,7 +1857,7 @@ class MainActivity : AppCompatActivity() {
     private fun dialogTitle(title: String): TextView {
         return TextView(this).apply {
             text = title
-            setTextColor(Color.WHITE)
+            setTextColor(color(R.color.chat_fg))
             textSize = 16f
             typeface = systemTypeface(Typeface.BOLD)
             includeFontPadding = false
@@ -1748,13 +1868,14 @@ class MainActivity : AppCompatActivity() {
     private fun dialogButton(label: String): TextView {
         return TextView(this).apply {
             text = label
-            setTextColor(Color.WHITE)
+            setTextColor(color(R.color.chat_fg))
             textSize = 13f
             typeface = systemTypeface(Typeface.BOLD)
             includeFontPadding = false
             gravity = Gravity.CENTER
             background = rounded(color(R.color.chat_panel), dp(8), dp(1), color(R.color.chat_border))
             setPadding(dp(14), dp(10), dp(14), dp(10))
+            installPressAnimation(this)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1768,14 +1889,14 @@ class MainActivity : AppCompatActivity() {
     private fun field(label: String, value: String, multiLine: Boolean = false): FieldRef {
         val input = EditText(this).apply {
             setText(value)
-            setTextColor(Color.WHITE)
+            setTextColor(color(R.color.chat_fg))
             setHintTextColor(color(R.color.chat_muted))
             textSize = 14f
             minLines = if (multiLine) 3 else 1
             maxLines = if (multiLine) 8 else 1
             setSingleLine(!multiLine)
             gravity = if (multiLine) Gravity.TOP or Gravity.START else Gravity.CENTER_VERTICAL
-            background = rounded(Color.argb(72, 0, 0, 0), dp(8), dp(1), color(R.color.chat_border))
+            background = rounded(color(R.color.chat_subtle_surface), dp(8), dp(1), color(R.color.chat_border))
             setPadding(dp(12), if (multiLine) dp(10) else 0, dp(12), if (multiLine) dp(10) else 0)
             layoutParams = if (settingsCompact) {
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, if (multiLine) dp(120) else dp(44))
@@ -1814,7 +1935,7 @@ class MainActivity : AppCompatActivity() {
         val adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, labels) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 return (super.getView(position, convertView, parent) as TextView).apply {
-                    setTextColor(Color.WHITE)
+                    setTextColor(color(R.color.chat_fg))
                     textSize = 14f
                     includeFontPadding = false
                 }
@@ -1822,7 +1943,7 @@ class MainActivity : AppCompatActivity() {
 
             override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
                 return (super.getDropDownView(position, convertView, parent) as TextView).apply {
-                    setTextColor(Color.WHITE)
+                    setTextColor(color(R.color.chat_fg))
                     setBackgroundColor(color(R.color.chat_panel))
                     textSize = 14f
                     setPadding(dp(12), dp(12), dp(12), dp(12))
@@ -1833,7 +1954,7 @@ class MainActivity : AppCompatActivity() {
         val spinner = Spinner(this).apply {
             this.adapter = adapter
             setSelection(options.indexOfFirst { it.first == selected }.takeIf { it >= 0 } ?: 0)
-            background = rounded(Color.argb(72, 0, 0, 0), dp(8), dp(1), color(R.color.chat_border))
+            background = rounded(color(R.color.chat_subtle_surface), dp(8), dp(1), color(R.color.chat_border))
             layoutParams = if (settingsCompact) {
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44))
             } else {
@@ -2014,6 +2135,7 @@ class MainActivity : AppCompatActivity() {
     private fun applySystemFontTree(view: View) {
         if (view is TextView) {
             view.typeface = systemTypeface(view.typeface?.style ?: Typeface.NORMAL)
+            if (view.isClickable) installPressAnimation(view)
         }
         if (view is ViewGroup) {
             for (i in 0 until view.childCount) {
@@ -2033,9 +2155,38 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("ClickableViewAccessibility")
+    private fun installPressAnimation(view: View) {
+        view.setOnTouchListener { target, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    target.animate().cancel()
+                    target.animate()
+                        .scaleX(0.975f)
+                        .scaleY(0.975f)
+                        .alpha(0.86f)
+                        .setDuration(80)
+                        .setInterpolator(softInterpolator)
+                        .start()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    target.animate().cancel()
+                    target.animate()
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .alpha(1f)
+                        .setDuration(180)
+                        .setInterpolator(entranceInterpolator)
+                        .start()
+                }
+            }
+            false
+        }
+    }
+
     private fun separator(height: Int = dp(1)): View {
         return View(this).apply {
-            setBackgroundColor(Color.argb(16, 255, 255, 255))
+            setBackgroundColor(color(R.color.chat_separator))
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height)
         }
     }
@@ -2083,6 +2234,15 @@ class MainActivity : AppCompatActivity() {
         val name: FieldRef,
         val pattern: FieldRef,
         val replacement: FieldRef
+    )
+
+    private data class StreamRenderTarget(
+        var message: ChatMessage,
+        var targetContent: String = "",
+        var targetThinking: String = "",
+        var visibleContent: String = "",
+        var visibleThinking: String = "",
+        var finishWhenCaught: Boolean = false
     )
 
     private enum class StreamMode {
