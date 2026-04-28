@@ -19,6 +19,7 @@ import android.os.Looper
 import android.text.Layout
 import android.text.SpannableStringBuilder
 import android.text.Spanned
+import android.text.StaticLayout
 import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.MotionEvent
@@ -1119,10 +1120,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun measureCurrentTextHeight(body: TextView, width: Int): Int {
-        val widthSpec = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY)
-        val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-        body.measure(widthSpec, heightSpec)
-        return body.measuredHeight
+        val contentWidth = (width - body.paddingLeft - body.paddingRight).coerceAtLeast(1)
+        val text = body.text ?: ""
+        val layout = StaticLayout.Builder.obtain(text, 0, text.length, body.paint, contentWidth)
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setLineSpacing(body.lineSpacingExtra, body.lineSpacingMultiplier)
+            .setIncludePad(body.includeFontPadding)
+            .setBreakStrategy(body.breakStrategy)
+            .setHyphenationFrequency(body.hyphenationFrequency)
+            .build()
+        return layout.height + body.paddingTop + body.paddingBottom
     }
 
     private fun animateStreamingBodyHeight(messageId: String, body: TextView, fromHeight: Int, toHeight: Int) {
