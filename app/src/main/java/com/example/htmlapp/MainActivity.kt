@@ -1,8 +1,5 @@
 package com.example.htmlapp
 
-import android.animation.Animator
-import android.animation.AnimatorListenerAdapter
-import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.Dialog
@@ -86,7 +83,7 @@ class MainActivity : AppCompatActivity() {
     private val messageRenderedContent = mutableMapOf<String, String>()
     private val messageRenderedThinking = mutableMapOf<String, String>()
     private val messageStreamFormatters = mutableMapOf<String, StreamFormatState>()
-    private val streamBodyHeightAnimators = mutableMapOf<String, ValueAnimator>()
+    private val streamBodyHeightAnimationTokens = mutableMapOf<String, Int>()
     private val streamBodyHeightTargets = mutableMapOf<String, Int>()
     private val streamBodyLayoutLengths = mutableMapOf<String, Int>()
     private val streamBodyMeasureStates = mutableMapOf<String, StreamBodyMeasureState>()
@@ -105,30 +102,31 @@ class MainActivity : AppCompatActivity() {
     private var programmaticScroll = false
     private var lastBottomTargetY = -1
     private var settingsCompact = false
+    private var streamHeightAnimationSeed = 0
 
-    private var renderMessageLimit = 80
-    private val streamFrameMs = 96L
-    private val streamDetachedFrameMs = 260L
-    private val streamLineFlushChars = 80
-    private val streamThinkingFlushChars = 320
-    private val streamMaxWaitMs = 380L
-    private val streamRevealFrameMs = 16L
-    private val streamRevealTouchFrameMs = 80L
-    private val streamUiCommitFrameMs = 32L
-    private val streamContentCharsPerSecond = 46f
-    private val streamThinkingCharsPerSecond = 260f
-    private val streamMaxContentCharsPerFrame = 2
-    private val streamMaxThinkingCharsPerFrame = 48
-    private val streamFadeMs = 560L
+    private val defaultRenderMessageLimit = 56
+    private val loadOlderMessageBatch = 32
+    private var renderMessageLimit = defaultRenderMessageLimit
+    private val scrollTrackFrameMs = 96L
+    private val streamFrameMs = 160L
+    private val streamDetachedFrameMs = 520L
+    private val streamLineFlushChars = 160
+    private val streamThinkingFlushChars = 700
+    private val streamMaxWaitMs = 760L
+    private val streamRevealFrameMs = 128L
+    private val streamRevealTouchFrameMs = 360L
+    private val streamUiCommitFrameMs = 128L
+    private val streamFadeFrameMs = 160L
+    private val streamContentCharsPerSecond = 54f
+    private val streamThinkingCharsPerSecond = 720f
+    private val streamMaxContentCharsPerFrame = 16
+    private val streamMaxThinkingCharsPerFrame = 220
+    private val streamFadeMs = 280L
     private val streamParagraphHoldMs = 900L
     private val streamParagraphSoftChars = 120
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
     private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
     private val streamHeightInterpolator by lazy { PathInterpolator(0.2f, 0f, 0.2f, 1f) }
-    private val readingRegularTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.NORMAL) }
-    private val readingBoldTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.BOLD) }
-    private val readingItalicTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.ITALIC) }
-    private val readingBoldItalicTypeface by lazy { Typeface.create("Noto Sans CJK SC", Typeface.BOLD_ITALIC) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -191,7 +189,7 @@ class MainActivity : AppCompatActivity() {
                     followBottom = isNearBottom()
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    followBottom = isNearBottom()
+                    scheduleScrollTracking()
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     val token = ++messageTouchToken
@@ -204,21 +202,24 @@ class MainActivity : AppCompatActivity() {
             false
         }
         messagesScroll.setOnScrollChangeListener { _, _, _, _, _ ->
-            if (!programmaticScroll && !scrollTrackScheduled) {
-                scrollTrackScheduled = true
-                ViewCompat.postOnAnimation(messagesScroll) {
-                    scrollTrackScheduled = false
-                    if (!programmaticScroll) {
-                        followBottom = isNearBottom()
-                    }
-                }
-            }
+            scheduleScrollTracking()
         }
         messagesContainer.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, oldBottom ->
             if (followBottom && !userTouchingMessages && bottom != oldBottom) {
                 scrollToBottomNow()
             }
         }
+    }
+
+    private fun scheduleScrollTracking() {
+        if (programmaticScroll || scrollTrackScheduled) return
+        scrollTrackScheduled = true
+        mainHandler.postDelayed({
+            scrollTrackScheduled = false
+            if (!programmaticScroll) {
+                followBottom = isNearBottom()
+            }
+        }, scrollTrackFrameMs)
     }
 
     private fun bindViews() {
@@ -814,7 +815,7 @@ class MainActivity : AppCompatActivity() {
         }
         state.sessions[session.id] = session
         state.currentId = session.id
-        renderMessageLimit = 80
+        renderMessageLimit = defaultRenderMessageLimit
         repository.save(state)
         inputMessage.setText("")
         renderAll()
@@ -822,8 +823,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderMessages(scrollToBottom: Boolean = false) {
-        streamBodyHeightAnimators.values.toList().forEach { it.cancel() }
-        streamBodyHeightAnimators.clear()
+        streamBodyHeightAnimationTokens.clear()
         streamBodyHeightTargets.clear()
         streamBodyLayoutLengths.clear()
         streamBodyMeasureStates.clear()
@@ -861,7 +861,7 @@ class MainActivity : AppCompatActivity() {
             background = rounded(color(R.color.chat_subtle_surface), dp(12), dp(1), color(R.color.chat_border))
             setPadding(dp(12), dp(10), dp(12), dp(10))
             setOnClickListener {
-                renderMessageLimit += 40
+                renderMessageLimit += loadOlderMessageBatch
                 renderMessages(scrollToBottom = false)
             }
             layoutParams = LinearLayout.LayoutParams(
@@ -1051,7 +1051,7 @@ class MainActivity : AppCompatActivity() {
         if (!shouldMeasureStreamingHeight(messageId, body, oldWidth, visibleLength, hasNewLine)) {
             if (!releasedPinnedHeight &&
                 streamBodyHeightTargets[messageId] == null &&
-                streamBodyHeightAnimators[messageId] == null
+                streamBodyHeightAnimationTokens[messageId] == null
             ) {
                 ensureBodyWrapContent(body)
             }
@@ -1061,8 +1061,8 @@ class MainActivity : AppCompatActivity() {
         rememberStreamingMeasure(messageId, body, oldWidth, visibleLength, targetHeight)
         val layoutLength = visibleLength
         val activeTarget = streamBodyHeightTargets[messageId]
-        val activeAnimator = streamBodyHeightAnimators[messageId]
-        if (activeTarget == targetHeight && activeAnimator?.isRunning == true) {
+        val activeAnimation = streamBodyHeightAnimationTokens[messageId]
+        if (activeTarget == targetHeight && activeAnimation != null) {
             return
         }
         if (targetHeight > oldHeight + dp(1) && targetHeight > (activeTarget ?: 0) + dp(1)) {
@@ -1070,7 +1070,7 @@ class MainActivity : AppCompatActivity() {
             animateStreamingBodyHeight(messageId, body, oldHeight, targetHeight)
             return
         }
-        if (!releasedPinnedHeight && activeTarget == null && activeAnimator == null) {
+        if (!releasedPinnedHeight && activeTarget == null && activeAnimation == null) {
             ensureBodyWrapContent(body)
         }
     }
@@ -1120,38 +1120,46 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun animateStreamingBodyHeight(messageId: String, body: TextView, fromHeight: Int, toHeight: Int) {
-        streamBodyHeightAnimators.remove(messageId)?.cancel()
+        val token = ++streamHeightAnimationSeed
+        streamBodyHeightAnimationTokens[messageId] = token
         streamBodyHeightTargets[messageId] = toHeight
         val params = body.layoutParams
         params.height = fromHeight
         body.layoutParams = params
-        val durationMs = ((toHeight - fromHeight) * 3L).coerceIn(160L, 280L)
-        val animator = ValueAnimator.ofInt(fromHeight, toHeight).apply {
-            duration = durationMs
-            interpolator = streamHeightInterpolator
-            addUpdateListener { valueAnimator ->
-                val nextParams = body.layoutParams
-                nextParams.height = valueAnimator.animatedValue as Int
-                body.layoutParams = nextParams
-                if (followBottom && !userTouchingMessages) scrollToBottomNow()
-            }
-            addListener(object : AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: Animator) {
-                    if (streamBodyHeightAnimators[messageId] !== animation) return
-                    streamBodyHeightAnimators.remove(messageId)
-                    if (!releasePinnedBodyHeight(messageId, body)) {
-                        pinBodyHeight(body, streamBodyHeightTargets[messageId] ?: toHeight)
-                    }
-                    if (followBottom && !userTouchingMessages) scrollToBottomNow()
-                }
-            })
+        if (userTouchingMessages) {
+            finishStreamingBodyHeightAnimation(messageId, body, token, toHeight)
+            return
         }
-        streamBodyHeightAnimators[messageId] = animator
-        animator.start()
+        val delta = toHeight - fromHeight
+        val steps = (delta / dp(42)).coerceIn(2, 4)
+        val durationMs = (delta * 2L).coerceIn(120L, 220L)
+        val stepDelay = (durationMs / steps).coerceAtLeast(48L)
+        fun runStep(step: Int): Unit {
+            if (streamBodyHeightAnimationTokens[messageId] != token) return
+            val progress = (step.toFloat() / steps).coerceIn(0f, 1f)
+            val eased = streamHeightInterpolator.getInterpolation(progress)
+            pinBodyHeight(body, fromHeight + ((toHeight - fromHeight) * eased).toInt())
+            if (followBottom && !userTouchingMessages) scrollToBottomNow()
+            if (step < steps) {
+                mainHandler.postDelayed({ runStep(step + 1) }, stepDelay)
+            } else {
+                finishStreamingBodyHeightAnimation(messageId, body, token, toHeight)
+            }
+        }
+        mainHandler.postDelayed({ runStep(1) }, stepDelay)
+    }
+
+    private fun finishStreamingBodyHeightAnimation(messageId: String, body: TextView, token: Int, toHeight: Int) {
+        if (streamBodyHeightAnimationTokens[messageId] != token) return
+        streamBodyHeightAnimationTokens.remove(messageId)
+        if (!releasePinnedBodyHeight(messageId, body)) {
+            pinBodyHeight(body, streamBodyHeightTargets[messageId] ?: toHeight)
+        }
+        if (followBottom && !userTouchingMessages) scrollToBottomNow()
     }
 
     private fun stopStreamingBodyHeightAnimation(messageId: String, body: TextView) {
-        streamBodyHeightAnimators.remove(messageId)?.cancel()
+        streamBodyHeightAnimationTokens.remove(messageId)
         streamBodyHeightTargets.remove(messageId)
         streamBodyLayoutLengths.remove(messageId)
         streamBodyMeasureStates.remove(messageId)
@@ -1162,7 +1170,7 @@ class MainActivity : AppCompatActivity() {
         val layoutLength = streamBodyLayoutLengths[messageId] ?: return false
         val visibleLength = visibleLengthOverride ?: messageRenderedContent[messageId]?.length ?: 0
         if (visibleLength < layoutLength) return false
-        streamBodyHeightAnimators.remove(messageId)?.cancel()
+        streamBodyHeightAnimationTokens.remove(messageId)
         streamBodyHeightTargets.remove(messageId)
         streamBodyLayoutLengths.remove(messageId)
         ensureBodyWrapContent(body)
@@ -1252,11 +1260,7 @@ class MainActivity : AppCompatActivity() {
             streamAnimatorScheduled = false
             tickStreamAnimator()
         }
-        if (!userTouchingMessages && delayMs <= streamRevealFrameMs) {
-            ViewCompat.postOnAnimation(messagesScroll, tick)
-        } else {
-            mainHandler.postDelayed(tick, delayMs)
-        }
+        mainHandler.postDelayed(tick, delayMs)
     }
 
     private fun tickStreamAnimator() {
@@ -1307,6 +1311,7 @@ class MainActivity : AppCompatActivity() {
                     target.thinkingPrefixValid = true
                     target.lastUiCommitAt = now
                     target.lastRevealAt = now
+                    target.lastFadeInvalidateAt = now
                     val display = target.message.copy(content = nextContent, thinking = nextThinking)
                     updateMessageViews(display, streaming = true)
                 } else {
@@ -1326,8 +1331,11 @@ class MainActivity : AppCompatActivity() {
                 needsNextFrame = true
             }
             messageBodyViews[target.message.id]?.let { body ->
-                if (now - target.lastRevealAt < streamFadeMs) {
-                    ViewCompat.postInvalidateOnAnimation(body)
+                if (!userTouchingMessages && now - target.lastRevealAt < streamFadeMs) {
+                    if (now - target.lastFadeInvalidateAt >= streamFadeFrameMs) {
+                        target.lastFadeInvalidateAt = now
+                        body.invalidate()
+                    }
                     needsNextFrame = true
                 }
             }
@@ -1600,29 +1608,26 @@ class MainActivity : AppCompatActivity() {
         if (bottomScrollScheduled) return
         bottomScrollScheduled = true
         messagesScroll.post {
-            ViewCompat.postOnAnimation(messagesScroll) {
-                bottomScrollScheduled = false
-                val child = messagesScroll.getChildAt(0)
-                if (child != null) {
-                    val targetY = max(0, child.bottom - messagesScroll.height)
-                    if (targetY == lastBottomTargetY && abs(messagesScroll.scrollY - targetY) <= dp(1)) {
-                        followBottom = true
-                    } else {
-                        lastBottomTargetY = targetY
-                        programmaticScroll = true
-                        if (animated) {
-                            messagesScroll.smoothScrollTo(0, targetY)
-                        } else {
-                            messagesScroll.scrollTo(0, targetY)
-                        }
-                        followBottom = true
-                        ViewCompat.postOnAnimation(messagesScroll) {
-                            programmaticScroll = false
-                            followBottom = true
-                        }
-                    }
-                }
+            bottomScrollScheduled = false
+            val child = messagesScroll.getChildAt(0)
+            if (child == null) return@post
+            val targetY = max(0, child.bottom - messagesScroll.height)
+            if (targetY == lastBottomTargetY && abs(messagesScroll.scrollY - targetY) <= dp(1)) {
+                followBottom = true
+                return@post
             }
+            lastBottomTargetY = targetY
+            programmaticScroll = true
+            if (animated) {
+                messagesScroll.smoothScrollTo(0, targetY)
+            } else {
+                messagesScroll.scrollTo(0, targetY)
+            }
+            followBottom = true
+            mainHandler.postDelayed({
+                programmaticScroll = false
+                followBottom = true
+            }, scrollTrackFrameMs)
         }
     }
 
@@ -1638,10 +1643,10 @@ class MainActivity : AppCompatActivity() {
         programmaticScroll = true
         messagesScroll.scrollTo(0, targetY)
         followBottom = true
-        ViewCompat.postOnAnimation(messagesScroll) {
+        mainHandler.postDelayed({
             programmaticScroll = false
             followBottom = true
-        }
+        }, scrollTrackFrameMs)
     }
 
     private fun animateIn(view: View) {
@@ -1780,7 +1785,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 if (!isSending) {
                     state.currentId = session.id
-                    renderMessageLimit = 80
+                    renderMessageLimit = defaultRenderMessageLimit
                     repository.save(state)
                     renderAll()
                     setSidebarVisible(false)
@@ -2663,10 +2668,10 @@ class MainActivity : AppCompatActivity() {
         val wantsBold = style and Typeface.BOLD != 0
         val wantsItalic = style and Typeface.ITALIC != 0
         return when {
-            wantsBold && wantsItalic -> readingBoldItalicTypeface
-            wantsBold -> readingBoldTypeface
-            wantsItalic -> readingItalicTypeface
-            else -> readingRegularTypeface
+            wantsBold && wantsItalic -> Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC)
+            wantsBold -> Typeface.DEFAULT_BOLD
+            wantsItalic -> Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+            else -> Typeface.DEFAULT
         }
     }
 
@@ -2770,6 +2775,7 @@ class MainActivity : AppCompatActivity() {
         var contentRevealCarry: Float = 0f,
         var thinkingRevealCarry: Float = 0f,
         var lastUiCommitAt: Long = 0L,
+        var lastFadeInvalidateAt: Long = 0L,
         var contentPrefixValid: Boolean = true,
         var thinkingPrefixValid: Boolean = true,
         var releaseScanStart: Int = -1,
