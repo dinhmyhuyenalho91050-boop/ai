@@ -1,13 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AI Chat</string>
-    <string name="app_title">AI Chat</string>
-    <string name="app_version">v9.3</string>
-    <string name="action_sessions">对话列表</string>
-    <string name="action_settings">设置</string>
-    <string name="action_send">发送</string>
-    <string name="action_new_chat">新建</string>
-    <string name="model_gpt">GPT-4</string>
-    <string name="model_deepseek">DeepSeek</string>
-    <string name="input_hint">输入消息后点击右侧“发送”</string>
 </resources>
