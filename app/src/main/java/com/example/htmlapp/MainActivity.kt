@@ -120,12 +120,14 @@ class MainActivity : AppCompatActivity() {
     private val loadOlderMessageBatch = 40
     private var renderMessageLimit = defaultRenderMessageLimit
     private val scrollTrackFrameMs = 96L
-    private val streamFrameMs = 120L
-    private val streamDetachedFrameMs = 120L
     private val streamDetachedVisibleFrameMs = 50L
-    private val streamLineFlushChars = 120
+    private val streamOffscreenUiFrameMs = 1000L
+    private val streamOffscreenFlushChars = 360
+    private val streamLineFlushChars = 360
     private val streamThinkingFlushChars = 480
-    private val streamMaxWaitMs = 240L
+    private val streamSlowFlushMs = 120L
+    private val streamSlowFlushChars = 12
+    private val streamFastFlushMs = 520L
     private val streamRevealFrameMs = 50L
     private val streamRevealTouchFrameMs = 120L
     private val streamUiCommitFrameMs = 50L
@@ -630,7 +632,6 @@ class MainActivity : AppCompatActivity() {
                     latestThinking = thinking
                     latestDisplayContent = mergeContinuationContent(continuationPrefill, content)
                     val now = android.os.SystemClock.uptimeMillis()
-                    val frameMs = if (followBottom) streamFrameMs else streamDetachedFrameMs
                     val contentDelta = (latestDisplayContent.length - renderedContentLength).coerceAtLeast(0)
                     val thinkingDelta = (latestThinking.length - renderedThinkingLength).coerceAtLeast(0)
                     val contentStart = renderedContentLength.coerceIn(0, latestDisplayContent.length)
@@ -639,7 +640,9 @@ class MainActivity : AppCompatActivity() {
                         latestThinking.indexOf('\n', thinkingStart) >= 0
                     val hasLineChunk = contentDelta >= streamLineFlushChars ||
                         thinkingDelta >= streamThinkingFlushChars
-                    val waitedLongEnough = now - lastFrameAt >= min(frameMs, streamMaxWaitMs)
+                    val smallDelta = contentDelta <= streamSlowFlushChars && thinkingDelta <= streamThinkingFlushChars / 4
+                    val flushMs = if (smallDelta) streamSlowFlushMs else streamFastFlushMs
+                    val waitedLongEnough = now - lastFrameAt >= flushMs
                     if ((hasLineBreak || hasLineChunk || waitedLongEnough) &&
                         uiUpdatePosted.compareAndSet(false, true)
                     ) {
@@ -1148,6 +1151,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun displayContent(message: ChatMessage): String {
+        if (isLiveAssistant(message)) {
+            val target = streamTargets[message.id]
+            if (target != null && (target.visibleContentLength > 0 || target.targetContent.isNotEmpty())) {
+                return target.visibleContent
+            }
+        }
         return if (message.role == "assistant" && message.content.isBlank() && isSending) "正在思考..." else message.content
     }
 
@@ -1600,7 +1609,7 @@ class MainActivity : AppCompatActivity() {
             target.unreleasedContentSince = target.lastTargetUpdateAt
         }
         target.finishWhenCaught = target.finishWhenCaught || finishWhenCaught
-        if (isStreamTargetVisible(message.id) || (finishWhenCaught && message.id in messageStreamBodyViews)) {
+        if (isStreamTargetVisible(message.id) || isStreamTargetBound(message.id)) {
             scheduleStreamAnimator()
         }
     }
@@ -1646,8 +1655,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun streamAnimatorDelayMs(): Long {
         if (userTouchingMessages) return streamRevealTouchFrameMs
-        if (!followBottom && streamTargets.values.any { isStreamTargetVisible(it.message.id) }) {
-            return streamDetachedVisibleFrameMs
+        val hasVisibleTarget = streamTargets.values.any { isStreamTargetVisible(it.message.id) }
+        if (hasVisibleTarget) {
+            return if (followBottom) streamRevealFrameMs else streamDetachedVisibleFrameMs
+        }
+        if (streamTargets.values.any { isStreamTargetBound(it.message.id) }) {
+            return streamOffscreenUiFrameMs
         }
         return streamRevealFrameMs
     }
@@ -1658,16 +1671,45 @@ class MainActivity : AppCompatActivity() {
         val iterator = streamTargets.entries.iterator()
         while (iterator.hasNext()) {
             val target = iterator.next().value
+            refreshContentReleaseEnd(target)
+            val elapsedMs = revealElapsedMs(target, now)
+            val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
+            val contentStepLimit = streamContentMaxCharsPerTick
             val targetVisible = isStreamTargetVisible(target.message.id)
             if (!targetVisible) {
-                if (target.finishWhenCaught && messageStreamBodyViews[target.message.id] == null) {
+                val targetBound = isStreamTargetBound(target.message.id)
+                if (targetBound && shouldCommitOffscreenStreamFrame(target, now)) {
+                    val nextContentLength = if (target.contentPrefixValid) {
+                        advanceVisibleLength(target.visibleContentLength, contentEnd, contentStepLimit)
+                    } else {
+                        contentEnd
+                    }
+                    commitStreamFrame(
+                        target,
+                        now,
+                        nextContentLength,
+                        target.targetThinking.length,
+                        streaming = !target.finishWhenCaught
+                    )
+                    target.lastOffscreenUiCommitAt = now
+                    val caughtUp = nextContentLength == target.targetContent.length &&
+                        target.visibleThinkingLength == target.targetThinking.length
+                    if (caughtUp && target.finishWhenCaught) {
+                        iterator.remove()
+                        messageStreamSegments.remove(target.message.id)
+                    } else if (target.targetContent.length > target.visibleContentLength ||
+                        target.targetThinking.length > target.visibleThinkingLength
+                    ) {
+                        needsNextFrame = true
+                    }
+                } else if (target.finishWhenCaught && !targetBound) {
                     iterator.remove()
                     messageStreamSegments.remove(target.message.id)
+                } else if (targetBound) {
+                    needsNextFrame = true
                 }
                 continue
             }
-            refreshContentReleaseEnd(target)
-            val elapsedMs = revealElapsedMs(target, now)
             val thinkingExpanded = target.message.id in messageThinkingExpanded
             val thinkingInterval = if (thinkingExpanded) streamExpandedThinkingFrameMs else streamCollapsedThinkingFrameMs
             val thinkingDue = target.finishWhenCaught ||
@@ -1684,14 +1726,8 @@ class MainActivity : AppCompatActivity() {
                 RevealBudget(0, target.thinkingRevealCarry)
             }
             target.thinkingRevealCarry = thinkingBudget.carry
-            val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
             val nextContentLength = if (target.contentPrefixValid) {
-                val step = if (target.visibleContentLength < contentEnd) {
-                    (contentEnd - target.visibleContentLength).coerceAtMost(streamContentMaxCharsPerTick)
-                } else {
-                    0
-                }
-                advanceVisibleLength(target.visibleContentLength, contentEnd, step)
+                advanceVisibleLength(target.visibleContentLength, contentEnd, contentStepLimit)
             } else {
                 contentEnd
             }
@@ -1703,21 +1739,9 @@ class MainActivity : AppCompatActivity() {
             val contentChanged = nextContentLength != target.visibleContentLength || !target.contentPrefixValid
             val thinkingChanged = nextThinkingLength != target.visibleThinkingLength || !target.thinkingPrefixValid
             val changed = contentChanged || thinkingChanged
-            target.visibleContentLength = nextContentLength
-            target.visibleThinkingLength = nextThinkingLength
             if (changed) {
                 if (shouldCommitStreamFrame(target, now, contentChanged, thinkingChanged, nextContentLength, nextThinkingLength)) {
-                    val nextContent = target.targetContent.prefixAt(nextContentLength)
-                    val nextThinking = target.targetThinking.prefixAt(nextThinkingLength)
-                    target.visibleContent = nextContent
-                    target.visibleThinking = nextThinking
-                    target.contentPrefixValid = true
-                    target.thinkingPrefixValid = true
-                    target.lastUiCommitAt = now
-                    target.lastRevealAt = now
-                    if (thinkingChanged) target.lastThinkingUiCommitAt = now
-                    val display = target.message.copy(content = nextContent, thinking = nextThinking)
-                    updateMessageViews(display, streaming = true)
+                    commitStreamFrame(target, now, nextContentLength, nextThinkingLength, streaming = true)
                 } else {
                     needsNextFrame = true
                 }
@@ -1732,6 +1756,29 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (needsNextFrame) scheduleStreamAnimator()
+    }
+
+    private fun commitStreamFrame(
+        target: StreamRenderTarget,
+        now: Long,
+        nextContentLength: Int,
+        nextThinkingLength: Int,
+        streaming: Boolean
+    ) {
+        val nextContent = target.targetContent.prefixAt(nextContentLength)
+        val nextThinking = target.targetThinking.prefixAt(nextThinkingLength)
+        val thinkingChanged = nextThinkingLength != target.visibleThinkingLength
+        target.visibleContentLength = nextContentLength
+        target.visibleThinkingLength = nextThinkingLength
+        target.visibleContent = nextContent
+        target.visibleThinking = nextThinking
+        target.contentPrefixValid = true
+        target.thinkingPrefixValid = true
+        target.lastUiCommitAt = now
+        target.lastRevealAt = now
+        if (thinkingChanged) target.lastThinkingUiCommitAt = now
+        val display = target.message.copy(content = nextContent, thinking = nextThinking)
+        updateMessageViews(display, streaming = streaming, final = !streaming)
     }
 
     private fun refreshContentReleaseEnd(target: StreamRenderTarget) {
@@ -1813,6 +1860,16 @@ class MainActivity : AppCompatActivity() {
             else -> streamUiCommitFrameMs
         }
         return now - target.lastUiCommitAt >= minInterval
+    }
+
+    private fun shouldCommitOffscreenStreamFrame(target: StreamRenderTarget, now: Long): Boolean {
+        if (target.finishWhenCaught) return true
+        val contentDelta = (target.targetContent.length - target.visibleContentLength).coerceAtLeast(0)
+        val thinkingDelta = (target.targetThinking.length - target.visibleThinkingLength).coerceAtLeast(0)
+        if (contentDelta == 0 && thinkingDelta == 0) return false
+        if (target.lastOffscreenUiCommitAt == 0L) return true
+        if (contentDelta >= streamOffscreenFlushChars || thinkingDelta >= streamThinkingFlushChars) return true
+        return now - target.lastOffscreenUiCommitAt >= streamOffscreenUiFrameMs
     }
 
     private fun advanceVisibleLength(current: Int, targetEnd: Int, maxChars: Int): Int {
@@ -1982,6 +2039,11 @@ class MainActivity : AppCompatActivity() {
         if (!host.getGlobalVisibleRect(hostRect)) return false
         if (!messagesScroll.getGlobalVisibleRect(listRect)) return false
         return hostRect.intersect(listRect) && hostRect.height() > dp(2)
+    }
+
+    private fun isStreamTargetBound(messageId: String): Boolean {
+        val host = messageStreamBodyViews[messageId]?.host ?: return false
+        return ViewCompat.isAttachedToWindow(host)
     }
 
     private fun restoreScrollAnchorSoon(anchor: ScrollAnchor) {
@@ -3351,10 +3413,10 @@ class MainActivity : AppCompatActivity() {
         var lastTickAt: Long = 0L,
         var contentReleaseEnd: Int = 0,
         var unreleasedContentSince: Long = 0L,
-        var contentRevealCarry: Float = 0f,
         var thinkingRevealCarry: Float = 0f,
         var lastUiCommitAt: Long = 0L,
         var lastThinkingUiCommitAt: Long = 0L,
+        var lastOffscreenUiCommitAt: Long = 0L,
         var contentPrefixValid: Boolean = true,
         var thinkingPrefixValid: Boolean = true,
         var releaseScanStart: Int = -1,
