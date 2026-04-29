@@ -127,7 +127,7 @@ class MainActivity : AppCompatActivity() {
     private val streamRevealFrameMs = 50L
     private val streamRevealTouchFrameMs = 120L
     private val streamUiCommitFrameMs = 50L
-    private val streamContentCharsPerTick = 1
+    private val streamContentMaxCharsPerTick = 2048
     private val streamCollapsedThinkingFrameMs = 500L
     private val streamExpandedThinkingFrameMs = 120L
     private val streamThinkingCharsPerSecond = 240f
@@ -202,6 +202,7 @@ class MainActivity : AppCompatActivity() {
                     followBottom = isNearBottom()
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    if (!programmaticScroll) followBottom = isNearBottom()
                     scheduleScrollTracking()
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
@@ -228,6 +229,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                if (!programmaticScroll) followBottom = isNearBottom()
                 scheduleScrollTracking()
             }
         })
@@ -1142,9 +1144,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateMessageViews(message: ChatMessage, streaming: Boolean = false, final: Boolean = false) {
-        val stick = !userTouchingMessages && (followBottom || isNearBottom())
+        val stick = !userTouchingMessages && isNearBottom()
+        followBottom = stick
+        val anchor = if ((streaming || final) && !stick && !userTouchingMessages) captureScrollAnchor() else null
         updateBodyText(message, streaming, final)
         updateThinkingPanel(message)
+        anchor?.let { restoreScrollAnchorSoon(it) }
         if (stick) {
             if (streaming) scrollToBottomDuringStream() else scrollToBottomSoon()
         }
@@ -1611,7 +1616,11 @@ class MainActivity : AppCompatActivity() {
             target.thinkingRevealCarry = thinkingBudget.carry
             val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
             val nextContentLength = if (target.contentPrefixValid) {
-                val step = if (target.visibleContentLength < contentEnd) streamContentCharsPerTick else 0
+                val step = if (target.visibleContentLength < contentEnd) {
+                    (contentEnd - target.visibleContentLength).coerceAtMost(streamContentMaxCharsPerTick)
+                } else {
+                    0
+                }
                 advanceVisibleLength(target.visibleContentLength, contentEnd, step)
             } else {
                 contentEnd
@@ -1884,6 +1893,21 @@ class MainActivity : AppCompatActivity() {
         return remainingScrollToBottom() <= dp(60)
     }
 
+    private fun captureScrollAnchor(): ScrollAnchor? {
+        val position = messagesLayoutManager.findFirstVisibleItemPosition()
+        if (position == RecyclerView.NO_POSITION) return null
+        val view = messagesLayoutManager.findViewByPosition(position) ?: return null
+        return ScrollAnchor(position, view.top - messagesScroll.paddingTop)
+    }
+
+    private fun restoreScrollAnchorSoon(anchor: ScrollAnchor) {
+        messagesScroll.post {
+            if (userTouchingMessages || followBottom || isNearBottom()) return@post
+            keepProgrammaticScrollActive()
+            messagesLayoutManager.scrollToPositionWithOffset(anchor.position, anchor.offset)
+        }
+    }
+
     private fun scrollToBottomSoon(animated: Boolean = false) {
         if (userTouchingMessages) return
         if (bottomScrollScheduled) return
@@ -1930,6 +1954,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun scrollToBottomDuringStream() {
+        if (!followBottom) return
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastStreamBottomScrollAt < streamBottomScrollFrameMs) return
         lastStreamBottomScrollAt = now
@@ -1948,7 +1973,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 programmaticScrollReleaseScheduled = false
                 programmaticScroll = false
-                followBottom = true
+                followBottom = isNearBottom()
             }
         }
         mainHandler.postDelayed({ releaseWhenQuiet() }, scrollTrackFrameMs)
@@ -3061,6 +3086,11 @@ class MainActivity : AppCompatActivity() {
         val name: FieldRef,
         val pattern: FieldRef,
         val replacement: FieldRef
+    )
+
+    private data class ScrollAnchor(
+        val position: Int,
+        val offset: Int
     )
 
     private data class StreamBodyViews(
