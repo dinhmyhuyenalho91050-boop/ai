@@ -128,6 +128,7 @@ class MainActivity : AppCompatActivity() {
     private var editingFloatingButton: TextView? = null
     private var baseMessagesBottomPadding = 0
     private var sendPulseAnimator: ValueAnimator? = null
+    private var editScrollRestoreToken = 0
 
     private val defaultRenderMessageLimit = 80
     private val loadOlderMessageBatch = 40
@@ -2278,6 +2279,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun restoreScrollAnchorAfterEdit(anchor: ScrollAnchor) {
+        val token = ++editScrollRestoreToken
+        val delays = longArrayOf(0L, 80L, 180L, 320L)
+        delays.forEach { delay ->
+            mainHandler.postDelayed({
+                if (token != editScrollRestoreToken || userTouchingMessages) return@postDelayed
+                keepProgrammaticScrollActive()
+                followBottom = false
+                messagesLayoutManager.scrollToPositionWithOffset(anchor.position, anchor.offset)
+                streamLiveModeNow = isWithinLiveStreamDistance()
+            }, delay)
+        }
+    }
+
     private fun scrollMessageToTopSoon(messageId: String) {
         if (userTouchingMessages) return
         messagesScroll.post {
@@ -2455,18 +2470,20 @@ class MainActivity : AppCompatActivity() {
         }
         editingMessageEditor?.let { editingMessageDraft = it.text.toString() }
         val anchor = captureScrollAnchor()
+        followBottom = false
         editingMessageId = message.id
         editingMessageDraft = message.content
         editingMessageEditor = null
         setEditingFloatingButtonVisible(true)
         renderMessages(scrollToBottom = false)
-        anchor?.let { restoreScrollAnchorSoon(it) }
+        anchor?.let { restoreScrollAnchorAfterEdit(it) }
     }
 
     private fun finishEditingMessage() {
         val id = editingMessageId ?: return
         val text = editingMessageEditor?.text?.toString() ?: editingMessageDraft
         val anchor = captureScrollAnchor()
+        followBottom = false
         state.activeSession()?.history?.firstOrNull { it.id == id }?.content = text
         editingMessageId = null
         editingMessageDraft = ""
@@ -2476,7 +2493,7 @@ class MainActivity : AppCompatActivity() {
         repository.save(state)
         setEditingFloatingButtonVisible(false)
         renderMessages(scrollToBottom = false)
-        anchor?.let { restoreScrollAnchorSoon(it) }
+        anchor?.let { restoreScrollAnchorAfterEdit(it) }
         renderSessions()
     }
 
