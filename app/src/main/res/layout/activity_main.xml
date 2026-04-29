@@ -76,25 +76,17 @@
             android:layout_height="0dp"
             android:layout_weight="1">
 
-            <ScrollView
+            <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/messages_scroll"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:clipToPadding="false"
-                android:fillViewport="true"
                 android:overScrollMode="never"
                 android:paddingStart="8dp"
                 android:paddingTop="14dp"
                 android:paddingEnd="8dp"
                 android:paddingBottom="18dp"
-                android:scrollbars="none">
-
-                <LinearLayout
-                    android:id="@+id/messages_container"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical" />
-            </ScrollView>
+                android:scrollbars="none" />
         </FrameLayout>
 
         <LinearLayout

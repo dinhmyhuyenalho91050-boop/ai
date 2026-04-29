@@ -7,8 +7,10 @@ import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
+import android.graphics.Paint
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
@@ -20,6 +22,7 @@ import android.text.Layout
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.StaticLayout
+import android.text.TextPaint
 import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.MotionEvent
@@ -51,6 +54,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.doOnLayout
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.ArrayDeque
@@ -63,8 +68,9 @@ import kotlin.math.min
 class MainActivity : AppCompatActivity() {
 
     private lateinit var root: FrameLayout
-    private lateinit var messagesScroll: ScrollView
-    private lateinit var messagesContainer: LinearLayout
+    private lateinit var messagesScroll: RecyclerView
+    private lateinit var messagesLayoutManager: LinearLayoutManager
+    private lateinit var messagesAdapter: MessageAdapter
     private lateinit var inputMessage: EditText
     private lateinit var sendButton: TextView
     private lateinit var backdrop: View
@@ -122,13 +128,13 @@ class MainActivity : AppCompatActivity() {
     private val streamRevealTouchFrameMs = 120L
     private val streamUiCommitFrameMs = 50L
     private val streamContentCharsPerTick = 1
-    private val streamCollapsedThinkingFrameMs = 600L
+    private val streamCollapsedThinkingFrameMs = 500L
     private val streamExpandedThinkingFrameMs = 120L
     private val streamThinkingCharsPerSecond = 240f
     private val streamMaxThinkingCharsPerFrame = 64
-    private val streamTailTargetChars = 420
-    private val streamTailMaxChars = 760
-    private val streamFrozenPrefixMinChars = 360
+    private val streamTailTargetChars = 96
+    private val streamTailMaxChars = 220
+    private val streamFrozenPrefixMinChars = 120
     private val streamBottomScrollFrameMs = 40L
     private val scrollTouchCooldownMs = 280L
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
@@ -208,10 +214,24 @@ class MainActivity : AppCompatActivity() {
             }
             false
         }
-        messagesScroll.setOnScrollChangeListener { _, _, _, _, _ ->
-            scheduleScrollTracking()
-        }
-        messagesContainer.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, oldBottom ->
+        messagesScroll.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                userTouchingMessages = newState == RecyclerView.SCROLL_STATE_DRAGGING ||
+                    newState == RecyclerView.SCROLL_STATE_SETTLING
+                if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                    val token = ++messageTouchToken
+                    followBottom = isNearBottom()
+                    mainHandler.postDelayed({
+                        if (token == messageTouchToken) userTouchingMessages = false
+                    }, scrollTouchCooldownMs)
+                }
+            }
+
+            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                scheduleScrollTracking()
+            }
+        })
+        messagesScroll.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, oldBottom ->
             if (streamBodyHeightAnimationTokens.isEmpty() && followBottom && !userTouchingMessages && bottom != oldBottom) {
                 scrollToBottomNow()
             }
@@ -232,7 +252,15 @@ class MainActivity : AppCompatActivity() {
     private fun bindViews() {
         root = findViewById(R.id.root_container)
         messagesScroll = findViewById(R.id.messages_scroll)
-        messagesContainer = findViewById(R.id.messages_container)
+        messagesLayoutManager = LinearLayoutManager(this).apply {
+            orientation = RecyclerView.VERTICAL
+            stackFromEnd = true
+        }
+        messagesAdapter = MessageAdapter()
+        messagesScroll.layoutManager = messagesLayoutManager
+        messagesScroll.adapter = messagesAdapter
+        messagesScroll.itemAnimator = null
+        messagesScroll.setHasFixedSize(false)
         inputMessage = findViewById(R.id.input_message)
         sendButton = findViewById(R.id.btn_send)
         backdrop = findViewById(R.id.backdrop)
@@ -842,19 +870,9 @@ class MainActivity : AppCompatActivity() {
         messageRenderedContent.clear()
         messageRenderedThinking.clear()
         messageStreamSegments.clear()
-        messagesContainer.removeAllViews()
         val session = state.ensureSession()
         val startIndex = max(0, session.history.size - renderMessageLimit)
-        if (startIndex > 0) {
-            messagesContainer.addView(loadOlderHint(startIndex))
-        }
-        session.history.drop(startIndex).forEachIndexed { offset, message ->
-            val card = messageCard(message, startIndex + offset + 1)
-            messagesContainer.addView(card)
-            if (scrollToBottom && offset >= session.history.size - startIndex - 2) {
-                animateIn(card)
-            }
-        }
+        messagesAdapter.submit(session.history.drop(startIndex), startIndex, startIndex)
         if (scrollToBottom) {
             scrollToBottomSoon(animated = false)
         }
@@ -876,6 +894,85 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(12) }
+        }
+    }
+
+    private fun clearMessageViewBindings(messageId: String) {
+        streamBodyHeightAnimators.remove(messageId)?.cancel()
+        streamBodyHeightAnimationTokens.remove(messageId)
+        streamBodyHeightTargets.remove(messageId)
+        streamBodyMeasureStates.remove(messageId)
+        messageStreamBodyViews.remove(messageId)
+        messageThinkingViews.remove(messageId)
+        messageThinkingContainers.remove(messageId)
+        messageThinkingSummaries.remove(messageId)
+        messageRenderedContent.remove(messageId)
+        messageRenderedThinking.remove(messageId)
+    }
+
+    private inner class MessageAdapter : RecyclerView.Adapter<MessageAdapter.MessageHolder>() {
+        private val viewTypeLoadMore = 1
+        private val viewTypeMessage = 2
+        private val visibleMessages = mutableListOf<ChatMessage>()
+        private var hiddenCount = 0
+        private var visibleStartIndex = 0
+
+        fun submit(messages: List<ChatMessage>, startIndex: Int, hidden: Int) {
+            visibleMessages.clear()
+            visibleMessages.addAll(messages)
+            visibleStartIndex = startIndex
+            hiddenCount = hidden
+            notifyDataSetChanged()
+        }
+
+        override fun getItemViewType(position: Int): Int {
+            return if (hiddenCount > 0 && position == 0) viewTypeLoadMore else viewTypeMessage
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): MessageHolder {
+            return MessageHolder(FrameLayout(parent.context).apply {
+                layoutParams = RecyclerView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            })
+        }
+
+        override fun onBindViewHolder(holder: MessageHolder, position: Int) {
+            holder.boundMessageId?.let(::clearMessageViewBindings)
+            holder.boundMessageId = null
+            holder.container.removeAllViews()
+            if (getItemViewType(position) == viewTypeLoadMore) {
+                holder.container.addView(loadOlderHint(hiddenCount).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = dp(12) }
+                })
+                return
+            }
+            val messageIndex = position - if (hiddenCount > 0) 1 else 0
+            val message = visibleMessages.getOrNull(messageIndex) ?: return
+            holder.boundMessageId = message.id
+            holder.container.addView(messageCard(message, visibleStartIndex + messageIndex + 1).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(16) }
+            })
+        }
+
+        override fun onViewRecycled(holder: MessageHolder) {
+            holder.boundMessageId?.let(::clearMessageViewBindings)
+            holder.boundMessageId = null
+            holder.container.removeAllViews()
+            super.onViewRecycled(holder)
+        }
+
+        override fun getItemCount(): Int = visibleMessages.size + if (hiddenCount > 0) 1 else 0
+
+        inner class MessageHolder(val container: FrameLayout) : RecyclerView.ViewHolder(container) {
+            var boundMessageId: String? = null
         }
     }
 
@@ -925,7 +1022,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
         val prefix = messageBodyTextView()
-        val tail = messageBodyTextView()
+        val tail = streamTailView()
         host.addView(prefix)
         host.addView(tail)
         val views = StreamBodyViews(host, prefix, tail)
@@ -935,7 +1032,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             prefix.text = formatMessageText(content)
             prefix.visibility = if (content.isEmpty()) View.GONE else View.VISIBLE
-            tail.text = ""
+            tail.clearText()
             tail.visibility = View.GONE
         }
         messageRenderedContent[message.id] = content
@@ -951,6 +1048,21 @@ class MainActivity : AppCompatActivity() {
             setLineSpacing(dp(4).toFloat(), 1.04f)
             breakStrategy = Layout.BREAK_STRATEGY_SIMPLE
             hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+    }
+
+    private fun streamTailView(): StreamTailView {
+        return StreamTailView(this).apply {
+            setTextColorValue(color(R.color.chat_fg))
+            setTextSizePxValue(16f * resources.displayMetrics.scaledDensity)
+            typeface = systemTypeface()
+            includeFontPadding = true
+            lineSpacingExtra = dp(4).toFloat()
+            lineSpacingMultiplier = 1.04f
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1058,7 +1170,7 @@ class MainActivity : AppCompatActivity() {
             stopStreamingBodyHeightAnimation(message.id, views.host)
             views.prefix.text = formatMessageText(content)
             views.prefix.visibility = if (content.isEmpty()) View.GONE else View.VISIBLE
-            views.tail.text = ""
+            views.tail.clearText()
             views.tail.visibility = View.GONE
             messageRenderedContent[message.id] = content
         }
@@ -1113,16 +1225,24 @@ class MainActivity : AppCompatActivity() {
             segment.frozenRawLength = nextFreezeEnd
             segment.tailFormatter = newStreamFormatter()
             segment.tailRaw = ""
+        } else if (segment.prefixRaw.isNotEmpty() &&
+            (views.prefix.visibility != View.VISIBLE || views.prefix.text.isEmpty())
+        ) {
+            views.prefix.text = formatMessageText(segment.prefixRaw)
+            views.prefix.visibility = View.VISIBLE
         } else if (segment.prefixRaw.isEmpty() && views.prefix.visibility != View.GONE) {
             views.prefix.text = ""
             views.prefix.visibility = View.GONE
         }
 
         val tailRaw = rawContent.substring(segment.frozenRawLength.coerceIn(0, rawContent.length))
-        if (tailRaw != segment.tailRaw || tailRaw.isEmpty() && views.tail.text.isNotEmpty()) {
+        if (tailRaw != segment.tailRaw ||
+            tailRaw.isEmpty() && !views.tail.isTextEmpty() ||
+            tailRaw.isNotEmpty() && views.tail.isTextEmpty()
+        ) {
             val formatter = segment.tailFormatter ?: newStreamFormatter().also { segment.tailFormatter = it }
             val renderedTail = formatter.render(tailRaw).text
-            views.tail.setText(renderedTail, TextView.BufferType.SPANNABLE)
+            views.tail.setStreamText(renderedTail)
             views.tail.visibility = if (tailRaw.isEmpty()) View.GONE else View.VISIBLE
             segment.tailRaw = tailRaw
         }
@@ -1132,12 +1252,23 @@ class MainActivity : AppCompatActivity() {
         if (text.length - frozenEnd <= streamTailMaxChars) return frozenEnd
         val scanEnd = (text.length - streamTailTargetChars).coerceAtLeast(frozenEnd)
         var boundary = frozenEnd
-        var index = frozenEnd.coerceAtLeast(0)
+        var fallback = frozenEnd
+        var mode = StreamMode.PLAIN
+        var index = 0
         while (index < scanEnd) {
-            if (text[index] == '\n') {
+            val ch = text[index]
+            mode = nextStreamMode(mode, ch)
+            if (index + 1 > frozenEnd &&
+                index + 1 >= streamFrozenPrefixMinChars &&
+                mode == StreamMode.PLAIN
+            ) {
+                if (ch.isWhitespace()) fallback = index + 1
+                if (isStreamFreezeChar(ch)) boundary = index + 1
+            }
+            if (ch == '\n') {
                 var end = index + 1
                 while (end < scanEnd && text[end] == '\n') end += 1
-                if (end >= streamFrozenPrefixMinChars && isPlainFormatBoundary(text, end)) {
+                if (end > frozenEnd && end >= streamFrozenPrefixMinChars && mode == StreamMode.PLAIN) {
                     boundary = end
                 }
                 index = end
@@ -1145,27 +1276,33 @@ class MainActivity : AppCompatActivity() {
                 index += 1
             }
         }
-        return boundary
+        if (boundary > frozenEnd) return boundary
+        if (fallback > frozenEnd && text.length - frozenEnd > streamTailMaxChars * 2) return fallback
+        return frozenEnd
     }
 
-    private fun isPlainFormatBoundary(text: String, end: Int): Boolean {
-        var mode = StreamMode.PLAIN
-        var index = 0
-        val limit = end.coerceIn(0, text.length)
-        while (index < limit) {
-            val ch = text[index]
-            mode = when {
-                mode == StreamMode.PLAIN && (ch == '"' || ch == '\uFF02') -> StreamMode.DOUBLE_QUOTE
-                mode == StreamMode.DOUBLE_QUOTE && (ch == '"' || ch == '\uFF02' || ch == '\u201C' || ch == '\u201D') -> StreamMode.PLAIN
-                mode == StreamMode.PLAIN && ch == '\u201C' -> StreamMode.CHINESE_QUOTE
-                mode == StreamMode.CHINESE_QUOTE && (ch == '\u201D' || ch == '"' || ch == '\uFF02' || ch == '\u201C') -> StreamMode.PLAIN
-                mode == StreamMode.PLAIN && (ch == '*' || ch == '\uFF0A') -> StreamMode.STAR
-                mode == StreamMode.STAR && (ch == '*' || ch == '\uFF0A') -> StreamMode.PLAIN
-                else -> mode
-            }
-            index += 1
+    private fun nextStreamMode(mode: StreamMode, ch: Char): StreamMode {
+        return when {
+            mode == StreamMode.PLAIN && (ch == '"' || ch == '\uFF02') -> StreamMode.DOUBLE_QUOTE
+            mode == StreamMode.DOUBLE_QUOTE && (ch == '"' || ch == '\uFF02' || ch == '\u201C' || ch == '\u201D') -> StreamMode.PLAIN
+            mode == StreamMode.PLAIN && ch == '\u201C' -> StreamMode.CHINESE_QUOTE
+            mode == StreamMode.CHINESE_QUOTE && (ch == '\u201D' || ch == '"' || ch == '\uFF02' || ch == '\u201C') -> StreamMode.PLAIN
+            mode == StreamMode.PLAIN && (ch == '*' || ch == '\uFF0A') -> StreamMode.STAR
+            mode == StreamMode.STAR && (ch == '*' || ch == '\uFF0A') -> StreamMode.PLAIN
+            else -> mode
         }
-        return mode == StreamMode.PLAIN
+    }
+
+    private fun isStreamFreezeChar(ch: Char): Boolean {
+        return ch == '\n' ||
+            ch == '.' ||
+            ch == '!' ||
+            ch == '?' ||
+            ch == ';' ||
+            ch == '\u3002' ||
+            ch == '\uFF01' ||
+            ch == '\uFF1F' ||
+            ch == '\uFF1B'
     }
 
     private fun currentBodyHeight(body: View): Int {
@@ -1199,13 +1336,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun resetSegmentLineEstimate(state: StreamBodyMeasureState, views: StreamBodyViews, width: Int) {
         val contentWidth = (width - views.host.paddingLeft - views.host.paddingRight).coerceAtLeast(dp(80))
-        val averageCharWidth = views.tail.paint.measureText("\u4E2D").coerceAtLeast(1f)
+        val averageCharWidth = views.prefix.paint.measureText("\u4E2D").coerceAtLeast(1f)
         state.width = width
         state.textLength = 0
         state.estimatedLines = 1
         state.lineUnits = 0f
         state.unitsPerLine = (contentWidth / averageCharWidth).coerceAtLeast(4f)
-        state.lineHeight = views.tail.lineHeight.coerceAtLeast(1)
+        state.lineHeight = views.prefix.lineHeight.coerceAtLeast(1)
         state.baseHeight = views.host.paddingTop + views.host.paddingBottom + dp(3)
         state.targetHeight = state.baseHeight + state.lineHeight
     }
@@ -1744,9 +1881,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isNearBottom(): Boolean {
-        val child = messagesScroll.getChildAt(0) ?: return true
-        val distance = child.bottom - (messagesScroll.scrollY + messagesScroll.height)
-        return distance <= dp(60)
+        return remainingScrollToBottom() <= dp(60)
     }
 
     private fun scrollToBottomSoon(animated: Boolean = false) {
@@ -1755,19 +1890,9 @@ class MainActivity : AppCompatActivity() {
         bottomScrollScheduled = true
         messagesScroll.post {
             bottomScrollScheduled = false
-            val child = messagesScroll.getChildAt(0)
-            if (child == null) return@post
-            val targetY = max(0, child.bottom - messagesScroll.height)
-            if (targetY == lastBottomTargetY && abs(messagesScroll.scrollY - targetY) <= dp(1)) {
+            if (scrollRemainingToBottom(animated)) {
                 followBottom = true
                 return@post
-            }
-            lastBottomTargetY = targetY
-            keepProgrammaticScrollActive()
-            if (animated) {
-                messagesScroll.smoothScrollTo(0, targetY)
-            } else {
-                messagesScroll.scrollTo(0, targetY)
             }
             followBottom = true
         }
@@ -1775,16 +1900,33 @@ class MainActivity : AppCompatActivity() {
 
     private fun scrollToBottomNow() {
         if (userTouchingMessages) return
-        val child = messagesScroll.getChildAt(0) ?: return
-        val targetY = max(0, child.bottom - messagesScroll.height)
-        if (targetY == lastBottomTargetY && abs(messagesScroll.scrollY - targetY) <= dp(1)) {
-            followBottom = true
-            return
-        }
-        lastBottomTargetY = targetY
-        keepProgrammaticScrollActive()
-        messagesScroll.scrollTo(0, targetY)
+        scrollRemainingToBottom(animated = false)
         followBottom = true
+    }
+
+    private fun scrollRemainingToBottom(animated: Boolean): Boolean {
+        if (messagesAdapter.itemCount == 0) return false
+        val distance = remainingScrollToBottom()
+        if (distance <= dp(1)) return true
+        if (distance == lastBottomTargetY && abs(distance) <= dp(1)) return true
+        lastBottomTargetY = distance
+        keepProgrammaticScrollActive()
+        if (messagesScroll.computeVerticalScrollRange() <= messagesScroll.height) {
+            messagesLayoutManager.scrollToPositionWithOffset(messagesAdapter.itemCount - 1, 0)
+        } else if (animated) {
+            messagesScroll.smoothScrollBy(0, distance)
+        } else {
+            messagesScroll.scrollBy(0, distance)
+        }
+        return true
+    }
+
+    private fun remainingScrollToBottom(): Int {
+        val range = messagesScroll.computeVerticalScrollRange()
+        val extent = messagesScroll.computeVerticalScrollExtent()
+        val offset = messagesScroll.computeVerticalScrollOffset()
+        if (range <= 0 || extent <= 0) return 0
+        return (range - extent - offset).coerceAtLeast(0)
     }
 
     private fun scrollToBottomDuringStream() {
@@ -2924,7 +3066,7 @@ class MainActivity : AppCompatActivity() {
     private data class StreamBodyViews(
         val host: LinearLayout,
         val prefix: TextView,
-        val tail: TextView
+        val tail: StreamTailView
     )
 
     private data class StreamTextSegmentState(
@@ -2938,6 +3080,129 @@ class MainActivity : AppCompatActivity() {
             prefixRaw = ""
             tailRaw = ""
             tailFormatter = null
+        }
+    }
+
+    private class StreamTailView(context: Context) : View(context) {
+        private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
+        private var streamText: CharSequence = ""
+        private var cachedLayout: StaticLayout? = null
+        private var cachedLayoutWidth = -1
+
+        init {
+            textPaint.density = resources.displayMetrics.density
+        }
+
+        var typeface: Typeface?
+            get() = textPaint.typeface
+            set(value) {
+                textPaint.typeface = value
+                invalidateLayout()
+            }
+
+        var includeFontPadding: Boolean = true
+            set(value) {
+                if (field == value) return
+                field = value
+                invalidateLayout()
+            }
+
+        var lineSpacingExtra: Float = 0f
+            set(value) {
+                if (field == value) return
+                field = value
+                invalidateLayout()
+            }
+
+        var lineSpacingMultiplier: Float = 1f
+            set(value) {
+                if (field == value) return
+                field = value
+                invalidateLayout()
+            }
+
+        fun setTextColorValue(@ColorInt color: Int) {
+            if (textPaint.color == color) return
+            textPaint.color = color
+            invalidate()
+        }
+
+        fun setTextSizePxValue(sizePx: Float) {
+            if (textPaint.textSize == sizePx) return
+            textPaint.textSize = sizePx
+            invalidateLayout()
+        }
+
+        fun clearText() {
+            setStreamText("")
+        }
+
+        fun isTextEmpty(): Boolean = streamText.isEmpty()
+
+        fun setStreamText(value: CharSequence) {
+            streamText = SpannableStringBuilder(value)
+            val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(0)
+            if (contentWidth <= 0) {
+                invalidateLayout()
+                return
+            }
+            val oldHeight = cachedLayout?.height ?: 0
+            val nextLayout = buildLayout(contentWidth)
+            cachedLayout = nextLayout
+            cachedLayoutWidth = contentWidth
+            if (nextLayout.height != oldHeight) {
+                requestLayout()
+            }
+            invalidate()
+        }
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val width = View.MeasureSpec.getSize(widthMeasureSpec)
+            val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
+            val layout = layoutForWidth(contentWidth)
+            val desiredHeight = paddingTop + layout.height + paddingBottom
+            setMeasuredDimension(
+                resolveSize(width, widthMeasureSpec),
+                resolveSize(if (streamText.isEmpty()) 0 else desiredHeight, heightMeasureSpec)
+            )
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            if (streamText.isEmpty()) return
+            val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
+            val layout = layoutForWidth(contentWidth)
+            canvas.save()
+            canvas.translate(paddingLeft.toFloat(), paddingTop.toFloat())
+            layout.draw(canvas)
+            canvas.restore()
+        }
+
+        private fun layoutForWidth(width: Int): StaticLayout {
+            cachedLayout?.let {
+                if (cachedLayoutWidth == width) return it
+            }
+            val layout = buildLayout(width)
+            cachedLayout = layout
+            cachedLayoutWidth = width
+            return layout
+        }
+
+        private fun buildLayout(width: Int): StaticLayout {
+            return StaticLayout.Builder.obtain(streamText, 0, streamText.length, textPaint, width)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setLineSpacing(lineSpacingExtra, lineSpacingMultiplier)
+                .setIncludePad(includeFontPadding)
+                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+                .build()
+        }
+
+        private fun invalidateLayout() {
+            cachedLayout = null
+            cachedLayoutWidth = -1
+            requestLayout()
+            invalidate()
         }
     }
 
