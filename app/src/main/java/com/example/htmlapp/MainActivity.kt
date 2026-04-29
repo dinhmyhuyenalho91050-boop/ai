@@ -126,11 +126,11 @@ class MainActivity : AppCompatActivity() {
     private val streamThrottledUiFrameMs = 900L
     private val streamLineFlushChars = 600
     private val streamThinkingFlushChars = 480
-    private val streamLiveFlushMs = 0L
+    private val streamLiveFlushMs = 48L
     private val streamFastFlushMs = 900L
-    private val streamRevealFrameMs = 0L
+    private val streamRevealFrameMs = 16L
     private val streamRevealTouchFrameMs = 120L
-    private val streamUiCommitFrameMs = 0L
+    private val streamUiCommitFrameMs = 48L
     private val streamContentMaxCharsPerTick = 2048
     private val streamCollapsedThinkingFrameMs = 500L
     private val streamExpandedThinkingFrameMs = 120L
