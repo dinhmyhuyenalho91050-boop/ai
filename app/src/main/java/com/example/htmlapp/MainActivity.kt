@@ -2698,7 +2698,7 @@ class MainActivity : AppCompatActivity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = rounded(
-                if (selected) Color.argb(56, 96, 165, 250) else Color.argb(154, 21, 25, 33),
+                if (selected) Color.argb(42, 96, 165, 250) else color(R.color.chat_card),
                 dp(8),
                 dp(1),
                 if (selected) color(R.color.chat_accent_blue) else color(R.color.chat_border)
@@ -2710,7 +2710,7 @@ class MainActivity : AppCompatActivity() {
             ).apply { bottomMargin = dp(8) }
             addView(TextView(context).apply {
                 text = preset.name.ifBlank { key }
-                setTextColor(if (selected) color(R.color.chat_accent_blue) else Color.WHITE)
+                setTextColor(if (selected) color(R.color.chat_accent_blue) else color(R.color.chat_fg))
                 textSize = 13f
                 typeface = systemTypeface(Typeface.BOLD)
                 includeFontPadding = false
