@@ -1,15 +1,16 @@
-# AI Chat Android Native
+# AI Chat Android Wrapper
 
-An Android native remake of the AI Chat front-end. The app now renders the chat page with Android views instead of loading the bundled HTML through a WebView.
+An Android app that packages a bundled AI chat web app inside a full-screen WebView shell.
+
+The HTML client lives in `app/src/main/assets/index.html` and is loaded through `WebViewAssetLoader`, so the UI ships inside the APK while still being able to call external AI APIs over the network.
 
 ## What This Project Includes
 
-- Edge-to-edge immersive Android chat screen
-- Native header, session drawer, model selector, message cards, composer, settings dialog, and data layer
-- Keyboard-aware layout through Android window insets and `adjustResize`
-- Native API calls for OpenAI-compatible providers, DeepSeek, Kimi, Anthropic, Gemini, and Gemini proxy
-- Native file-backed chat/session/preset storage plus JSON backup import/export
-- A native app surface matching the original `AI Chat v9.3` web UI
+- Edge-to-edge Android WebView container with immersive system bar handling
+- Keyboard-aware layout and IME insets support
+- Bundled HTML chat UI with local storage support
+- Native bridge for file picking and backup export
+- Background and foreground lifecycle syncing between Android and the web app
 - GitHub Actions workflow that builds a release APK
 
 ## Project Structure
@@ -20,7 +21,7 @@ An Android native remake of the AI Chat front-end. The app now renders the chat 
 |-- app/
 |   |-- build.gradle.kts
 |   `-- src/main/
-|       |-- assets/index.html        # Original web UI kept as reference
+|       |-- assets/index.html
 |       |-- java/com/example/htmlapp/MainActivity.kt
 |       |-- res/
 |       `-- AndroidManifest.xml
@@ -33,23 +34,21 @@ An Android native remake of the AI Chat front-end. The app now renders the chat 
 
 - Kotlin
 - Android SDK 34
-- Native Android Views
-- AndroidX AppCompat, Activity, and Core
-- Material Components theme
+- Android WebView
+- AndroidX AppCompat, Activity, Lifecycle, WebKit
+- Material Components
 - OkHttp
 
 ## App Behavior
 
-`MainActivity` builds the native AI Chat page:
+`MainActivity` hosts the web app in a single `WebView` and configures:
 
-- The top bar shows `AI Chat`, version, session list, and settings actions.
-- The session drawer opens natively and mirrors the original side panel.
-- The bottom composer includes the model tabs, multi-line input, and send button.
-- Sending text persists the user message, calls the selected model provider from Kotlin, and stores the assistant reply.
-- The settings dialog recreates the original model preset, prompt, and backup tabs as native controls.
-- Backup import/export writes Android-native JSON files compatible with the original `version: 9.3` format.
-
-Advanced web-only helpers such as complex multi-step runner editing remain represented in the backup schema so later native UI expansion can load existing data without losing it.
+- JavaScript, DOM storage, database storage, and mixed content support
+- `WebViewAssetLoader` for loading local app assets from `appassets.androidplatform.net`
+- file chooser support for uploads from the HTML app
+- a JavaScript bridge named `HtmlAppNative`
+- backup export to Downloads on supported Android versions
+- visibility and streaming state coordination so the WebView behaves better in background/foreground transitions
 
 ## Requirements
 
@@ -92,8 +91,27 @@ AI_CHAT_KEY_PASSWORD
 
 GitHub Actions restores `AI_CHAT_KEYSTORE_BASE64` from repository secrets and signs the uploaded release APK with that stable key. CI release builds require the signing secrets so every uploaded APK keeps the same certificate and can update an existing install. Release builds no longer fall back to debug signing; local development builds can still use `assembleDebug`.
 
+## Continuous Integration
+
+GitHub Actions builds the release APK on pushes and pull requests targeting `main` or `work`.
+
+Workflow file:
+
+- `.github/workflows/android.yml`
+
+Uploaded artifact:
+
+- `release-apk`
+
 ## Notes
 
 - The app currently uses `com.example.htmlapp` as its package namespace and application ID.
-- `app/src/main/assets/index.html` is retained only as the source UI reference for this migration stage.
-- Cleartext traffic is still enabled through `network_security_config.xml` for the later API integration stage.
+- Cleartext traffic is enabled through `network_security_config.xml`.
+- The chat UI title in the bundled HTML currently identifies itself as `AI Chat v9.3`.
+
+## Next Improvements
+
+1. Replace the placeholder package name and app ID with a production identifier.
+2. Add a Gradle wrapper so local builds are easier and more reproducible.
+3. Document required API configuration for the bundled chat client.
+4. Add screenshots and release installation steps to this README.
