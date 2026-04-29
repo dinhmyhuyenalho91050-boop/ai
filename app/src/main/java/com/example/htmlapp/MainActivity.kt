@@ -1,301 +1,410 @@
 package com.example.htmlapp
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
-import android.app.Activity
-import android.content.ActivityNotFoundException
-import android.content.ContentValues
+import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Context
-import android.content.Intent
-import android.content.res.Configuration
-import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
-import android.net.Uri
-import android.os.Build
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
-import android.provider.MediaStore
-import android.content.pm.PackageManager
-import android.util.Log
+import android.text.Editable
+import android.text.InputType
+import android.text.Layout
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.StaticLayout
+import android.text.TextPaint
+import android.text.TextWatcher
+import android.text.TextUtils
+import android.text.style.ForegroundColorSpan
+import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
+import android.view.Window
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.view.animation.PathInterpolator
 import android.webkit.JavascriptInterface
-import android.webkit.ValueCallback
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.widget.ArrayAdapter
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.Space
+import android.widget.Spinner
+import android.widget.TextView
 import android.widget.Toast
-import android.view.inputmethod.InputMethodManager
 import androidx.activity.addCallback
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.RequiresApi
+import androidx.annotation.ColorInt
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
-import androidx.webkit.WebSettingsCompat
-import androidx.webkit.WebViewAssetLoader
-import androidx.webkit.WebViewFeature
-import java.io.File
-import java.io.FileOutputStream
-import java.lang.ref.WeakReference
+import androidx.core.view.doOnLayout
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.ArrayDeque
 import java.util.Locale
-import java.util.UUID
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 import kotlin.math.max
-import kotlin.text.Charsets
+import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var webView: WebView
-    private lateinit var assetLoader: WebViewAssetLoader
-    private lateinit var downloadBridge: DownloadBridge
-    private var filePathCallback: ValueCallback<Array<Uri>>? = null
-    private lateinit var fileChooserLauncher: ActivityResultLauncher<android.content.Intent>
-    private var isAppInForeground = true
-    private var isStreaming = false
-    private var lastVisibilityState: String? = null
-    private var isPageReady = false
-    private var pendingVisibilityState: String? = null
-    private val appVisibilityObserver = object : DefaultLifecycleObserver {
-        override fun onStart(owner: LifecycleOwner) {
-            handleAppVisibility(true)
-        }
+    private lateinit var root: FrameLayout
+    private lateinit var messagesScroll: RecyclerView
+    private lateinit var messagesLayoutManager: LinearLayoutManager
+    private lateinit var messagesAdapter: MessageAdapter
+    private lateinit var inputMessage: EditText
+    private lateinit var sendButton: TextView
+    private lateinit var composer: View
+    private lateinit var backdrop: View
+    private lateinit var sidebar: LinearLayout
+    private lateinit var sessionList: LinearLayout
+    private lateinit var modelTabs: List<TextView>
+    private lateinit var sidebarModelTabs: List<TextView>
+    private lateinit var repository: NativeChatRepository
+    private lateinit var state: NativeChatState
+    private lateinit var importLauncher: ActivityResultLauncher<Array<String>>
 
-        override fun onStop(owner: LifecycleOwner) {
-            handleAppVisibility(false)
-        }
-    }
+    private val aiClient = NativeAiClient()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val messageStreamBodyViews = mutableMapOf<String, StreamBodyViews>()
+    private val messageThinkingViews = mutableMapOf<String, TextView>()
+    private val messageThinkingContainers = mutableMapOf<String, View>()
+    private val messageThinkingSummaries = mutableMapOf<String, TextView>()
+    private val messageRenderedContent = mutableMapOf<String, String>()
+    private val messageRenderedThinking = mutableMapOf<String, String>()
+    private val messageStreamSegments = mutableMapOf<String, StreamTextSegmentState>()
+    private val streamBodyHeightAnimationTokens = mutableMapOf<String, Int>()
+    private val streamBodyHeightAnimators = mutableMapOf<String, ValueAnimator>()
+    private val streamBodyHeightTargets = mutableMapOf<String, Int>()
+    private val streamBodyMeasureStates = mutableMapOf<String, StreamBodyMeasureState>()
+    private val streamTargets = mutableMapOf<String, StreamRenderTarget>()
+    private val messageThinkingExpanded = mutableSetOf<String>()
+    private val stoppedAssistantIds = mutableSetOf<String>()
+    private var activeAssistantId: String? = null
+    private var isSending = false
+    private var pendingImportReplace = false
+    @Volatile private var followBottom = true
+    private var bottomScrollScheduled = false
+    private var scrollTrackScheduled = false
+    private var streamAnimatorScheduled = false
+    @Volatile private var streamLiveModeNow = false
+    @Volatile private var streamThrottledModeNow = false
+    private var userTouchingMessages = false
+    private var messageTouchToken = 0
+    private var programmaticScroll = false
+    private var programmaticScrollReleaseScheduled = false
+    private var programmaticScrollReleaseAt = 0L
+    private var lastBottomTargetY = -1
+    private var lastStreamBottomScrollAt = 0L
+    private var settingsCompact = false
+    private var streamHeightAnimationSeed = 0
+    private var editingMessageId: String? = null
+    private var editingMessageDraft: String = ""
+    private var editingMessageEditor: EditText? = null
+    private var editingFloatingButton: TextView? = null
+    private var baseMessagesBottomPadding = 0
+    private var editScrollRestoreToken = 0
 
-    @SuppressLint("SetJavaScriptEnabled")
+    private val defaultRenderMessageLimit = 80
+    private val loadOlderMessageBatch = 40
+    private var renderMessageLimit = defaultRenderMessageLimit
+    private val scrollTrackFrameMs = 96L
+    private val streamOffscreenUiFrameMs = 1000L
+    private val streamOffscreenFlushChars = 360
+    private val streamThrottledUiFrameMs = 900L
+    private val streamLiveDistanceDp = 240
+    private val streamThrottledDistanceDp = 2400
+    private val streamLineFlushChars = 600
+    private val streamThinkingFlushChars = 480
+    private val streamLiveFlushMs = 48L
+    private val streamFastFlushMs = 900L
+    private val streamRevealFrameMs = 48L
+    private val streamRevealTouchFrameMs = 120L
+    private val streamUiCommitFrameMs = 48L
+    private val streamContentMaxCharsPerTick = 2048
+    private val streamCollapsedThinkingFrameMs = 500L
+    private val streamExpandedThinkingFrameMs = 120L
+    private val streamThinkingCharsPerSecond = 240f
+    private val streamMaxThinkingCharsPerFrame = 64
+    private val streamTailTargetChars = 720
+    private val streamTailMaxChars = 1200
+    private val streamFrozenPrefixMinChars = 700
+    private val streamBottomScrollFrameMs = 16L
+    private var streamBottomFollowScheduled = false
+    private val scrollTouchCooldownMs = 280L
+    private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
+    private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
+    private val streamHeightInterpolator by lazy { PathInterpolator(0.2f, 0f, 0.2f, 1f) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
         setContentView(R.layout.activity_main)
 
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-
-        val root = findViewById<View>(R.id.root_container)
-        webView = findViewById(R.id.webview)
-        isPageReady = false
-
-        fileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            val callback = filePathCallback
-            if (callback == null) {
-                return@registerForActivityResult
-            }
-
-            val data = result.data
-            if (result.resultCode == Activity.RESULT_OK && data != null) {
-                val uris = mutableListOf<Uri>()
-                val clipData = data.clipData
-                if (clipData != null) {
-                    for (i in 0 until clipData.itemCount) {
-                        clipData.getItemAt(i)?.uri?.let { uris.add(it) }
-                    }
-                } else {
-                    data.data?.let { uris.add(it) }
-                }
-                callback.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray())
-            } else {
-                callback.onReceiveValue(null)
-            }
-            filePathCallback = null
-        }
-
-        configureWebView()
-        setupWindowInsets(root)
+        repository = NativeChatRepository(applicationContext)
+        state = repository.load()
+        registerImportLauncher()
+        bindViews()
+        setupEdgeToEdge()
+        setupTitleGradient()
+        setupClicks()
+        applySystemFontTree(root)
+        setupScrollTracking()
         setupBackNavigation()
-        handleAppVisibility(true)
-        notifyWebVisibility("foreground")
-        ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver)
+        renderAll()
+        hideSystemBars()
+        migrateLegacyWebStateIfNeeded()
+    }
 
-        if (savedInstanceState != null) {
-            webView.restoreState(savedInstanceState)
-        } else {
-            val versionToken = getAppVersionToken()
-            webView.loadUrl("https://appassets.androidplatform.net/assets/index.html?v=$versionToken")
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
+    }
+
+    override fun onDestroy() {
+        aiClient.abort()
+        super.onDestroy()
+    }
+
+    private fun registerImportLauncher() {
+        importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null) return@registerForActivityResult
+            runCatching {
+                contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+                    ?: throw IllegalArgumentException("无法读取备份文件")
+            }.onSuccess { text ->
+                runCatching {
+                    repository.importBackup(state, JSONObject(text), pendingImportReplace)
+                    state.ensureSession()
+                    renderAll()
+                    toast("导入成功")
+                }.onFailure { toast("导入失败: ${it.message}") }
+            }.onFailure {
+                toast("读取失败: ${it.message}")
+            }
         }
     }
 
-    private fun getAppVersionToken(): String {
-        return try {
-            val pkgInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
-            } else {
-                @Suppress("DEPRECATION")
-                packageManager.getPackageInfo(packageName, 0)
-            }
-            val version = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                pkgInfo.longVersionCode
-            } else {
-                @Suppress("DEPRECATION")
-                pkgInfo.versionCode.toLong()
-            }
-            version.toString()
-        } catch (_: Throwable) {
-            System.currentTimeMillis().toString()
-        }
-    }
-
-    private fun configureWebView() {
-        webView.setBackgroundColor(Color.TRANSPARENT)
-        assetLoader = WebViewAssetLoader.Builder()
-            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
-            .addPathHandler("/res/", WebViewAssetLoader.ResourcesPathHandler(this))
-            .build()
-
-        val settings = webView.settings
-        with(settings) {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            allowFileAccess = true
-            allowContentAccess = true
-            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            useWideViewPort = true
-            loadWithOverviewMode = true
-            setSupportZoom(false)
-            builtInZoomControls = false
-            displayZoomControls = false
-            offscreenPreRaster = false
-        }
-
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-            WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, true)
-        } else if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
-            @Suppress("DEPRECATION")
-            WebSettingsCompat.setForceDark(settings, WebSettingsCompat.FORCE_DARK_ON)
-        }
-
-        webView.isVerticalScrollBarEnabled = false
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
-                val method = WebView::class.java.getMethod(
-                    "setSafeBrowsingEnabled",
-                    Boolean::class.javaPrimitiveType
-                )
-                method.invoke(null, false)
-            } catch (_: Throwable) {
-            }
-        }
-        downloadBridge = DownloadBridge(this)
-        webView.addJavascriptInterface(downloadBridge, "HtmlAppNative")
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onShowFileChooser(
-                webView: WebView?,
-                filePathCallback: ValueCallback<Array<Uri>>?,
-                fileChooserParams: FileChooserParams?
-            ): Boolean {
-                this@MainActivity.filePathCallback?.onReceiveValue(null)
-                this@MainActivity.filePathCallback = filePathCallback
-
-                val intent = try {
-                    fileChooserParams?.createIntent()
-                        ?: Intent(Intent.ACTION_GET_CONTENT).apply {
-                            type = "*/*"
-                            addCategory(Intent.CATEGORY_OPENABLE)
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupScrollTracking() {
+        messagesScroll.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    messageTouchToken++
+                    userTouchingMessages = true
+                    followBottom = isNearBottom()
+                    updateStreamDistanceModes()
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!programmaticScroll && userTouchingMessages) followBottom = isNearBottom()
+                    updateStreamDistanceModes()
+                    scheduleScrollTracking()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val token = ++messageTouchToken
+                    followBottom = isNearBottom()
+                    updateStreamDistanceModes()
+                    mainHandler.postDelayed({
+                        if (token == messageTouchToken) {
+                            userTouchingMessages = false
+                            if (followBottom || isNearBottom()) {
+                                followBottom = true
+                                streamLiveModeNow = true
+                                streamThrottledModeNow = true
+                                scrollToBottomSoon()
+                            }
+                            scheduleVisibleStreamRefresh()
                         }
-                } catch (e: Exception) {
-                    Intent(Intent.ACTION_GET_CONTENT).apply {
-                        type = "*/*"
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                    }
-                }
-
-                return try {
-                    fileChooserLauncher.launch(intent)
-                    true
-                } catch (e: ActivityNotFoundException) {
-                    this@MainActivity.filePathCallback?.onReceiveValue(null)
-                    this@MainActivity.filePathCallback = null
-                    false
+                    }, scrollTouchCooldownMs)
                 }
             }
+            false
         }
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                isPageReady = false
-                lastVisibilityState = null
-            }
-
-            override fun shouldOverrideUrlLoading(
-                view: WebView,
-                request: WebResourceRequest
-            ): Boolean {
-                if (!request.isForMainFrame) {
-                    return false
-                }
-                val url = request.url
-                val scheme = url.scheme?.lowercase(Locale.ROOT)
-                if (scheme == "http" || scheme == "https") {
-                    return false
-                }
-                return try {
-                    startActivity(Intent(Intent.ACTION_VIEW, url))
-                    true
-                } catch (e: ActivityNotFoundException) {
-                    Log.w("MainActivity", "No activity found to handle $url", e)
-                    false
+        messagesScroll.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                userTouchingMessages = newState == RecyclerView.SCROLL_STATE_DRAGGING ||
+                    newState == RecyclerView.SCROLL_STATE_SETTLING
+                if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                    val token = ++messageTouchToken
+                    followBottom = isNearBottom()
+                    updateStreamDistanceModes()
+                    scheduleVisibleStreamRefresh()
+                    mainHandler.postDelayed({
+                        if (token == messageTouchToken) {
+                            userTouchingMessages = false
+                            if (followBottom || isNearBottom()) {
+                                followBottom = true
+                                streamLiveModeNow = true
+                                streamThrottledModeNow = true
+                                scrollToBottomSoon()
+                            }
+                            scheduleVisibleStreamRefresh()
+                        }
+                    }, scrollTouchCooldownMs)
                 }
             }
 
-            override fun onPageFinished(view: WebView, url: String?) {
-                super.onPageFinished(view, url)
-                isPageReady = true
-                dispatchPendingVisibility()
-                val lifecycle = ProcessLifecycleOwner.get().lifecycle
-                val state = if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                    "foreground"
-                } else {
-                    "background"
-                }
-                notifyWebVisibility(state)
+            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                if (!programmaticScroll && userTouchingMessages) followBottom = isNearBottom()
+                updateStreamDistanceModes()
+                scheduleVisibleStreamRefresh()
+                scheduleScrollTracking()
             }
-
-            override fun shouldInterceptRequest(
-                view: WebView,
-                request: WebResourceRequest
-            ): WebResourceResponse? {
-                return assetLoader.shouldInterceptRequest(request.url)
+        })
+        messagesScroll.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, oldBottom ->
+            if (streamBodyHeightAnimationTokens.isEmpty() && followBottom && !userTouchingMessages && bottom != oldBottom) {
+                scrollToBottomNow()
             }
         }
     }
 
-    private fun setupWindowInsets(root: View) {
-        val controller = WindowInsetsControllerCompat(window, root)
-        controller.systemBarsBehavior =
-            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller.hide(WindowInsetsCompat.Type.systemBars())
+    private fun scheduleScrollTracking() {
+        if (programmaticScroll || scrollTrackScheduled) return
+        scrollTrackScheduled = true
+        mainHandler.postDelayed({
+            scrollTrackScheduled = false
+            if (!programmaticScroll && userTouchingMessages) {
+                followBottom = isNearBottom()
+                updateStreamDistanceModes()
+            }
+        }, scrollTrackFrameMs)
+    }
 
-        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+    private fun scheduleVisibleStreamRefresh() {
+        if (streamTargets.isNotEmpty() && shouldUpdateBoundStreamTarget()) scheduleStreamAnimator()
+    }
+
+    private fun bindViews() {
+        root = findViewById(R.id.root_container)
+        messagesScroll = findViewById(R.id.messages_scroll)
+        messagesLayoutManager = LinearLayoutManager(this).apply {
+            orientation = RecyclerView.VERTICAL
+            stackFromEnd = false
+        }
+        messagesAdapter = MessageAdapter()
+        messagesScroll.layoutManager = messagesLayoutManager
+        messagesScroll.adapter = messagesAdapter
+        messagesScroll.itemAnimator = null
+        messagesScroll.setHasFixedSize(false)
+        inputMessage = findViewById(R.id.input_message)
+        sendButton = findViewById(R.id.btn_send)
+        composer = findViewById(R.id.composer)
+        backdrop = findViewById(R.id.backdrop)
+        sidebar = findViewById(R.id.sidebar)
+        sessionList = findViewById(R.id.session_list)
+        modelTabs = listOf(findViewById(R.id.model_gpt), findViewById(R.id.model_deepseek))
+        sidebarModelTabs = listOf(
+            findViewById(R.id.sidebar_model_gpt),
+            findViewById(R.id.sidebar_model_deepseek)
+        )
+        inputMessage.includeFontPadding = true
+        inputMessage.setLineSpacing(dp(3).toFloat(), 1.04f)
+        inputMessage.breakStrategy = Layout.BREAK_STRATEGY_SIMPLE
+        inputMessage.hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
+        baseMessagesBottomPadding = messagesScroll.paddingBottom
+    }
+
+    private fun setupEdgeToEdge() {
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
-            v.setPadding(
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            view.setPadding(
                 systemBars.left,
                 systemBars.top,
                 systemBars.right,
-                max(systemBars.bottom, imeInsets.bottom)
+                max(systemBars.bottom, ime.bottom)
             )
+            if (followBottom) scrollToBottomSoon()
             insets
+        }
+    }
+
+    private fun setupTitleGradient() {
+        val title = findViewById<TextView>(R.id.title_text)
+        title.doOnLayout {
+            title.paint.shader = LinearGradient(
+                0f,
+                0f,
+                title.width.toFloat(),
+                title.height.toFloat(),
+                intArrayOf(color(R.color.chat_accent_blue), color(R.color.chat_accent)),
+                null,
+                Shader.TileMode.CLAMP
+            )
+            title.invalidate()
+        }
+    }
+
+    private fun setupClicks() {
+        findViewById<TextView>(R.id.btn_sessions).setOnClickListener { setSidebarVisible(true) }
+        findViewById<TextView>(R.id.btn_settings).setOnClickListener { showSettingsDialog() }
+        findViewById<TextView>(R.id.btn_new_chat).setOnClickListener { showPromptSelector() }
+        backdrop.setOnClickListener { setSidebarVisible(false) }
+        sendButton.setOnClickListener {
+            if (isSending) {
+                animateSendAction()
+                stopSending()
+            } else {
+                submitMessage()
+            }
+        }
+
+        (modelTabs + sidebarModelTabs).forEachIndexed { absoluteIndex, tab ->
+            tab.setOnClickListener {
+                val index = absoluteIndex % modelTabs.size
+                val enabled = state.enabledPresets()
+                if (index < enabled.size) {
+                    state.currentModelIndex = index
+                    repository.save(state)
+                    renderModelTabs()
+                    renderSessions()
+                }
+            }
+        }
+
+        inputMessage.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEND) {
+                submitMessage()
+                true
+            } else {
+                false
+            }
         }
     }
 
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this) {
-            if (this@MainActivity::webView.isInitialized && webView.canGoBack()) {
-                webView.goBack()
+            if (editingMessageId != null) {
+                finishEditingMessage()
+            } else if (sidebar.visibility == View.VISIBLE) {
+                setSidebarVisible(false)
             } else {
                 isEnabled = false
                 onBackPressedDispatcher.onBackPressed()
@@ -303,314 +412,3718 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        val root = findViewById<View>(R.id.root_container)
-        setupWindowInsets(root)
-        if (this::webView.isInitialized) {
-            webView.postInvalidate()
-        }
+    private fun hideSystemBars() {
+        val controller = WindowCompat.getInsetsController(window, root)
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.systemBars())
     }
 
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            val root = findViewById<View>(R.id.root_container)
-            WindowInsetsControllerCompat(window, root).let {
-                it.systemBarsBehavior =
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                it.hide(WindowInsetsCompat.Type.systemBars())
-            }
-            refreshWebViewInputConnection()
-        }
-    }
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun migrateLegacyWebStateIfNeeded() {
+        val prefs = getSharedPreferences("native-chat", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("legacy_web_migrated", false)) return
+        if (!looksLikeFreshNativeState()) return
 
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        if (this::webView.isInitialized) {
-            webView.saveState(outState)
+        val webView = WebView(this).apply {
+            visibility = View.GONE
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.databaseEnabled = true
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         }
-    }
+        root.addView(webView, FrameLayout.LayoutParams(1, 1))
 
-    override fun onDestroy() {
-        if (this::webView.isInitialized) {
-            webView.apply {
-                loadUrl("about:blank")
-                stopLoading()
-                clearHistory()
-                removeAllViews()
-                destroy()
+        fun finishMigration() {
+            prefs.edit().putBoolean("legacy_web_migrated", true).apply()
+            runCatching {
+                root.removeView(webView)
+                webView.removeAllViews()
+                webView.destroy()
             }
         }
-        if (this::downloadBridge.isInitialized) {
-            downloadBridge.dispose()
-        }
-        ProcessLifecycleOwner.get().lifecycle.removeObserver(appVisibilityObserver)
-        super.onDestroy()
+
+        mainHandler.postDelayed({
+            if (webView.parent != null) finishMigration()
+        }, 8000)
+
+        webView.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun onData(jsonText: String) {
+                mainHandler.post {
+                    runCatching {
+                        val data = JSONObject(jsonText)
+                        if (hasLegacyPayload(data)) {
+                            repository.importBackup(state, data, replace = true)
+                            state.ensureSession()
+                            renderAll()
+                            toast("已迁移旧版 Web 数据")
+                        }
+                    }.onFailure {
+                        toast("旧版数据迁移失败: ${it.message}")
+                    }
+                    finishMigration()
+                }
+            }
+
+            @JavascriptInterface
+            fun onError(message: String) {
+                mainHandler.post {
+                    if (message.isNotBlank()) {
+                        toast("旧版数据迁移跳过: $message")
+                    }
+                    finishMigration()
+                }
+            }
+        }, "NativeMigrationBridge")
+
+        webView.loadDataWithBaseURL(
+            "https://appassets.androidplatform.net/assets/native-migration.html",
+            legacyMigrationHtml(),
+            "text/html",
+            "UTF-8",
+            null
+        )
     }
 
-    private fun notifyWebVisibility(state: String) {
-        if (!this::webView.isInitialized) return
-        pendingVisibilityState = state
-        if (!isPageReady) {
-            return
-        }
-        dispatchVisibilityState(state)
+    private fun looksLikeFreshNativeState(): Boolean {
+        val promptFresh = state.promptPresets.keys == setOf("default")
+        val modelFresh = state.modelPresets.size == 2 &&
+            state.modelPresets.all { it.config.key.isBlank() } &&
+            state.modelPresets.map { it.name }.containsAll(listOf("GPT-4", "DeepSeek"))
+        val sessionFresh = state.sessions.size <= 1 && state.sessions.values.all { it.history.isEmpty() }
+        return promptFresh && modelFresh && sessionFresh
     }
 
-    private fun dispatchVisibilityState(state: String) {
-        if (!this::webView.isInitialized) return
-        if (state == lastVisibilityState) {
+    private fun hasLegacyPayload(data: JSONObject): Boolean {
+        val models = data.optJSONArray("modelPresets")
+        val prompts = data.optJSONObject("promptPresets")
+        val sessions = data.optJSONObject("sessions")
+        return (models != null && models.length() > 0) ||
+            (prompts != null && prompts.length() > 0) ||
+            (sessions != null && sessions.length() > 0)
+    }
+
+    private fun legacyMigrationHtml(): String {
+        return """
+            <!doctype html><meta charset="utf-8">
+            <script>
+            (async function(){
+              const keys={
+                modelPresets:'chat.modelPresets',
+                promptPresets:'chat.promptPresets',
+                sessions:'chat.sessions',
+                currentId:'chat.currentId',
+                sessionIndex:'chat.sessions.index',
+                sessionPrefix:'chat.session.'
+              };
+              function openDb(){
+                return new Promise(function(resolve,reject){
+                  const req=indexedDB.open('chatAppDB',1);
+                  req.onerror=function(){ reject(req.error||new Error('open indexedDB failed')); };
+                  req.onsuccess=function(){ resolve(req.result); };
+                  req.onupgradeneeded=function(e){
+                    const db=e.target.result;
+                    if(!db.objectStoreNames.contains('chatData'))db.createObjectStore('chatData');
+                  };
+                });
+              }
+              const db=await openDb();
+              function get(key,fallback){
+                return new Promise(function(resolve){
+                  try{
+                    const tx=db.transaction(['chatData'],'readonly');
+                    const store=tx.objectStore('chatData');
+                    const req=store.get(key);
+                    req.onsuccess=function(){ resolve(req.result===undefined?fallback:req.result); };
+                    req.onerror=function(){ resolve(fallback); };
+                  }catch(e){ resolve(fallback); }
+                });
+              }
+              const modelPresets=await get(keys.modelPresets,null);
+              const promptPresets=await get(keys.promptPresets,null);
+              const currentId=await get(keys.currentId,null);
+              let sessions={};
+              const index=await get(keys.sessionIndex,null);
+              if(Array.isArray(index)&&index.length){
+                for(const id of index){
+                  const session=await get(keys.sessionPrefix+id,undefined);
+                  if(session!==undefined)sessions[id]=session;
+                }
+              }else{
+                sessions=await get(keys.sessions,{})||{};
+              }
+              NativeMigrationBridge.onData(JSON.stringify({
+                version:'9.3',
+                timestamp:Date.now(),
+                modelPresets:modelPresets,
+                promptPresets:promptPresets,
+                sessions:sessions,
+                currentId:currentId
+              }));
+            })().catch(function(error){
+              NativeMigrationBridge.onError(error&&error.message?error.message:String(error));
+            });
+            </script>
+        """.trimIndent()
+    }
+
+    private fun renderAll() {
+        state.ensureSession()
+        renderModelTabs()
+        renderMessages(scrollToBottom = true)
+        renderSessions()
+        setSendingUi(isSending)
+    }
+
+    private fun setSidebarVisible(visible: Boolean) {
+        val sidebarWidth = if (sidebar.width > 0) sidebar.width.toFloat() else dp(320).toFloat()
+        if (visible) {
+            backdrop.alpha = 0f
+            backdrop.visibility = View.VISIBLE
+            sidebar.translationX = -sidebarWidth
+            sidebar.alpha = 0.96f
+            sidebar.visibility = View.VISIBLE
+            backdrop.animate().alpha(1f).setDuration(360).setInterpolator(softInterpolator).start()
+            sidebar.animate()
+                .alpha(1f)
+                .translationX(0f)
+                .setDuration(480)
+                .setInterpolator(entranceInterpolator)
+                .start()
+        } else {
+            backdrop.animate().alpha(0f).setDuration(320).setInterpolator(softInterpolator).withEndAction {
+                backdrop.visibility = View.GONE
+            }.start()
+            sidebar.animate()
+                .alpha(0.96f)
+                .translationX(-sidebarWidth)
+                .setDuration(380)
+                .setInterpolator(softInterpolator)
+                .withEndAction { sidebar.visibility = View.GONE }
+                .start()
+        }
+    }
+
+    private fun renderModelTabs() {
+        val enabled = state.enabledPresets().take(2)
+        state.currentModelIndex = state.currentModelIndex.coerceIn(0, max(0, enabled.size - 1))
+        listOf(modelTabs, sidebarModelTabs).forEach { tabs ->
+            tabs.forEachIndexed { index, tab ->
+                val preset = enabled.getOrNull(index)
+                tab.visibility = if (preset == null) View.INVISIBLE else View.VISIBLE
+                tab.text = preset?.name ?: ""
+                val selected = index == state.currentModelIndex
+                tab.setTextColor(if (selected) Color.WHITE else color(R.color.chat_muted))
+                tab.background = if (selected) rounded(color(R.color.chat_accent_blue), dp(6)) else null
+            }
+        }
+    }
+
+    private fun submitMessage() {
+        if (isSending) return
+        val text = inputMessage.text.toString().trim()
+        val session = state.ensureSession()
+        val preset = state.currentPreset()
+        session.modelName = preset?.name ?: session.modelName
+        val last = session.history.lastOrNull()
+        if (text.isEmpty()) {
+            when (last?.role) {
+                "user" -> {
+                    animateSendAction()
+                    followBottom = true
+                    requestAssistant()
+                }
+                "assistant" -> {
+                    animateSendAction()
+                    followBottom = true
+                    requestAssistant(continueMessage = last)
+                }
+            }
             return
         }
-        lastVisibilityState = state
-        webView.post {
-            webView.evaluateJavascript(
-                "window.__setNativeVisibility && window.__setNativeVisibility('$state');",
-                null
+        animateSendAction()
+        session.history.add(ChatMessage(role = "user", content = text, modelName = preset?.name.orEmpty()))
+        followBottom = true
+        inputMessage.setText("")
+        repository.save(state)
+        renderMessages(scrollToBottom = true)
+        renderSessions()
+        requestAssistant()
+    }
+
+    private fun requestAssistant(continueMessage: ChatMessage? = null) {
+        val session = state.activeSession() ?: return
+        val preset = state.currentPreset()
+        val assistant = continueMessage ?: ChatMessage(role = "assistant", content = "", modelName = preset?.name.orEmpty()).also {
+            session.history.add(it)
+        }
+        val continuationPrefill = continueMessage?.content.orEmpty()
+        val promptForRegex = state.promptFor(session).copy()
+        assistant.modelName = preset?.name.orEmpty()
+        followBottom = true
+        activeAssistantId = assistant.id
+        repository.save(state)
+        setSendingUi(true)
+        renderMessages(scrollToBottom = true)
+
+        Thread {
+            var lastFrameAt = 0L
+            var latestContent = ""
+            var latestThinking = ""
+            var latestDisplayContent = continuationPrefill
+            var renderedContentLength = continuationPrefill.length
+            var renderedThinkingLength = assistant.thinking.length
+            val uiUpdatePosted = AtomicBoolean(false)
+            runCatching {
+                aiClient.send(state, session, continuationPrefill.takeIf { it.isNotBlank() }) { content, thinking ->
+                    latestContent = content
+                    latestThinking = thinking
+                    latestDisplayContent = mergeContinuationContent(continuationPrefill, content)
+                    val now = android.os.SystemClock.uptimeMillis()
+                    val contentDelta = (latestDisplayContent.length - renderedContentLength).coerceAtLeast(0)
+                    val thinkingDelta = (latestThinking.length - renderedThinkingLength).coerceAtLeast(0)
+                    val contentStart = renderedContentLength.coerceIn(0, latestDisplayContent.length)
+                    val thinkingStart = renderedThinkingLength.coerceIn(0, latestThinking.length)
+                    val hasLineBreak = latestDisplayContent.indexOf('\n', contentStart) >= 0 ||
+                        latestThinking.indexOf('\n', thinkingStart) >= 0
+                    val hasLineChunk = contentDelta >= streamLineFlushChars ||
+                        thinkingDelta >= streamThinkingFlushChars
+                    val liveDisplay = streamLiveModeNow || followBottom
+                    val flushMs = if (liveDisplay) streamLiveFlushMs else streamFastFlushMs
+                    val waitedLongEnough = now - lastFrameAt >= flushMs
+                    val boundaryFlush = liveDisplay && hasLineBreak
+                    if ((boundaryFlush || hasLineChunk || waitedLongEnough) &&
+                        uiUpdatePosted.compareAndSet(false, true)
+                    ) {
+                        lastFrameAt = now
+                        mainHandler.post {
+                            uiUpdatePosted.set(false)
+                            assistant.content = latestDisplayContent
+                            assistant.thinking = latestThinking
+                            renderedContentLength = assistant.content.length
+                            renderedThinkingLength = assistant.thinking.length
+                            updateStreamTarget(assistant, latestDisplayContent, latestThinking)
+                        }
+                }
+            }
+            }.onSuccess { result ->
+                val finalContent = applyPromptRegex(
+                    mergeContinuationContent(continuationPrefill, result.content),
+                    promptForRegex
+                )
+                mainHandler.post {
+                    stoppedAssistantIds.remove(assistant.id)
+                    if (activeAssistantId == assistant.id) activeAssistantId = null
+                    assistant.content = finalContent
+                    assistant.thinking = result.thinking
+                    repository.save(state)
+                    setSendingUi(false)
+                    if (preset?.config?.stream == true || streamTargets.containsKey(assistant.id)) {
+                        updateStreamTarget(assistant, assistant.content, assistant.thinking, finishWhenCaught = true)
+                    } else {
+                        updateMessageViews(
+                            assistant,
+                            final = true,
+                            revealFromTopWhenStuck = continueMessage == null
+                        )
+                    }
+                    renderSessions()
+                }
+            }.onFailure { error ->
+                mainHandler.post {
+                    val stopped = stoppedAssistantIds.remove(assistant.id)
+                    if (activeAssistantId == assistant.id) activeAssistantId = null
+                    if (stopped) {
+                        val partialContent = latestDisplayContent.ifBlank { assistant.content }
+                        val partialThinking = latestThinking.ifBlank { assistant.thinking }
+                        if (continueMessage == null && partialContent.isBlank() && partialThinking.isBlank()) {
+                            session.history.removeAll { it.id == assistant.id }
+                            repository.save(state)
+                            setSendingUi(false)
+                            renderMessages(scrollToBottom = followBottom)
+                        } else {
+                            assistant.content = applyPromptRegex(partialContent)
+                            assistant.thinking = partialThinking
+                            repository.save(state)
+                            setSendingUi(false)
+                            updateStreamTarget(assistant, assistant.content, assistant.thinking, finishWhenCaught = true)
+                        }
+                    } else {
+                        streamTargets.remove(assistant.id)
+                        val failureText = if (error.message.isNullOrBlank()) "请求失败" else "请求失败: ${error.message}"
+                        if (continueMessage == null) {
+                            assistant.content = failureText
+                            assistant.thinking = ""
+                        } else {
+                            assistant.content = latestDisplayContent.ifBlank { continuationPrefill }
+                            toast(failureText)
+                        }
+                        repository.save(state)
+                        setSendingUi(false)
+                        updateMessageViews(assistant, final = true)
+                    }
+                    renderSessions()
+                }
+            }
+        }.start()
+    }
+
+    private fun mergeContinuationContent(prefix: String, generated: String): String {
+        if (prefix.isBlank()) return generated
+        if (generated.isBlank()) return prefix
+        return if (generated.startsWith(prefix)) generated else prefix + generated
+    }
+
+    private fun stopSending() {
+        activeAssistantId?.let { stoppedAssistantIds.add(it) }
+        aiClient.abort()
+        setSendingUi(false)
+    }
+
+    private fun setSendingUi(sending: Boolean) {
+        isSending = sending
+        sendButton.text = if (sending) "停止" else getString(R.string.action_send)
+        sendButton.background = if (sending) {
+            roundedGradient(color(R.color.chat_danger), Color.rgb(220, 38, 38), dp(8))
+        } else {
+            roundedGradient(color(R.color.chat_accent_blue), Color.rgb(59, 130, 246), dp(8))
+        }
+        if (!sending) {
+            settleSendButton()
+        }
+    }
+
+    private fun animateSendAction() {
+        sendButton.animate().cancel()
+        sendButton.pivotX = sendButton.width / 2f
+        sendButton.pivotY = sendButton.height / 2f
+        sendButton.animate()
+            .scaleX(0.92f)
+            .scaleY(0.92f)
+            .translationY(dp(2).toFloat())
+            .setDuration(110)
+            .setInterpolator(softInterpolator)
+            .withEndAction {
+                sendButton.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .translationY(0f)
+                    .setDuration(240)
+                    .setInterpolator(entranceInterpolator)
+                    .start()
+            }
+            .start()
+    }
+
+    private fun settleSendButton() {
+        sendButton.animate().cancel()
+        sendButton.animate()
+            .scaleX(1f)
+            .scaleY(1f)
+            .translationY(0f)
+            .alpha(1f)
+            .setDuration(180)
+            .setInterpolator(entranceInterpolator)
+            .start()
+    }
+
+    private fun showPromptSelector() {
+        if (isSending) return
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            addView(dialogTitle("选择提示词预设"))
+        }
+        state.promptPresets.keys.sorted().forEach { key ->
+            val preset = state.promptPresets[key] ?: return@forEach
+            list.addView(promptPresetSelectCard(key, preset).apply {
+                setOnClickListener {
+                    dialog.dismiss()
+                    createNewChat(key)
+                }
+            })
+        }
+        list.addView(dialogButton("取消").apply { setOnClickListener { dialog.dismiss() } })
+
+        val scroll = ScrollView(this).apply {
+            addView(list)
+            background = rounded(color(R.color.chat_panel), dp(16), dp(1), color(R.color.chat_border))
+        }
+        dialog.setContentView(scroll)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.setOnShowListener {
+            dialog.window?.setLayout(
+                min(resources.displayMetrics.widthPixels - dp(32), dp(700)),
+                min(resources.displayMetrics.heightPixels - dp(96), dp(620))
+            )
+            scroll.alpha = 0f
+            scroll.scaleX = 0.96f
+            scroll.scaleY = 0.96f
+            scroll.translationY = dp(10).toFloat()
+            scroll.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .translationY(0f)
+                .setDuration(460)
+                .setInterpolator(entranceInterpolator)
+                .start()
+        }
+        dialog.show()
+    }
+
+    private fun promptPresetSelectCard(key: String, preset: PromptPreset): View {
+        val desc = listOf(preset.firstUser, preset.firstAssistant, preset.sysPrompt)
+            .firstOrNull { it.isNotBlank() }
+            ?.take(80)
+            ?: "暂无描述"
+        val rules = runCatching { JSONArray(preset.regexRulesJson).length() }.getOrDefault(0)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(color(R.color.chat_card), dp(12), dp(1), color(R.color.chat_border))
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(12) }
+            addView(TextView(context).apply {
+                text = preset.name.ifBlank { key }
+                setTextColor(color(R.color.chat_fg))
+                textSize = 14f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+            })
+            addView(TextView(context).apply {
+                text = desc
+                setTextColor(color(R.color.chat_muted))
+                textSize = 12f
+                setPadding(0, dp(8), 0, 0)
+            })
+            addView(TextView(context).apply {
+                text = "$rules 个规则"
+                setTextColor(color(R.color.chat_accent_blue))
+                textSize = 11f
+                setPadding(0, dp(8), 0, 0)
+            })
+        }
+    }
+
+    private fun createNewChat(presetKey: String = "default") {
+        if (isSending) return
+        val preset = state.currentPreset()
+        val resolvedKey = if (state.promptPresets.containsKey(presetKey)) presetKey else "default"
+        val prompt = state.promptPresets[resolvedKey] ?: PromptPreset()
+        val session = ChatSession(
+            name = "对话 ${state.sessions.size + 1}",
+            modelName = preset?.name ?: "未知",
+            promptPresetName = resolvedKey
+        )
+        if (prompt.firstAssistant.isNotBlank()) {
+            session.history.add(
+                ChatMessage(
+                    role = "assistant",
+                    content = prompt.firstAssistant,
+                    modelName = preset?.name.orEmpty()
+                )
+            )
+        }
+        state.sessions[session.id] = session
+        state.currentId = session.id
+        renderMessageLimit = defaultRenderMessageLimit
+        repository.save(state)
+        inputMessage.setText("")
+        renderAll()
+        setSidebarVisible(false)
+    }
+
+    private fun renderMessages(scrollToBottom: Boolean = false) {
+        streamBodyHeightAnimators.values.toList().forEach { it.cancel() }
+        streamBodyHeightAnimators.clear()
+        streamBodyHeightAnimationTokens.clear()
+        streamBodyHeightTargets.clear()
+        streamBodyMeasureStates.clear()
+        messageStreamBodyViews.clear()
+        messageThinkingViews.clear()
+        messageThinkingContainers.clear()
+        messageThinkingSummaries.clear()
+        messageRenderedContent.clear()
+        messageRenderedThinking.clear()
+        messageStreamSegments.clear()
+        streamLiveModeNow = false
+        streamThrottledModeNow = false
+        val session = state.ensureSession()
+        messagesAdapter.submit(session.history, startIndex = 0, hidden = 0)
+        if (scrollToBottom) {
+            scrollToBottomSoon(animated = false)
+        }
+    }
+
+    private fun loadOlderHint(hiddenCount: Int): View {
+        return TextView(this).apply {
+            text = "加载更早消息 · 还有 $hiddenCount 条"
+            setTextColor(color(R.color.chat_muted))
+            textSize = 12f
+            gravity = Gravity.CENTER
+            background = rounded(color(R.color.chat_subtle_surface), dp(12), dp(1), color(R.color.chat_border))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setOnClickListener {
+                renderMessageLimit += loadOlderMessageBatch
+                renderMessages(scrollToBottom = false)
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(12) }
+        }
+    }
+
+    private fun clearMessageViewBindings(messageId: String) {
+        if (editingMessageId == messageId) {
+            editingMessageEditor?.let { editingMessageDraft = it.text.toString() }
+            editingMessageEditor = null
+        }
+        streamBodyHeightAnimators.remove(messageId)?.cancel()
+        streamBodyHeightAnimationTokens.remove(messageId)
+        streamBodyHeightTargets.remove(messageId)
+        streamBodyMeasureStates.remove(messageId)
+        messageStreamBodyViews.remove(messageId)
+        messageThinkingViews.remove(messageId)
+        messageThinkingContainers.remove(messageId)
+        messageThinkingSummaries.remove(messageId)
+        messageRenderedContent.remove(messageId)
+        messageRenderedThinking.remove(messageId)
+    }
+
+    private inner class MessageAdapter : RecyclerView.Adapter<MessageAdapter.MessageHolder>() {
+        private val viewTypeLoadMore = 1
+        private val viewTypeMessage = 2
+        private val visibleMessages = mutableListOf<ChatMessage>()
+        private var hiddenCount = 0
+        private var visibleStartIndex = 0
+
+        fun submit(messages: List<ChatMessage>, startIndex: Int, hidden: Int) {
+            visibleMessages.clear()
+            visibleMessages.addAll(messages)
+            visibleStartIndex = startIndex
+            hiddenCount = hidden
+            notifyDataSetChanged()
+        }
+
+        fun positionOfMessage(messageId: String): Int {
+            val index = visibleMessages.indexOfFirst { it.id == messageId }
+            if (index < 0) return RecyclerView.NO_POSITION
+            return index + if (hiddenCount > 0) 1 else 0
+        }
+
+        override fun getItemViewType(position: Int): Int {
+            return if (hiddenCount > 0 && position == 0) viewTypeLoadMore else viewTypeMessage
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): MessageHolder {
+            return MessageHolder(FrameLayout(parent.context).apply {
+                layoutParams = RecyclerView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            })
+        }
+
+        override fun onBindViewHolder(holder: MessageHolder, position: Int) {
+            holder.boundMessageId?.let(::clearMessageViewBindings)
+            holder.boundMessageId = null
+            holder.container.removeAllViews()
+            if (getItemViewType(position) == viewTypeLoadMore) {
+                holder.container.addView(loadOlderHint(hiddenCount).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = dp(12) }
+                })
+                return
+            }
+            val messageIndex = position - if (hiddenCount > 0) 1 else 0
+            val message = visibleMessages.getOrNull(messageIndex) ?: return
+            holder.boundMessageId = message.id
+            holder.container.addView(messageCard(message, visibleStartIndex + messageIndex + 1).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(16) }
+            })
+            if (streamTargets.containsKey(message.id)) scheduleVisibleStreamRefresh()
+        }
+
+        override fun onViewRecycled(holder: MessageHolder) {
+            holder.boundMessageId?.let(::clearMessageViewBindings)
+            holder.boundMessageId = null
+            holder.container.removeAllViews()
+            super.onViewRecycled(holder)
+        }
+
+        override fun getItemCount(): Int = visibleMessages.size + if (hiddenCount > 0) 1 else 0
+
+        inner class MessageHolder(val container: FrameLayout) : RecyclerView.ViewHolder(container) {
+            var boundMessageId: String? = null
+        }
+    }
+
+    private fun messageCard(message: ChatMessage, index: Int): View {
+        val isAssistant = message.role == "assistant"
+        val editing = message.id == editingMessageId
+        val accent = if (isAssistant) Color.rgb(100, 210, 255) else color(R.color.chat_accent_blue)
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = rounded(
+                color(R.color.chat_card),
+                dp(14),
+                dp(1),
+                if (editing) color(R.color.chat_accent_blue) else color(R.color.chat_border)
+            )
+            clipToOutline = true
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(16) }
+        }
+        card.addView(View(this).apply {
+            setBackgroundColor(accent)
+            layoutParams = LinearLayout.LayoutParams(dp(3), ViewGroup.LayoutParams.MATCH_PARENT)
+        })
+
+        val contentColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        contentColumn.addView(messageHeader(message, index))
+        contentColumn.addView(separator())
+
+        contentColumn.addView(thinkingPanel(message))
+
+        val bodyViews = messageBody(message)
+        contentColumn.addView(bodyViews.host)
+        if (!editing) {
+            contentColumn.addView(separator())
+            contentColumn.addView(messageFooter(message))
+        }
+        card.addView(contentColumn)
+        return card
+    }
+
+    private fun messageBody(message: ChatMessage): StreamBodyViews {
+        if (message.id == editingMessageId) return editableMessageBody(message)
+        val content = displayContent(message)
+        val host = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(18), dp(16), dp(18))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val prefix = messageBodyTextView()
+        val tail = streamTailView()
+        host.addView(prefix)
+        host.addView(tail)
+        val views = StreamBodyViews(host, prefix, tail)
+        messageStreamBodyViews[message.id] = views
+        if (isLiveAssistant(message)) {
+            setStreamingBodyText(message.id, views, content)
+        } else {
+            prefix.text = formatMessageText(content)
+            prefix.visibility = if (content.isEmpty()) View.GONE else View.VISIBLE
+            tail.clearText()
+            tail.visibility = View.GONE
+        }
+        messageRenderedContent[message.id] = content
+        return views
+    }
+
+    private fun editableMessageBody(message: ChatMessage): StreamBodyViews {
+        val draft = if (editingMessageId == message.id) editingMessageDraft else message.content
+        val host = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val edit = EditText(this).apply {
+            setText(draft)
+            setTextColor(color(R.color.chat_fg))
+            setHintTextColor(color(R.color.chat_muted))
+            textSize = 16f
+            typeface = systemTypeface()
+            includeFontPadding = true
+            setLineSpacing(dp(4).toFloat(), 1.04f)
+            minLines = 4
+            maxLines = Int.MAX_VALUE
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            background = rounded(color(R.color.chat_subtle_surface), dp(10), dp(1), color(R.color.chat_accent_blue))
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        edit.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (editingMessageId == message.id) editingMessageDraft = s?.toString().orEmpty()
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        host.addView(edit)
+        host.alpha = 0f
+        host.translationY = dp(6).toFloat()
+        host.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(260)
+            .setInterpolator(entranceInterpolator)
+            .start()
+        editingMessageEditor = edit
+        edit.post {
+            if (editingMessageId == message.id) {
+                edit.requestFocus()
+                edit.setSelection(edit.text?.length ?: 0)
+                val inputMethod = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                inputMethod.showSoftInput(edit, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
+        messageRenderedContent[message.id] = draft
+        return StreamBodyViews(
+            host = host,
+            prefix = messageBodyTextView().apply { visibility = View.GONE },
+            tail = streamTailView().apply { visibility = View.GONE }
+        )
+    }
+
+    private fun messageBodyTextView(): TextView {
+        return TextView(this).apply {
+            setTextColor(color(R.color.chat_fg))
+            textSize = 16f
+            typeface = systemTypeface()
+            includeFontPadding = true
+            setLineSpacing(dp(4).toFloat(), 1.04f)
+            breakStrategy = Layout.BREAK_STRATEGY_SIMPLE
+            hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
             )
         }
     }
 
-    private fun dispatchPendingVisibility() {
-        val state = pendingVisibilityState ?: return
-        dispatchVisibilityState(state)
-    }
-
-    private fun handleAppVisibility(isForeground: Boolean) {
-        val changed = isAppInForeground != isForeground
-        isAppInForeground = isForeground
-        if (changed) {
-            if (isForeground) {
-                resumeWebViewAfterBackground()
-            } else {
-                prepareWebViewForBackground()
-            }
-            notifyWebVisibility(if (isForeground) "foreground" else "background")
+    private fun streamTailView(): StreamTailView {
+        return StreamTailView(this).apply {
+            setTextColorValue(color(R.color.chat_fg))
+            setTextSizePxValue(16f * resources.displayMetrics.scaledDensity)
+            typeface = systemTypeface()
+            includeFontPadding = true
+            lineSpacingExtra = dp(4).toFloat()
+            lineSpacingMultiplier = 1.04f
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
     }
 
-    private fun prepareWebViewForBackground() {
-        if (!this::webView.isInitialized) return
-        if (!isStreaming) {
-            try {
-                webView.onPause()
-            } catch (_: Throwable) {
+    private fun thinkingPanel(message: ChatMessage): View {
+        val expanded = message.id in messageThinkingExpanded
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (message.thinking.isBlank()) View.GONE else View.VISIBLE
+            background = rounded(color(R.color.chat_thinking_bg), dp(8), dp(1), color(R.color.chat_thinking_border))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(dp(16), dp(14), dp(16), 0)
             }
         }
-        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        webView.post {
-            if (!webView.isAttachedToWindow) {
-                return@post
+        val summary = TextView(this).apply {
+            text = thinkingSummaryText(message.thinking, expanded)
+            setTextColor(color(R.color.chat_accent_blue))
+            textSize = 13f
+            typeface = systemTypeface(Typeface.BOLD)
+            includeFontPadding = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setOnClickListener { setThinkingExpanded(message.id, message.id !in messageThinkingExpanded) }
+        }
+        val content = TextView(this).apply {
+            text = if (expanded) message.thinking else ""
+            visibility = if (expanded) View.VISIBLE else View.GONE
+            setTextColor(color(R.color.chat_muted))
+            textSize = 13f
+            typeface = systemTypeface()
+            includeFontPadding = true
+            setLineSpacing(dp(3).toFloat(), 1.04f)
+            breakStrategy = Layout.BREAK_STRATEGY_SIMPLE
+            hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
+            setPadding(0, dp(10), 0, 0)
+        }
+        panel.addView(summary)
+        panel.addView(content)
+        messageThinkingContainers[message.id] = panel
+        messageThinkingSummaries[message.id] = summary
+        messageThinkingViews[message.id] = content
+        messageRenderedThinking[message.id] = message.thinking
+        return panel
+    }
+
+    private fun thinkingSummaryText(thinking: String, expanded: Boolean): String {
+        val suffix = if (expanded) "点击折叠" else "点击展开"
+        return "💭 思维链 (${thinking.length}字) · $suffix"
+    }
+
+    private fun setThinkingExpanded(messageId: String, expanded: Boolean) {
+        if (expanded) {
+            messageThinkingExpanded.add(messageId)
+        } else {
+            messageThinkingExpanded.remove(messageId)
+        }
+        val thinking = messageRenderedThinking[messageId].orEmpty()
+        messageThinkingSummaries[messageId]?.text = thinkingSummaryText(thinking, expanded)
+        messageThinkingViews[messageId]?.apply {
+            text = if (expanded) thinking else ""
+            visibility = if (expanded) View.VISIBLE else View.GONE
+        }
+        if (expanded && followBottom) scrollToBottomSoon()
+    }
+
+    private fun displayContent(message: ChatMessage): String {
+        if (isLiveAssistant(message)) {
+            val target = streamTargets[message.id]
+            if (target != null && (target.visibleContentLength > 0 || target.targetContent.isNotEmpty())) {
+                return target.visibleContent
             }
-            webView.clearFocus()
-            imm?.hideSoftInputFromWindow(webView.windowToken, InputMethodManager.HIDE_NOT_ALWAYS)
+        }
+        return if (message.role == "assistant" && message.content.isBlank() && isSending) "正在思考..." else message.content
+    }
+
+    private fun updateMessageViews(
+        message: ChatMessage,
+        streaming: Boolean = false,
+        final: Boolean = false,
+        revealFromTopWhenStuck: Boolean = false
+    ) {
+        val bottomDistance = remainingScrollToBottom()
+        val stick = shouldFollowBottomForUpdate(bottomDistance)
+        updateStreamDistanceModes(bottomDistance)
+        followBottom = stick
+        val anchor = if ((streaming || final) && !stick && !userTouchingMessages) captureScrollAnchor() else null
+        val bodyUpdate = updateBodyText(message, streaming, final)
+        updateThinkingPanel(message)
+        anchor?.let { restoreScrollAnchorSoon(it) }
+        if (stick) {
+            when {
+                revealFromTopWhenStuck && final && !streaming -> scrollMessageToTopSoon(message.id)
+                streaming -> if (bodyUpdate.heightChanged) scrollToBottomDuringStream()
+                else -> if (bodyUpdate.changed || final) scrollToBottomSoon()
+            }
         }
     }
 
-    private fun resumeWebViewAfterBackground() {
-        if (!this::webView.isInitialized) return
-        try {
-            webView.onResume()
-        } catch (_: Throwable) {
+    private fun updateBodyText(message: ChatMessage, streaming: Boolean, final: Boolean): StreamBodyUpdate {
+        val views = messageStreamBodyViews[message.id] ?: return StreamBodyUpdate()
+        val content = displayContent(message)
+        val previous = messageRenderedContent[message.id]
+        if (streaming && !final) {
+            if (previous == content) return StreamBodyUpdate()
+            val heightChanged = setStreamingBodyText(
+                message.id,
+                views,
+                content
+            )
+            messageRenderedContent[message.id] = content
+            return StreamBodyUpdate(changed = true, heightChanged = heightChanged)
         }
-        refreshWebViewInputConnection()
-    }
-
-    private fun refreshWebViewInputConnection() {
-        if (!this::webView.isInitialized) return
-        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-            ?: return
-        webView.post {
-            if (!webView.isAttachedToWindow) {
-                return@post
-            }
-            if (!webView.hasFocus()) {
-                webView.requestFocus(View.FOCUS_DOWN)
-                webView.requestFocusFromTouch()
-            }
-            imm.restartInput(webView)
+        if (final || previous != content) {
+            streamBodyMeasureStates.remove(message.id)
+            messageStreamSegments.remove(message.id)
+            stopStreamingBodyHeightAnimation(message.id, views.host)
+            views.prefix.text = formatMessageText(content)
+            views.prefix.visibility = if (content.isEmpty()) View.GONE else View.VISIBLE
+            views.tail.clearText()
+            views.tail.visibility = View.GONE
+            messageRenderedContent[message.id] = content
+            return StreamBodyUpdate(changed = true, heightChanged = true)
         }
+        return StreamBodyUpdate()
     }
 
-    fun onStreamingStateChanged(active: Boolean) {
-        if (!this::webView.isInitialized) return
-        isStreaming = active
-    }
-}
-
-private class DownloadBridge(activity: MainActivity) {
-    private val activityRef = WeakReference(activity)
-    private val appContext = activity.applicationContext
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val executorLock = Any()
-    @Volatile
-    private var ioExecutor: ExecutorService = createIoExecutor()
-    @Volatile
-    private var isDisposed = false
-
-    fun dispose() {
-        isDisposed = true
-        ioExecutor.shutdownNow()
-        activityRef.clear()
-    }
-
-    @JavascriptInterface
-    fun saveFile(filename: String, jsonText: String): String {
-        val safeName = filename.ifBlank { "backup-${UUID.randomUUID()}.json" }
-        return try {
-            if (isDisposed) {
-                notify(false, null)
-                return ""
-            }
-            getIoExecutor().execute {
-                if (isDisposed) {
-                    return@execute
+    private fun setStreamingBodyText(
+        messageId: String,
+        views: StreamBodyViews,
+        rawContent: String
+    ): Boolean {
+        val oldHeight = currentBodyHeight(views.host)
+        val oldWidth = views.host.width
+        if (oldHeight > 0 && oldWidth > 0) {
+            pinBodyHeight(views.host, oldHeight)
+        }
+        val renderUpdate = renderStreamingBodySegments(messageId, views, rawContent)
+        if (oldHeight <= 0 || oldWidth <= 0) {
+            ensureBodyWrapContent(views.host)
+            return true
+        }
+        if (!renderUpdate.heightMayHaveChanged) {
+            return false
+        }
+        val targetHeight = measureStreamingBodyHeight(views, oldWidth)
+        val activeTarget = streamBodyHeightTargets[messageId]
+        val activeAnimation = streamBodyHeightAnimationTokens[messageId]
+        if (activeTarget == targetHeight && activeAnimation != null) {
+            return false
+        }
+        val fromHeight = currentBodyHeight(views.host)
+        if (abs(targetHeight - fromHeight) > dp(1)) {
+            streamBodyHeightAnimators.remove(messageId)?.cancel()
+            streamBodyHeightAnimationTokens.remove(messageId)
+            streamBodyHeightTargets.remove(messageId)
+            pinBodyHeight(views.host, targetHeight)
+            if (followBottom && !userTouchingMessages) {
+                views.host.doOnLayout {
+                    if (followBottom && !userTouchingMessages) scrollToBottomNow()
                 }
-                val (success, location) = performSave(safeName, jsonText)
-                notify(success, location)
             }
-            SAVE_PENDING
-        } catch (e: RejectedExecutionException) {
-            val recovered = recoverIoExecutor() ?: run {
-                notify(false, null)
-                return ""
+            return true
+        }
+        if (activeTarget == null && activeAnimation == null) {
+            pinBodyHeight(views.host, targetHeight)
+        }
+        return false
+    }
+
+    private fun renderStreamingBodySegments(messageId: String, views: StreamBodyViews, rawContent: String): StreamSegmentUpdate {
+        val segment = messageStreamSegments.getOrPut(messageId) { StreamTextSegmentState() }
+        if (rawContent.length < segment.frozenRawLength ||
+            segment.prefixRaw.isNotEmpty() && !rawContent.startsWith(segment.prefixRaw)
+        ) {
+            segment.reset()
+        }
+        var heightMayHaveChanged = false
+        val nextFreezeEnd = findStreamFreezeBoundary(rawContent, segment.frozenRawLength)
+        if (nextFreezeEnd > segment.frozenRawLength) {
+            val prefixRaw = rawContent.substring(0, nextFreezeEnd)
+            if (prefixRaw != segment.prefixRaw) {
+                views.prefix.text = renderStreamPrefix(segment, prefixRaw)
+                views.prefix.visibility = if (prefixRaw.isEmpty()) View.GONE else View.VISIBLE
+                views.invalidatePrefixMeasure()
+                segment.prefixRaw = prefixRaw
+                heightMayHaveChanged = true
             }
-            return try {
-                recovered.execute {
-                    if (isDisposed) {
-                        return@execute
+            segment.frozenRawLength = nextFreezeEnd
+            segment.tailFormatter = newStreamFormatter()
+            segment.tailRaw = ""
+        } else if (segment.prefixRaw.isNotEmpty() &&
+            (views.prefix.visibility != View.VISIBLE || views.prefix.text.isEmpty())
+        ) {
+            views.prefix.text = renderStreamPrefix(segment, segment.prefixRaw)
+            views.prefix.visibility = View.VISIBLE
+            views.invalidatePrefixMeasure()
+            heightMayHaveChanged = true
+        } else if (segment.prefixRaw.isEmpty() && views.prefix.visibility != View.GONE) {
+            views.prefix.text = ""
+            views.prefix.visibility = View.GONE
+            views.invalidatePrefixMeasure()
+            heightMayHaveChanged = true
+        }
+
+        val tailRaw = rawContent.substring(segment.frozenRawLength.coerceIn(0, rawContent.length))
+        if (tailRaw != segment.tailRaw ||
+            tailRaw.isEmpty() && !views.tail.isTextEmpty() ||
+            tailRaw.isNotEmpty() && views.tail.isTextEmpty()
+        ) {
+            val formatter = segment.tailFormatter ?: newStreamFormatter().also { segment.tailFormatter = it }
+            val renderedTail = formatter.render(tailRaw).text
+            val oldVisibility = views.tail.visibility
+            val tailHeightChanged = views.tail.setStreamText(renderedTail)
+            val nextVisibility = if (tailRaw.isEmpty()) View.GONE else View.VISIBLE
+            views.tail.visibility = nextVisibility
+            heightMayHaveChanged = heightMayHaveChanged ||
+                tailHeightChanged ||
+                oldVisibility != nextVisibility
+            segment.tailRaw = tailRaw
+        }
+        return StreamSegmentUpdate(heightMayHaveChanged)
+    }
+
+    private fun renderStreamPrefix(segment: StreamTextSegmentState, raw: String): CharSequence {
+        if (raw.isEmpty()) return ""
+        val formatter = segment.prefixFormatter ?: newStreamFormatter().also { segment.prefixFormatter = it }
+        return SpannableStringBuilder(formatter.render(raw).text)
+    }
+
+    private fun findStreamFreezeBoundary(text: String, frozenEnd: Int): Int {
+        if (text.length - frozenEnd <= streamTailMaxChars) return frozenEnd
+        val scanEnd = (text.length - streamTailTargetChars).coerceAtLeast(frozenEnd)
+        var boundary = frozenEnd
+        var fallback = frozenEnd
+        var mode = StreamMode.PLAIN
+        var index = frozenEnd.coerceIn(0, scanEnd)
+        while (index < scanEnd) {
+            val ch = text[index]
+            mode = nextStreamMode(mode, ch)
+            if (index + 1 > frozenEnd &&
+                index + 1 >= streamFrozenPrefixMinChars &&
+                mode == StreamMode.PLAIN
+            ) {
+                if (ch.isWhitespace()) fallback = index + 1
+                if (isStreamFreezeChar(ch)) boundary = index + 1
+            }
+            if (ch == '\n') {
+                var end = index + 1
+                while (end < scanEnd && text[end] == '\n') end += 1
+                if (end > frozenEnd && end >= streamFrozenPrefixMinChars && mode == StreamMode.PLAIN) {
+                    boundary = end
+                }
+                index = end
+            } else {
+                index += 1
+            }
+        }
+        if (boundary > frozenEnd) return boundary
+        if (fallback > frozenEnd && text.length - frozenEnd > streamTailMaxChars * 2) return fallback
+        return frozenEnd
+    }
+
+    private fun nextStreamMode(mode: StreamMode, ch: Char): StreamMode {
+        return when {
+            mode == StreamMode.PLAIN && (ch == '"' || ch == '\uFF02') -> StreamMode.DOUBLE_QUOTE
+            mode == StreamMode.DOUBLE_QUOTE && (ch == '"' || ch == '\uFF02' || ch == '\u201C' || ch == '\u201D') -> StreamMode.PLAIN
+            mode == StreamMode.PLAIN && ch == '\u201C' -> StreamMode.CHINESE_QUOTE
+            mode == StreamMode.CHINESE_QUOTE && (ch == '\u201D' || ch == '"' || ch == '\uFF02' || ch == '\u201C') -> StreamMode.PLAIN
+            mode == StreamMode.PLAIN && (ch == '*' || ch == '\uFF0A') -> StreamMode.STAR
+            mode == StreamMode.STAR && (ch == '*' || ch == '\uFF0A') -> StreamMode.PLAIN
+            else -> mode
+        }
+    }
+
+    private fun isStreamFreezeChar(ch: Char): Boolean {
+        return ch == '\n' ||
+            ch == '.' ||
+            ch == '!' ||
+            ch == '?' ||
+            ch == ';' ||
+            ch == '\u3002' ||
+            ch == '\uFF01' ||
+            ch == '\uFF1F' ||
+            ch == '\uFF1B'
+    }
+
+    private fun currentBodyHeight(body: View): Int {
+        val pinned = body.layoutParams?.height ?: 0
+        return if (pinned > 0) pinned else body.height
+    }
+
+    private fun estimateStreamingTextHeightForSegments(
+        messageId: String,
+        views: StreamBodyViews,
+        width: Int,
+        text: String
+    ): Int {
+        val state = streamBodyMeasureStates.getOrPut(messageId) { StreamBodyMeasureState() }
+        val reset = state.width != width ||
+            text.length < state.textLength ||
+            state.lineHeight <= 0
+        val start = if (reset) {
+            resetSegmentLineEstimate(state, views, width)
+            0
+        } else {
+            state.textLength
+        }
+        for (index in start until text.length) {
+            addEstimatedChar(state, text[index])
+        }
+        state.textLength = text.length
+        state.targetHeight = state.baseHeight + state.estimatedLines * state.lineHeight
+        return state.targetHeight
+    }
+
+    private fun resetSegmentLineEstimate(state: StreamBodyMeasureState, views: StreamBodyViews, width: Int) {
+        val contentWidth = (width - views.host.paddingLeft - views.host.paddingRight).coerceAtLeast(dp(80))
+        val averageCharWidth = views.prefix.paint.measureText("\u4E2D").coerceAtLeast(1f)
+        state.width = width
+        state.textLength = 0
+        state.estimatedLines = 1
+        state.lineUnits = 0f
+        state.unitsPerLine = (contentWidth / averageCharWidth).coerceAtLeast(4f)
+        state.lineHeight = views.prefix.lineHeight.coerceAtLeast(1)
+        state.baseHeight = views.host.paddingTop + views.host.paddingBottom + dp(3)
+        state.targetHeight = state.baseHeight + state.lineHeight
+    }
+
+    private fun measureStreamingBodyHeight(views: StreamBodyViews, width: Int): Int {
+        val contentWidth = (width - views.host.paddingLeft - views.host.paddingRight).coerceAtLeast(dp(80))
+        val prefixHeight = measureStreamingPrefixHeight(views, contentWidth)
+        val tailHeight = if (views.tail.visibility == View.VISIBLE) {
+            views.tail.desiredHeightForWidth(contentWidth)
+        } else {
+            0
+        }
+        return views.host.paddingTop + views.host.paddingBottom + prefixHeight + tailHeight
+    }
+
+    private fun measureStreamingPrefixHeight(views: StreamBodyViews, contentWidth: Int): Int {
+        if (views.prefix.visibility != View.VISIBLE || views.prefix.text.isEmpty()) return 0
+        val textLength = views.prefix.text.length
+        if (views.prefixMeasuredWidth == contentWidth &&
+            views.prefixMeasuredTextLength == textLength &&
+            views.prefixMeasuredHeight > 0
+        ) {
+            return views.prefixMeasuredHeight
+        }
+        views.prefix.measure(
+            View.MeasureSpec.makeMeasureSpec(contentWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        views.prefixMeasuredWidth = contentWidth
+        views.prefixMeasuredTextLength = textLength
+        views.prefixMeasuredHeight = views.prefix.measuredHeight
+        return views.prefixMeasuredHeight
+    }
+
+    private fun estimateStreamingTextHeight(
+        messageId: String,
+        body: TextView,
+        width: Int,
+        text: CharSequence,
+        changedStart: Int,
+        hasNewLine: Boolean
+    ): Int {
+        val state = streamBodyMeasureStates.getOrPut(messageId) { StreamBodyMeasureState() }
+        val reset = state.width != width ||
+            text.length < state.textLength ||
+            changedStart < state.textLength ||
+            state.lineHeight <= 0 ||
+            hasNewLine
+        val start = if (reset) {
+            resetStreamingLineEstimate(state, body, width)
+            0
+        } else {
+            state.textLength
+        }
+        for (index in start until text.length) {
+            addEstimatedChar(state, text[index])
+        }
+        state.textLength = text.length
+        state.targetHeight = state.baseHeight + state.estimatedLines * state.lineHeight
+        return state.targetHeight
+    }
+
+    private fun resetStreamingLineEstimate(state: StreamBodyMeasureState, body: TextView, width: Int) {
+        val contentWidth = (width - body.paddingLeft - body.paddingRight).coerceAtLeast(dp(80))
+        val averageCharWidth = body.paint.measureText("中").coerceAtLeast(1f)
+        state.width = width
+        state.textLength = 0
+        state.estimatedLines = 1
+        state.lineUnits = 0f
+        state.unitsPerLine = (contentWidth / averageCharWidth).coerceAtLeast(4f)
+        state.lineHeight = body.lineHeight.coerceAtLeast(1)
+        state.baseHeight = body.paddingTop + body.paddingBottom + dp(3)
+        state.targetHeight = state.baseHeight + state.lineHeight
+    }
+
+    private fun addEstimatedChar(state: StreamBodyMeasureState, ch: Char) {
+        if (ch == '\r') return
+        if (ch == '\n') {
+            state.estimatedLines += 1
+            state.lineUnits = 0f
+            return
+        }
+        val units = estimatedCharUnits(ch)
+        if (state.lineUnits > 0f && state.lineUnits + units > state.unitsPerLine) {
+            state.estimatedLines += 1
+            state.lineUnits = units
+        } else {
+            state.lineUnits += units
+        }
+    }
+
+    private fun estimatedCharUnits(ch: Char): Float {
+        if (Character.isLowSurrogate(ch)) return 0f
+        if (Character.isHighSurrogate(ch)) return 1.1f
+        return when {
+            ch.code <= 0x7F && ch.isWhitespace() -> 0.35f
+            ch.code <= 0x7F && ch.isLetterOrDigit() -> 0.68f
+            ch.code <= 0x7F -> 0.5f
+            ch in '\uFF61'..'\uFF9F' -> 0.65f
+            else -> 1f
+        }
+    }
+
+    private fun streamingHeightCheckStep(body: TextView, width: Int): Int {
+        val contentWidth = (width - body.paddingLeft - body.paddingRight).coerceAtLeast(dp(80))
+        val averageCharWidth = body.paint.measureText("中").coerceAtLeast(1f)
+        val estimatedCharsPerLine = (contentWidth / averageCharWidth).toInt().coerceAtLeast(8)
+        return (estimatedCharsPerLine / 6).coerceIn(3, 8)
+    }
+
+    private fun measureCurrentTextHeight(body: TextView, width: Int): Int {
+        val contentWidth = (width - body.paddingLeft - body.paddingRight).coerceAtLeast(1)
+        val text = body.text ?: ""
+        val layout = StaticLayout.Builder.obtain(text, 0, text.length, body.paint, contentWidth)
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setLineSpacing(body.lineSpacingExtra, body.lineSpacingMultiplier)
+            .setIncludePad(body.includeFontPadding)
+            .setBreakStrategy(body.breakStrategy)
+            .setHyphenationFrequency(body.hyphenationFrequency)
+            .build()
+        return layout.height + body.paddingTop + body.paddingBottom
+    }
+
+    private fun animateStreamingBodyHeight(messageId: String, body: View, fromHeight: Int, toHeight: Int) {
+        streamBodyHeightAnimators.remove(messageId)?.cancel()
+        val token = ++streamHeightAnimationSeed
+        streamBodyHeightAnimationTokens[messageId] = token
+        streamBodyHeightTargets[messageId] = toHeight
+        pinBodyHeight(body, fromHeight)
+        if (!followBottom) {
+            val anchor = captureScrollAnchor()
+            finishStreamingBodyHeightAnimation(messageId, body, token, toHeight)
+            anchor?.let { restoreScrollAnchorSoon(it) }
+            return
+        }
+        if (userTouchingMessages) {
+            finishStreamingBodyHeightAnimation(messageId, body, token, toHeight)
+            return
+        }
+        val delta = toHeight - fromHeight
+        if (delta <= dp(1)) {
+            finishStreamingBodyHeightAnimation(messageId, body, token, toHeight)
+            return
+        }
+        val durationMs = (delta * 2L).coerceIn(150L, 260L)
+        var cancelled = false
+        val animator = ValueAnimator.ofInt(fromHeight, toHeight).apply {
+            duration = durationMs
+            interpolator = streamHeightInterpolator
+            addUpdateListener { animation ->
+                if (streamBodyHeightAnimationTokens[messageId] != token) return@addUpdateListener
+                pinBodyHeight(body, animation.animatedValue as Int)
+                if (followBottom && !userTouchingMessages) scrollToBottomDuringStream()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationCancel(animation: Animator) {
+                    cancelled = true
+                }
+
+                override fun onAnimationEnd(animation: Animator) {
+                    streamBodyHeightAnimators.remove(messageId)
+                    if (!cancelled) {
+                        finishStreamingBodyHeightAnimation(messageId, body, token, toHeight)
                     }
-                    val (success, location) = performSave(safeName, jsonText)
-                    notify(success, location)
                 }
-                SAVE_PENDING
-            } catch (_: RejectedExecutionException) {
-                notify(false, null)
-                ""
-            }
+            })
+        }
+        streamBodyHeightAnimators[messageId] = animator
+        animator.start()
+    }
+
+    private fun finishStreamingBodyHeightAnimation(messageId: String, body: View, token: Int, toHeight: Int) {
+        if (streamBodyHeightAnimationTokens[messageId] != token) return
+        streamBodyHeightAnimators.remove(messageId)
+        streamBodyHeightAnimationTokens.remove(messageId)
+        streamBodyHeightTargets.remove(messageId)
+        pinBodyHeight(body, toHeight)
+        if (followBottom && !userTouchingMessages) scrollToBottomNow()
+    }
+
+    private fun stopStreamingBodyHeightAnimation(messageId: String, body: View) {
+        streamBodyHeightAnimators.remove(messageId)?.cancel()
+        streamBodyHeightAnimationTokens.remove(messageId)
+        streamBodyHeightTargets.remove(messageId)
+        streamBodyMeasureStates.remove(messageId)
+        ensureBodyWrapContent(body)
+    }
+
+    private fun pinBodyHeight(body: View, height: Int) {
+        val params = body.layoutParams ?: return
+        if (params.height != height) {
+            params.height = height
+            body.layoutParams = params
         }
     }
 
-    @JavascriptInterface
-    fun notifyStreamingState(active: Boolean) {
-        activityRef.get()?.let { activity ->
-            activity.runOnUiThread {
-                activity.onStreamingStateChanged(active)
-            }
+    private fun ensureBodyWrapContent(body: View) {
+        val params = body.layoutParams ?: return
+        if (params.height != ViewGroup.LayoutParams.WRAP_CONTENT) {
+            params.height = ViewGroup.LayoutParams.WRAP_CONTENT
+            body.layoutParams = params
         }
     }
 
-    private fun performSave(filename: String, jsonText: String): Pair<Boolean, String?> {
-        return try {
-            val data = jsonText.toByteArray(Charsets.UTF_8)
-            val location = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                saveToMediaStore(filename, data)
+    private fun updateStreamTarget(
+        message: ChatMessage,
+        content: String,
+        thinking: String,
+        finishWhenCaught: Boolean = false
+    ) {
+        val target = streamTargets.getOrPut(message.id) {
+            StreamRenderTarget(
+                message = message,
+                visibleContent = messageRenderedContent[message.id].orEmpty().takeIf { content.startsWith(it) }.orEmpty(),
+                visibleThinking = messageRenderedThinking[message.id].orEmpty().takeIf { thinking.startsWith(it) }.orEmpty()
+            )
+        }
+        target.message = message
+        target.contentPrefixValid = contentHasVisiblePrefix(target, content)
+        target.thinkingPrefixValid = thinkingHasVisiblePrefix(target, thinking)
+        if (content != target.targetContent) {
+            target.releaseScanStart = -1
+            target.releaseScanLength = -1
+            target.releaseScanBoundary = -1
+        }
+        target.targetContent = content
+        target.targetThinking = thinking
+        target.lastTargetUpdateAt = android.os.SystemClock.uptimeMillis()
+        if (target.contentPrefixValid) {
+            target.contentReleaseEnd = max(target.contentReleaseEnd, target.visibleContentLength)
+                .coerceAtMost(target.targetContent.length)
+        }
+        if (target.targetContent.length > target.contentReleaseEnd && target.unreleasedContentSince == 0L) {
+            target.unreleasedContentSince = target.lastTargetUpdateAt
+        }
+        target.finishWhenCaught = target.finishWhenCaught || finishWhenCaught
+        val bound = isStreamTargetBound(message.id)
+        target.forceNextUiCommit = followBottom || streamLiveModeNow
+        if (bound && shouldUpdateBoundStreamTarget()) {
+            scheduleStreamAnimator()
+        }
+    }
+
+    private fun contentHasVisiblePrefix(target: StreamRenderTarget, content: String): Boolean {
+        if (content.length < target.visibleContentLength) return false
+        if (target.targetContent.isNotEmpty() &&
+            content.length >= target.targetContent.length &&
+            content.startsWith(target.targetContent)
+        ) {
+            return true
+        }
+        if (target.visibleContentLength > target.visibleContent.length) return false
+        return content.startsWith(target.visibleContent)
+    }
+
+    private fun thinkingHasVisiblePrefix(target: StreamRenderTarget, thinking: String): Boolean {
+        if (thinking.length < target.visibleThinkingLength) return false
+        if (target.targetThinking.isNotEmpty() &&
+            thinking.length >= target.targetThinking.length &&
+            thinking.startsWith(target.targetThinking)
+        ) {
+            return true
+        }
+        if (target.visibleThinkingLength > target.visibleThinking.length) return false
+        return thinking.startsWith(target.visibleThinking)
+    }
+
+    private fun scheduleStreamAnimator() {
+        if (streamAnimatorScheduled) return
+        streamAnimatorScheduled = true
+        val delayMs = streamAnimatorDelayMs()
+        val tick = Runnable {
+            streamAnimatorScheduled = false
+            tickStreamAnimator()
+        }
+        if (!userTouchingMessages && delayMs <= 8L) {
+            ViewCompat.postOnAnimation(root, tick)
+        } else {
+            ViewCompat.postOnAnimationDelayed(root, tick, delayMs)
+        }
+    }
+
+    private fun streamAnimatorDelayMs(): Long {
+        val distance = remainingScrollToBottom()
+        val liveMode = distance < dp(streamLiveDistanceDp)
+        val throttledMode = distance < dp(streamThrottledDistanceDp)
+        streamLiveModeNow = liveMode
+        streamThrottledModeNow = throttledMode
+        return when {
+            !throttledMode -> streamOffscreenUiFrameMs
+            liveMode -> streamRevealFrameMs
+            else -> streamThrottledUiFrameMs
+        }
+    }
+
+    private fun tickStreamAnimator() {
+        val now = android.os.SystemClock.uptimeMillis()
+        var needsNextFrame = false
+        val distance = remainingScrollToBottom()
+        val liveMode = distance < dp(streamLiveDistanceDp)
+        val throttledMode = distance < dp(streamThrottledDistanceDp)
+        streamLiveModeNow = liveMode
+        streamThrottledModeNow = throttledMode
+        val iterator = streamTargets.entries.iterator()
+        while (iterator.hasNext()) {
+            val target = iterator.next().value
+            if (!throttledMode) {
+                if (target.finishWhenCaught && !isStreamTargetBound(target.message.id)) {
+                    iterator.remove()
+                    messageStreamSegments.remove(target.message.id)
+                }
+                continue
+            }
+            val targetVisible = isStreamTargetVisible(target.message.id)
+            refreshContentReleaseEnd(target)
+            val elapsedMs = revealElapsedMs(target, now)
+            val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
+            val contentStepLimit = streamContentMaxCharsPerTick
+            if (!targetVisible) {
+                val targetBound = isStreamTargetBound(target.message.id)
+                val shouldThrottledUpdate = targetBound &&
+                    shouldCommitOffscreenStreamFrame(target, now)
+                if (shouldThrottledUpdate) {
+                    val nextContentLength = if (target.contentPrefixValid) {
+                        advanceVisibleLength(target.visibleContentLength, contentEnd, contentStepLimit)
+                    } else {
+                        contentEnd
+                    }
+                    commitStreamFrame(
+                        target,
+                        now,
+                        nextContentLength,
+                        target.targetThinking.length,
+                        streaming = !target.finishWhenCaught
+                    )
+                    target.lastOffscreenUiCommitAt = now
+                    val caughtUp = nextContentLength == target.targetContent.length &&
+                        target.visibleThinkingLength == target.targetThinking.length
+                    if (caughtUp && target.finishWhenCaught) {
+                        iterator.remove()
+                        messageStreamSegments.remove(target.message.id)
+                    } else if (target.targetContent.length > target.visibleContentLength ||
+                        target.targetThinking.length > target.visibleThinkingLength
+                    ) {
+                        needsNextFrame = true
+                    }
+                } else if (target.finishWhenCaught && !targetBound) {
+                    iterator.remove()
+                    messageStreamSegments.remove(target.message.id)
+                } else if (targetBound && shouldUpdateBoundStreamTarget()) {
+                    needsNextFrame = true
+                }
+                continue
+            }
+            val thinkingExpanded = target.message.id in messageThinkingExpanded
+            val thinkingInterval = if (thinkingExpanded) streamExpandedThinkingFrameMs else streamCollapsedThinkingFrameMs
+            val thinkingDue = target.finishWhenCaught ||
+                !target.thinkingPrefixValid ||
+                now - target.lastThinkingUiCommitAt >= thinkingInterval
+            val thinkingBudget = if (thinkingDue) {
+                revealBudget(
+                    target.thinkingRevealCarry,
+                    streamThinkingCharsPerSecond,
+                    elapsedMs,
+                    streamMaxThinkingCharsPerFrame
+                )
             } else {
-                saveToLegacyStorage(filename, data)
+                RevealBudget(0, target.thinkingRevealCarry)
             }
-            Pair(!location.isNullOrBlank(), location)
-        } catch (e: Exception) {
-            Pair(false, null)
-        }
-    }
-
-    @RequiresApi(Build.VERSION_CODES.Q)
-    private fun saveToMediaStore(filename: String, data: ByteArray): String? {
-        val resolver = appContext.contentResolver
-        val targetDir = Environment.DIRECTORY_DOWNLOADS + "/AIChat"
-        val values = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, filename)
-            put(MediaStore.Downloads.MIME_TYPE, "application/json")
-            put(MediaStore.Downloads.IS_PENDING, 1)
-            put(MediaStore.Downloads.RELATIVE_PATH, targetDir)
-        }
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
-        return try {
-            resolver.openOutputStream(uri)?.use { output ->
-                output.write(data)
-            } ?: return null
-            values.clear()
-            values.put(MediaStore.Downloads.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
-            "内部存储/Download/AIChat/$filename"
-        } catch (e: Exception) {
-            resolver.delete(uri, null, null)
-            null
-        }
-    }
-
-    @Suppress("DEPRECATION")
-    private fun saveToLegacyStorage(filename: String, data: ByteArray): String? {
-        return try {
-            val baseDir = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return null
-            if (!baseDir.exists()) {
-                baseDir.mkdirs()
+            target.thinkingRevealCarry = thinkingBudget.carry
+            val nextContentLength = if (target.contentPrefixValid) {
+                advanceVisibleLength(target.visibleContentLength, contentEnd, contentStepLimit)
+            } else {
+                contentEnd
             }
-            val targetDir = File(baseDir, "AIChat")
-            if (!targetDir.exists()) {
-                targetDir.mkdirs()
+            val nextThinkingLength = if (target.thinkingPrefixValid && !target.finishWhenCaught) {
+                advanceVisibleLength(target.visibleThinkingLength, target.targetThinking.length, thinkingBudget.chars)
+            } else {
+                target.targetThinking.length
             }
-            val file = File(targetDir, filename)
-            FileOutputStream(file).use { it.write(data) }
-            file.absolutePath
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun notify(success: Boolean, location: String?) {
-        mainHandler.post {
-            val message = if (success) {
-                if (!location.isNullOrBlank()) {
-                    "备份已保存: $location"
+            val contentChanged = nextContentLength != target.visibleContentLength || !target.contentPrefixValid
+            val thinkingChanged = nextThinkingLength != target.visibleThinkingLength || !target.thinkingPrefixValid
+            val changed = contentChanged || thinkingChanged
+            if (changed) {
+                if (shouldCommitStreamFrame(target, now, contentChanged, thinkingChanged, nextContentLength, nextThinkingLength)) {
+                    commitStreamFrame(target, now, nextContentLength, nextThinkingLength, streaming = true)
                 } else {
-                    "备份已保存"
+                    needsNextFrame = true
                 }
+            }
+            val caughtUp = nextContentLength == target.targetContent.length && nextThinkingLength == target.targetThinking.length
+            if (caughtUp && target.finishWhenCaught) {
+                iterator.remove()
+                messageStreamSegments.remove(target.message.id)
+                updateMessageViews(target.message, final = true)
+            } else if (!caughtUp || target.targetContent.length > target.contentReleaseEnd) {
+                needsNextFrame = true
+            }
+        }
+        if (needsNextFrame) scheduleStreamAnimator()
+    }
+
+    private fun commitStreamFrame(
+        target: StreamRenderTarget,
+        now: Long,
+        nextContentLength: Int,
+        nextThinkingLength: Int,
+        streaming: Boolean
+    ) {
+        val nextContent = target.targetContent.prefixAt(nextContentLength)
+        val nextThinking = target.targetThinking.prefixAt(nextThinkingLength)
+        val thinkingChanged = nextThinkingLength != target.visibleThinkingLength
+        target.visibleContentLength = nextContentLength
+        target.visibleThinkingLength = nextThinkingLength
+        target.visibleContent = nextContent
+        target.visibleThinking = nextThinking
+        target.contentPrefixValid = true
+        target.thinkingPrefixValid = true
+        target.lastUiCommitAt = now
+        target.lastRevealAt = now
+        target.forceNextUiCommit = false
+        if (thinkingChanged) target.lastThinkingUiCommitAt = now
+        val display = target.message.copy(content = nextContent, thinking = nextThinking)
+        updateMessageViews(display, streaming = streaming, final = !streaming)
+    }
+
+    private fun refreshContentReleaseEnd(target: StreamRenderTarget) {
+        val length = target.targetContent.length
+        target.contentReleaseEnd = length
+        target.unreleasedContentSince = 0L
+    }
+
+    private fun cachedParagraphBoundaryAfter(target: StreamRenderTarget, start: Int): Int {
+        val length = target.targetContent.length
+        if (target.releaseScanStart == start && target.releaseScanLength == length) {
+            return target.releaseScanBoundary
+        }
+        val boundary = findParagraphBoundaryAfter(target.targetContent, start)
+        target.releaseScanStart = start
+        target.releaseScanLength = length
+        target.releaseScanBoundary = boundary
+        return boundary
+    }
+
+    private fun findParagraphBoundaryAfter(text: String, start: Int): Int {
+        for (i in start until text.length) {
+            if (text[i] == '\n') {
+                var end = i + 1
+                while (end < text.length && text[end] == '\n') end++
+                return end
+            }
+        }
+        return -1
+    }
+
+    private fun softReleaseEnd(text: String, start: Int, end: Int): Int {
+        var boundary = -1
+        val minEnd = min(end, start + 32)
+        for (i in start until end) {
+            if (i >= minEnd && isSentenceEnd(text[i])) boundary = i + 1
+        }
+        return if (boundary > start) boundary else end
+    }
+
+    private fun isSentenceEnd(ch: Char): Boolean {
+        return ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?'
+    }
+
+    private fun revealElapsedMs(target: StreamRenderTarget, now: Long): Long {
+        val previous = target.lastTickAt
+        target.lastTickAt = now
+        if (previous <= 0L) return streamRevealFrameMs
+        return (now - previous).coerceIn(1L, streamRevealTouchFrameMs)
+    }
+
+    private fun revealBudget(carry: Float, charsPerSecond: Float, elapsedMs: Long, maxChars: Int): RevealBudget {
+        val available = carry + charsPerSecond * elapsedMs / 1000f
+        val chars = min(maxChars, available.toInt())
+        val nextCarry = (available - chars).coerceIn(0f, maxChars.toFloat())
+        return RevealBudget(chars, nextCarry)
+    }
+
+    private fun shouldCommitStreamFrame(
+        target: StreamRenderTarget,
+        now: Long,
+        contentChanged: Boolean,
+        thinkingChanged: Boolean,
+        nextContentLength: Int,
+        nextThinkingLength: Int
+    ): Boolean {
+        if (!contentChanged && !thinkingChanged) return false
+        if (!target.contentPrefixValid || !target.thinkingPrefixValid) return true
+        if (target.forceNextUiCommit) return true
+        if (target.lastUiCommitAt == 0L) return true
+        if (target.finishWhenCaught &&
+            nextContentLength == target.targetContent.length &&
+            nextThinkingLength == target.targetThinking.length
+        ) {
+            return true
+        }
+        val minInterval = when {
+            userTouchingMessages -> streamRevealTouchFrameMs
+            streamLiveModeNow -> streamUiCommitFrameMs
+            else -> streamThrottledUiFrameMs
+        }
+        return now - target.lastUiCommitAt >= minInterval
+    }
+
+    private fun advanceVisibleLength(current: Int, targetEnd: Int, maxChars: Int): Int {
+        val end = targetEnd.coerceAtLeast(0)
+        if (current == end) return current
+        if (current > end) return end
+        if (maxChars <= 0) return current
+        val remaining = end - current
+        if (remaining <= maxChars) return end
+        return min(end, current + maxChars)
+    }
+
+    private fun String.prefixAt(length: Int): String {
+        val end = length.coerceIn(0, this.length)
+        return if (end == this.length) this else substring(0, end)
+    }
+
+    private fun newStreamFormatter(): StreamFormatState {
+        return StreamFormatState(
+            quoteColor = color(R.color.chat_accent3),
+            starColor = color(R.color.chat_accent)
+        )
+    }
+
+    private fun updateThinkingPanel(message: ChatMessage) {
+        val panel = messageThinkingContainers[message.id] ?: return
+        val summary = messageThinkingSummaries[message.id] ?: return
+        val content = messageThinkingViews[message.id] ?: return
+        val thinking = message.thinking
+        val expanded = message.id in messageThinkingExpanded
+        if (messageRenderedThinking[message.id] == thinking) return
+        messageRenderedThinking[message.id] = thinking
+        panel.visibility = if (thinking.isBlank()) View.GONE else View.VISIBLE
+        summary.text = thinkingSummaryText(thinking, expanded)
+        if (thinking.isBlank()) {
+            content.text = ""
+            content.visibility = View.GONE
+        } else if (expanded) {
+            if (content.text.toString() != thinking) {
+                content.text = thinking
+            }
+            content.visibility = View.VISIBLE
+        } else {
+            if (content.text.isNotEmpty()) {
+                content.text = ""
+            }
+            content.visibility = View.GONE
+        }
+    }
+
+    private fun isLiveAssistant(message: ChatMessage): Boolean {
+        return isSending &&
+            message.role == "assistant" &&
+            state.activeSession()?.history?.lastOrNull()?.id == message.id
+    }
+
+    private fun formatMessageText(text: String): CharSequence {
+        if (text.isEmpty()) return text
+        val out = SpannableStringBuilder()
+        var index = 0
+        while (index < text.length) {
+            val ch = text[index]
+            when {
+                isQuote(ch) -> {
+                    val end = findNext(text, index + 1, ::isQuote)
+                    if (end > index + 1) {
+                        val start = out.length
+                        out.append(text, index, end + 1)
+                        out.setSpan(ForegroundColorSpan(color(R.color.chat_accent3)), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        index = end + 1
+                    } else {
+                        out.append(ch)
+                        index += 1
+                    }
+                }
+                isStar(ch) -> {
+                    val end = findNext(text, index + 1, ::isStar)
+                    if (end > index + 1) {
+                        val start = out.length
+                        out.append(text, index + 1, end)
+                        out.setSpan(ForegroundColorSpan(color(R.color.chat_accent)), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        index = end + 1
+                    } else {
+                        out.append(ch)
+                        index += 1
+                    }
+                }
+                else -> {
+                    out.append(ch)
+                    index += 1
+                }
+            }
+        }
+        return out
+    }
+
+    private fun applyPromptRegex(content: String): String {
+        return applyPromptRegex(content, state.promptFor(state.activeSession()))
+    }
+
+    private fun applyPromptRegex(content: String, prompt: PromptPreset): String {
+        if (content.isBlank()) return content
+        val rules = runCatching { JSONArray(prompt.regexRulesJson) }.getOrNull() ?: return content
+        var result = content
+        for (i in 0 until rules.length()) {
+            val rule = rules.optJSONObject(i) ?: continue
+            val pattern = rule.optString("pattern")
+            if (pattern.isBlank()) continue
+            val replacement = rule.optString("replacement")
+            val compiled = compilePromptRegex(pattern, rule.optString("flags"))
+            result = compiled?.let {
+                runCatching {
+                    if (it.second) it.first.replace(result, replacement) else it.first.replaceFirst(result, replacement)
+                }.getOrDefault(result)
+            } ?: result
+        }
+        return result
+    }
+
+    private fun compilePromptRegex(rawPattern: String, rawFlags: String): Pair<Regex, Boolean>? {
+        var pattern = rawPattern
+        var flags = rawFlags
+        val literal = Regex("^/([\\s\\S]*)/([a-zA-Z]*)$").matchEntire(pattern)
+        if (literal != null) {
+            pattern = literal.groupValues[1]
+            flags = literal.groupValues[2]
+        }
+        val options = buildSet {
+            if ('i' in flags) add(RegexOption.IGNORE_CASE)
+            if ('m' in flags) add(RegexOption.MULTILINE)
+            if ('s' in flags) add(RegexOption.DOT_MATCHES_ALL)
+        }
+        return runCatching { Regex(pattern, options) to ('g' in flags) }.getOrNull()
+    }
+
+    private fun isQuote(ch: Char): Boolean {
+        return ch == '"' || ch == '\u201C' || ch == '\u201D' || ch == '\uFF02'
+    }
+
+    private fun isStar(ch: Char): Boolean {
+        return ch == '*' || ch == '\uFF0A'
+    }
+
+    private fun findNext(text: String, start: Int, predicate: (Char) -> Boolean): Int {
+        for (i in start until text.length) {
+            if (predicate(text[i])) return i
+        }
+        return -1
+    }
+
+    private fun isNearBottom(distance: Int = remainingScrollToBottom()): Boolean {
+        return distance < dp(64)
+    }
+
+    private fun updateStreamDistanceModes(distance: Int = remainingScrollToBottom()) {
+        streamLiveModeNow = distance < dp(streamLiveDistanceDp)
+        streamThrottledModeNow = distance < dp(streamThrottledDistanceDp)
+    }
+
+    private fun shouldUpdateBoundStreamTarget(): Boolean {
+        return followBottom || streamThrottledModeNow
+    }
+
+    private fun shouldFollowBottomForUpdate(distance: Int = remainingScrollToBottom()): Boolean {
+        if (userTouchingMessages) return false
+        return followBottom || isNearBottom(distance)
+    }
+
+    private fun captureScrollAnchor(): ScrollAnchor? {
+        val position = messagesLayoutManager.findFirstVisibleItemPosition()
+        if (position == RecyclerView.NO_POSITION) return null
+        val view = messagesLayoutManager.findViewByPosition(position) ?: return null
+        return ScrollAnchor(
+            position = position,
+            offset = view.top - messagesScroll.paddingTop,
+            absoluteOffset = messagesScroll.computeVerticalScrollOffset()
+        )
+    }
+
+    private fun isStreamTargetVisible(messageId: String): Boolean {
+        val host = messageStreamBodyViews[messageId]?.host ?: return false
+        if (!host.isShown || !ViewCompat.isAttachedToWindow(host)) return false
+        val hostRect = Rect()
+        val listRect = Rect()
+        if (!host.getGlobalVisibleRect(hostRect)) return false
+        if (!messagesScroll.getGlobalVisibleRect(listRect)) return false
+        return hostRect.intersect(listRect) && hostRect.height() > dp(2)
+    }
+
+    private fun isStreamTargetBound(messageId: String): Boolean {
+        val host = messageStreamBodyViews[messageId]?.host ?: return false
+        return ViewCompat.isAttachedToWindow(host)
+    }
+
+    private fun shouldCommitOffscreenStreamFrame(target: StreamRenderTarget, now: Long): Boolean {
+        if (target.finishWhenCaught) return true
+        val contentDelta = (target.targetContent.length - target.visibleContentLength).coerceAtLeast(0)
+        val thinkingDelta = (target.targetThinking.length - target.visibleThinkingLength).coerceAtLeast(0)
+        if (contentDelta == 0 && thinkingDelta == 0) return false
+        if (target.lastOffscreenUiCommitAt == 0L) return true
+        if (contentDelta >= streamOffscreenFlushChars || thinkingDelta >= streamThinkingFlushChars) return true
+        return now - target.lastOffscreenUiCommitAt >= streamOffscreenUiFrameMs
+    }
+
+    private fun restoreScrollAnchorSoon(anchor: ScrollAnchor) {
+        messagesScroll.post {
+            if (userTouchingMessages || followBottom || isNearBottom()) return@post
+            keepProgrammaticScrollActive()
+            messagesLayoutManager.scrollToPositionWithOffset(anchor.position, anchor.offset)
+        }
+    }
+
+    private fun restoreScrollAnchorAfterEdit(anchor: ScrollAnchor) {
+        val token = ++editScrollRestoreToken
+        val delays = longArrayOf(0L, 80L, 180L, 320L, 520L, 760L)
+        delays.forEach { delay ->
+            mainHandler.postDelayed({
+                if (token != editScrollRestoreToken || userTouchingMessages) return@postDelayed
+                keepProgrammaticScrollActive()
+                followBottom = false
+                messagesLayoutManager.scrollToPositionWithOffset(anchor.position, anchor.offset)
+                messagesScroll.post {
+                    if (token != editScrollRestoreToken || userTouchingMessages) return@post
+                    val delta = anchor.absoluteOffset - messagesScroll.computeVerticalScrollOffset()
+                    if (delta != 0) {
+                        keepProgrammaticScrollActive()
+                        messagesScroll.scrollBy(0, delta)
+                    }
+                }
+                updateStreamDistanceModes()
+            }, delay)
+        }
+    }
+
+    private fun scrollMessageToTopSoon(messageId: String) {
+        if (userTouchingMessages) return
+        messagesScroll.post {
+            if (userTouchingMessages) return@post
+            val position = messagesAdapter.positionOfMessage(messageId)
+            if (position == RecyclerView.NO_POSITION) return@post
+            keepProgrammaticScrollActive()
+            messagesLayoutManager.scrollToPositionWithOffset(position, dp(8))
+            followBottom = false
+            updateStreamDistanceModes()
+        }
+    }
+
+    private fun scrollToBottomSoon(animated: Boolean = false) {
+        if (userTouchingMessages) return
+        if (bottomScrollScheduled) return
+        bottomScrollScheduled = true
+        messagesScroll.post {
+            bottomScrollScheduled = false
+            if (scrollRemainingToBottom(animated)) {
+                followBottom = true
+                streamLiveModeNow = true
+                streamThrottledModeNow = true
+                return@post
+            }
+            followBottom = true
+            streamLiveModeNow = true
+            streamThrottledModeNow = true
+        }
+    }
+
+    private fun scrollToBottomNow() {
+        if (userTouchingMessages) return
+        scrollRemainingToBottom(animated = false)
+        followBottom = true
+        streamLiveModeNow = true
+        streamThrottledModeNow = true
+    }
+
+    private fun scrollRemainingToBottom(animated: Boolean): Boolean {
+        if (messagesAdapter.itemCount == 0) return false
+        val distance = remainingScrollToBottom()
+        if (distance <= dp(1)) return true
+        if (distance == lastBottomTargetY && abs(distance) <= dp(1)) return true
+        lastBottomTargetY = distance
+        keepProgrammaticScrollActive()
+        if (messagesScroll.computeVerticalScrollRange() <= messagesScroll.height) {
+            messagesLayoutManager.scrollToPositionWithOffset(messagesAdapter.itemCount - 1, 0)
+        } else if (animated) {
+            messagesScroll.smoothScrollBy(0, distance)
+        } else {
+            messagesScroll.scrollBy(0, distance)
+        }
+        return true
+    }
+
+    private fun remainingScrollToBottom(): Int {
+        val range = messagesScroll.computeVerticalScrollRange()
+        val extent = messagesScroll.computeVerticalScrollExtent()
+        val offset = messagesScroll.computeVerticalScrollOffset()
+        if (range <= 0 || extent <= 0) return 0
+        return (range - extent - offset).coerceAtLeast(0)
+    }
+
+    private fun scrollToBottomDuringStream() {
+        if (!followBottom) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastStreamBottomScrollAt >= streamBottomScrollFrameMs) {
+            lastStreamBottomScrollAt = now
+            scrollToBottomNow()
+        }
+        if (streamBottomFollowScheduled) return
+        streamBottomFollowScheduled = true
+        ViewCompat.postOnAnimation(messagesScroll) {
+            streamBottomFollowScheduled = false
+            if (followBottom && !userTouchingMessages) scrollToBottomNow()
+        }
+    }
+
+    private fun keepProgrammaticScrollActive() {
+        programmaticScroll = true
+        programmaticScrollReleaseAt = android.os.SystemClock.uptimeMillis() + scrollTrackFrameMs
+        if (programmaticScrollReleaseScheduled) return
+        programmaticScrollReleaseScheduled = true
+        fun releaseWhenQuiet() {
+            val remaining = programmaticScrollReleaseAt - android.os.SystemClock.uptimeMillis()
+            if (remaining > 0L) {
+                mainHandler.postDelayed({ releaseWhenQuiet() }, remaining)
             } else {
-                "保存备份失败"
+                programmaticScrollReleaseScheduled = false
+                programmaticScroll = false
+                if (!followBottom || userTouchingMessages) followBottom = isNearBottom()
+                updateStreamDistanceModes()
             }
-            Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
+        }
+        mainHandler.postDelayed({ releaseWhenQuiet() }, scrollTrackFrameMs)
+    }
+
+    private fun animateIn(view: View) {
+        view.alpha = 0f
+        view.scaleX = 0.985f
+        view.scaleY = 0.985f
+        view.translationY = dp(18).toFloat()
+        view.animate()
+            .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .translationY(0f)
+            .setDuration(560)
+            .setInterpolator(android.view.animation.OvershootInterpolator(0.8f))
+            .start()
+    }
+
+    private fun messageHeader(message: ChatMessage, index: Int): View {
+        val roleLabel = if (message.role == "assistant") "ASSISTANT" else "USER"
+        val modelLabel = message.modelName.ifBlank { state.currentPreset()?.name.orEmpty() }
+        return LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), dp(14), dp(14), dp(14))
+            background = solid(color(R.color.chat_subtle_surface))
+            addView(TextView(context).apply {
+                text = roleLabel
+                setTextColor(color(R.color.chat_fg))
+                textSize = 12f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+            })
+            addView(TextView(context).apply {
+                text = modelLabel.uppercase(Locale.ROOT)
+                setTextColor(color(R.color.chat_accent_blue))
+                textSize = 10f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+                gravity = Gravity.CENTER
+                background = rounded(Color.argb(48, 96, 165, 250), dp(999), dp(1), color(R.color.chat_accent_blue))
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { marginStart = dp(8) }
+            })
+            addView(Space(context), LinearLayout.LayoutParams(0, 1, 1f))
+            addView(TextView(context).apply {
+                text = "#$index"
+                setTextColor(color(R.color.chat_muted))
+                textSize = 11f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+                gravity = Gravity.CENTER
+                background = rounded(color(R.color.chat_panel), dp(999), dp(1), color(R.color.chat_border))
+                setPadding(dp(9), dp(6), dp(9), dp(6))
+            })
         }
     }
 
-    private fun createIoExecutor(): ExecutorService {
-        return Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "bg-io").apply {
-                priority = Thread.MIN_PRIORITY
-                isDaemon = true
+    private fun messageFooter(message: ChatMessage): View {
+        return LinearLayout(this).apply {
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = solid(color(R.color.chat_subtle_surface))
+            addView(tinyButton("编辑").apply { setOnClickListener { editMessage(message) } })
+            if (message.role == "assistant") {
+                addView(tinyButton("重新生成").apply { setOnClickListener { regenerateAssistant(message) } })
+            }
+            addView(tinyButton("删除", danger = true).apply { setOnClickListener { deleteMessage(message) } })
+        }
+    }
+
+    private fun editMessage(message: ChatMessage) {
+        if (editingMessageId == message.id) {
+            finishEditingMessage()
+            return
+        }
+        if (editingMessageId != null) {
+            finishEditingMessage()
+        }
+        editingMessageEditor?.let { editingMessageDraft = it.text.toString() }
+        val anchor = captureScrollAnchor()
+        followBottom = false
+        editingMessageId = message.id
+        editingMessageDraft = message.content
+        editingMessageEditor = null
+        setEditingFloatingButtonVisible(true)
+        renderMessages(scrollToBottom = false)
+        anchor?.let { restoreScrollAnchorAfterEdit(it) }
+    }
+
+    private fun finishEditingMessage() {
+        val id = editingMessageId ?: return
+        val text = editingMessageEditor?.text?.toString() ?: editingMessageDraft
+        val anchor = captureScrollAnchor()
+        followBottom = false
+        state.activeSession()?.history?.firstOrNull { it.id == id }?.content = text
+        editingMessageId = null
+        editingMessageDraft = ""
+        editingMessageEditor = null
+        val inputMethod = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        inputMethod.hideSoftInputFromWindow(root.windowToken, 0)
+        repository.save(state)
+        setEditingFloatingButtonVisible(false)
+        renderMessages(scrollToBottom = false)
+        anchor?.let { restoreScrollAnchorAfterEdit(it) }
+        renderSessions()
+    }
+
+    private fun setEditingFloatingButtonVisible(visible: Boolean) {
+        if (visible) {
+            val button = editingFloatingButton ?: TextView(this).apply {
+                text = "完成"
+                setTextColor(Color.WHITE)
+                textSize = 13f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+                gravity = Gravity.CENTER
+                background = roundedGradient(color(R.color.chat_accent_blue), Color.rgb(59, 130, 246), dp(8))
+                elevation = dp(8).toFloat()
+                installPressAnimation(this)
+                setOnClickListener { finishEditingMessage() }
+            }.also { editingFloatingButton = it }
+            if (button.parent == null) {
+                root.addView(button)
+            }
+            positionEditingFloatingButton(button)
+            messagesScroll.setPadding(
+                messagesScroll.paddingLeft,
+                messagesScroll.paddingTop,
+                messagesScroll.paddingRight,
+                baseMessagesBottomPadding + dp(62)
+            )
+            button.animate().cancel()
+            button.alpha = 0f
+            button.translationY = dp(10).toFloat()
+            button.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(260)
+                .setInterpolator(entranceInterpolator)
+                .start()
+            mainHandler.post { positionEditingFloatingButton(button) }
+        } else {
+            messagesScroll.setPadding(
+                messagesScroll.paddingLeft,
+                messagesScroll.paddingTop,
+                messagesScroll.paddingRight,
+                baseMessagesBottomPadding
+            )
+            val button = editingFloatingButton ?: return
+            button.animate().cancel()
+            button.animate()
+                .alpha(0f)
+                .translationY(dp(8).toFloat())
+                .setDuration(180)
+                .setInterpolator(softInterpolator)
+                .withEndAction {
+                    (button.parent as? ViewGroup)?.removeView(button)
+                }
+                .start()
+        }
+    }
+
+    private fun positionEditingFloatingButton(button: View) {
+        val composerHeight = if (composer.height > 0) composer.height else dp(132)
+        button.layoutParams = FrameLayout.LayoutParams(dp(74), dp(40), Gravity.BOTTOM or Gravity.END).apply {
+            marginEnd = dp(18)
+            bottomMargin = composerHeight + dp(14)
+        }
+    }
+
+    private fun deleteMessage(message: ChatMessage) {
+        val stick = isNearBottom()
+        val anchor = if (stick) null else captureScrollAnchor()
+        if (editingMessageId == message.id) {
+            editingMessageId = null
+            editingMessageDraft = ""
+            editingMessageEditor = null
+            setEditingFloatingButtonVisible(false)
+        }
+        state.activeSession()?.history?.removeAll { it.id == message.id }
+        repository.save(state)
+        renderMessages(scrollToBottom = stick)
+        anchor?.let { restoreScrollAnchorSoon(it) }
+        renderSessions()
+    }
+
+    private fun regenerateAssistant(message: ChatMessage) {
+        if (isSending) return
+        val session = state.activeSession() ?: return
+        val index = session.history.indexOfFirst { it.id == message.id }
+        if (index < 0) return
+        session.history.removeAt(index)
+        repository.save(state)
+        renderMessages(scrollToBottom = true)
+        requestAssistant()
+    }
+
+    private fun renderSessions() {
+        sessionList.removeAllViews()
+        state.sessions.values.forEach { session ->
+            sessionList.addView(sessionCard(session))
+        }
+    }
+
+    private fun sessionCard(session: ChatSession): View {
+        val active = session.id == state.currentId
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            background = rounded(
+                color(R.color.chat_card),
+                dp(12),
+                dp(1),
+                if (active) color(R.color.chat_accent_blue) else color(R.color.chat_border)
+            )
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(12) }
+            setOnClickListener {
+                if (!isSending) {
+                    if (editingMessageId != null) finishEditingMessage()
+                    state.currentId = session.id
+                    renderMessageLimit = defaultRenderMessageLimit
+                    repository.save(state)
+                    renderAll()
+                    setSidebarVisible(false)
+                }
+            }
+            installPressAnimation(this)
+
+            addView(TextView(context).apply {
+                text = session.name
+                setTextColor(color(R.color.chat_fg))
+                textSize = 14f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+            })
+            addView(TextView(context).apply {
+                val promptName = state.promptPresets[session.promptPresetName]?.name ?: "默认"
+                text = "${session.modelName.ifBlank { state.currentPreset()?.name.orEmpty() }} · 提示词:$promptName · ${session.history.size} 条消息"
+                setTextColor(color(R.color.chat_muted))
+                textSize = 11f
+                includeFontPadding = false
+                setPadding(0, dp(9), 0, 0)
+            })
+            addView(LinearLayout(context).apply {
+                gravity = Gravity.END
+                setPadding(0, dp(10), 0, 0)
+                addView(tinyButton("打开", primary = active).apply {
+                    setOnClickListener {
+                        if (!isSending) {
+                            if (editingMessageId != null) finishEditingMessage()
+                            state.currentId = session.id
+                            renderMessageLimit = defaultRenderMessageLimit
+                            repository.save(state)
+                            renderAll()
+                            setSidebarVisible(false)
+                        }
+                    }
+                })
+                addView(tinyButton("删除", danger = true).apply {
+                    setOnClickListener {
+                        if (state.sessions.size <= 1) {
+                            toast("至少保留一个对话")
+                        } else {
+                            state.sessions.remove(session.id)
+                            if (state.currentId == session.id) state.currentId = state.sessions.keys.firstOrNull()
+                            repository.save(state)
+                            renderAll()
+                        }
+                    }
+                })
+            })
+        }
+    }
+
+    private fun showSettingsDialog() {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        settingsCompact = resources.displayMetrics.widthPixels / resources.displayMetrics.density < 720f
+
+        val contentHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+        }
+        val tabs = listOf("模型预设", "提示词", "备份")
+        val tabViews = mutableListOf<TextView>()
+        var saveCurrentPane: (() -> Boolean)? = null
+
+        val body = LinearLayout(this).apply {
+            orientation = if (settingsCompact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            background = rounded(color(R.color.chat_panel), dp(16), dp(1), color(R.color.chat_border))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+        val tabColumn = LinearLayout(this).apply {
+            orientation = if (settingsCompact) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            background = solid(color(R.color.chat_subtle_surface))
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56))
+            } else {
+                LinearLayout.LayoutParams(dp(132), ViewGroup.LayoutParams.MATCH_PARENT)
+            }
+        }
+        tabs.forEachIndexed { index, label ->
+            val tab = TextView(this).apply {
+                text = label
+                gravity = if (settingsCompact) Gravity.CENTER else Gravity.CENTER_VERTICAL
+                setTextColor(if (index == 0) color(R.color.chat_accent_blue) else color(R.color.chat_muted))
+                textSize = 13f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+                setPadding(dp(16), 0, dp(10), 0)
+                background = if (index == 0) solid(Color.argb(38, 96, 165, 250)) else null
+                layoutParams = if (settingsCompact) {
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                } else {
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56))
+                }
+            }
+            tabViews.add(tab)
+            tabColumn.addView(tab)
+        }
+
+        val paneScroll = ScrollView(this).apply {
+            overScrollMode = View.OVER_SCROLL_NEVER
+            isVerticalScrollBarEnabled = false
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            } else {
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+            }
+        }
+        paneScroll.addView(contentHost)
+        body.addView(tabColumn)
+        body.addView(paneScroll)
+
+        val footer = LinearLayout(this).apply {
+            gravity = Gravity.END
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+            background = solid(color(R.color.chat_subtle_surface))
+        }
+        footer.addView(dialogButton("关闭").apply { setOnClickListener { dialog.dismiss() } })
+        footer.addView(dialogButton("应用", primary = true).apply {
+            setOnClickListener {
+                if (saveCurrentPane?.invoke() == false) return@setOnClickListener
+                repository.save(state)
+                renderAll()
+                toast("已保存")
+            }
+        })
+
+        val shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(color(R.color.chat_panel), dp(16), dp(1), color(R.color.chat_border))
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            addView(body)
+            addView(footer)
+        }
+
+        fun selectTab(index: Int) {
+            tabViews.forEachIndexed { i, tab ->
+                tab.setTextColor(if (i == index) color(R.color.chat_accent_blue) else color(R.color.chat_muted))
+                tab.background = if (i == index) solid(Color.argb(38, 96, 165, 250)) else null
+            }
+            contentHost.animate().cancel()
+            contentHost.removeAllViews()
+            saveCurrentPane = when (index) {
+                0 -> fillModelsPane(contentHost)
+                1 -> fillPromptsPane(contentHost)
+                else -> fillBackupPane(contentHost, dialog)
+            }
+            contentHost.alpha = 0f
+            contentHost.translationY = dp(4).toFloat()
+            contentHost.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(360)
+                .setInterpolator(entranceInterpolator)
+                .start()
+        }
+        tabViews.forEachIndexed { index, tab ->
+            tab.setOnClickListener { selectTab(index) }
+            installPressAnimation(tab)
+        }
+
+        dialog.setContentView(shell)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.setOnShowListener {
+            val width = min(resources.displayMetrics.widthPixels - dp(24), dp(960))
+            val height = min(resources.displayMetrics.heightPixels - dp(72), dp(720))
+            dialog.window?.setLayout(width, height)
+            shell.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+            shell.alpha = 0f
+            shell.translationY = dp(14).toFloat()
+            shell.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(320)
+                .setInterpolator(entranceInterpolator)
+                .withEndAction {
+                    shell.setLayerType(View.LAYER_TYPE_NONE, null)
+                    if (dialog.isShowing) selectTab(0)
+                }
+                .start()
+        }
+        dialog.show()
+    }
+
+    private fun fillModelsPane(host: LinearLayout): () -> Boolean {
+        host.addView(dialogTitle("模型预设配置"))
+        val editors = mutableListOf<ModelPresetEditor>()
+        state.modelPresets.forEachIndexed { index, preset ->
+            val editor = modelPresetEditor(index, preset)
+            editors.add(editor)
+            host.addView(modelPresetCard(editor))
+        }
+        host.addView(dialogButton("+ 新增预设", primary = true).apply {
+            setOnClickListener {
+                state.modelPresets.add(
+                    ModelPreset(
+                        enabled = false,
+                        name = "新预设 ${state.modelPresets.size + 1}",
+                        type = "openai",
+                        config = ModelConfig()
+                    )
+                )
+                repository.save(state)
+                toast("已新增，关闭后重新打开设置可编辑")
+            }
+        })
+        return {
+            val backup = state.modelPresets.map { ModelPreset.fromJson(it.toJson()) }
+            editors.forEach { it.applyTo(state.modelPresets[it.index]) }
+            val enabled = state.enabledPresets()
+            if (enabled.size > 2) {
+                state.modelPresets.clear()
+                state.modelPresets.addAll(backup)
+                toast("最多只能启用2个模型预设")
+                false
+            } else {
+                if (enabled.isEmpty()) state.modelPresets.firstOrNull()?.enabled = true
+                state.currentModelIndex = state.currentModelIndex.coerceIn(0, max(0, state.enabledPresets().size - 1))
+                true
             }
         }
     }
 
-    private fun getIoExecutor(): ExecutorService {
-        return synchronized(executorLock) {
-            if (isDisposed) {
-                throw RejectedExecutionException("DownloadBridge disposed")
+    private fun fillPromptsPane(host: LinearLayout): () -> Boolean {
+        if (!state.promptPresets.containsKey("default")) state.promptPresets["default"] = PromptPreset()
+        var currentKey = state.activeSession()?.promptPresetName
+            ?.takeIf { state.promptPresets.containsKey(it) }
+            ?: "default"
+        var currentEditor: PromptPresetEditor? = null
+
+        val body = LinearLayout(this).apply {
+            orientation = if (settingsCompact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val listHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { bottomMargin = dp(14) }
+            } else {
+                LinearLayout.LayoutParams(dp(220), ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { marginEnd = dp(16) }
             }
-            if (ioExecutor.isShutdown || ioExecutor.isTerminated) {
-                ioExecutor = createIoExecutor()
+        }
+        val editorHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            } else {
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
-            ioExecutor
+        }
+        body.addView(listHost)
+        body.addView(editorHost)
+        host.addView(body)
+
+        fun saveEditor(): Boolean {
+            val editor = currentEditor ?: return true
+            val preset = state.promptPresets[editor.key] ?: return true
+            editor.applyTo(preset)
+            return true
+        }
+
+        fun renderList() {
+            listHost.removeAllViews()
+            listHost.addView(dialogTitle("提示词预设"))
+            state.promptPresets.keys.sorted().forEach { key ->
+                val preset = state.promptPresets[key] ?: return@forEach
+                listHost.addView(promptPresetListItem(key, preset, key == currentKey).apply {
+                    setOnClickListener {
+                        saveEditor()
+                        currentKey = key
+                        renderList()
+                        currentEditor = renderPromptPresetEditor(editorHost, key)
+                    }
+                })
+            }
+            listHost.addView(dialogButton("+ 新增预设", primary = true).apply {
+                setOnClickListener {
+                    saveEditor()
+                    val key = uniquePromptKey("preset_${state.promptPresets.size + 1}")
+                    state.promptPresets[key] = PromptPreset(name = "新预设 ${state.promptPresets.size + 1}")
+                    currentKey = key
+                    renderList()
+                    currentEditor = renderPromptPresetEditor(editorHost, key)
+                }
+            })
+            listHost.addView(dialogButton("复制当前").apply {
+                setOnClickListener {
+                    saveEditor()
+                    val source = state.promptPresets[currentKey] ?: return@setOnClickListener
+                    val key = uniquePromptKey("${currentKey}_copy")
+                    state.promptPresets[key] = source.copy(name = "${source.name} 副本")
+                    currentKey = key
+                    renderList()
+                    currentEditor = renderPromptPresetEditor(editorHost, key)
+                }
+            })
+            listHost.addView(dialogButton("删除当前", danger = true).apply {
+                setOnClickListener {
+                    if (currentKey == "default") {
+                        toast("无法删除默认预设")
+                        return@setOnClickListener
+                    }
+                    state.promptPresets.remove(currentKey)
+                    state.sessions.values.forEach {
+                        if (it.promptPresetName == currentKey) it.promptPresetName = "default"
+                    }
+                    currentKey = "default"
+                    renderList()
+                    currentEditor = renderPromptPresetEditor(editorHost, currentKey)
+                }
+            })
+        }
+
+        renderList()
+        currentEditor = renderPromptPresetEditor(editorHost, currentKey)
+        return { saveEditor() }
+    }
+
+    private fun promptPresetListItem(key: String, preset: PromptPreset, selected: Boolean): View {
+        val desc = listOf(preset.sysPrompt, preset.firstAssistant, preset.firstUser)
+            .firstOrNull { it.isNotBlank() }
+            ?.take(30)
+            ?: "空"
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(
+                if (selected) Color.argb(44, 96, 165, 250) else color(R.color.chat_card),
+                dp(8),
+                dp(1),
+                if (selected) color(R.color.chat_accent_blue) else color(R.color.chat_border)
+            )
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            isClickable = true
+            isFocusable = true
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(8) }
+            addView(TextView(context).apply {
+                text = preset.name.ifBlank { key }
+                setTextColor(if (selected) color(R.color.chat_accent_blue) else color(R.color.chat_fg))
+                textSize = 13f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+            })
+            addView(TextView(context).apply {
+                text = desc
+                setTextColor(color(R.color.chat_muted))
+                textSize = 11f
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(6), 0, 0)
+                includeFontPadding = false
+            })
+            installPressAnimation(this)
         }
     }
 
-    private fun recoverIoExecutor(): ExecutorService? {
-        if (isDisposed) {
-            return null
+    private fun renderPromptPresetEditor(host: LinearLayout, key: String): PromptPresetEditor {
+        host.removeAllViews()
+        val preset = state.promptPresets[key] ?: PromptPreset().also { state.promptPresets[key] = it }
+        host.addView(dialogTitle("编辑预设"))
+        host.addView(TextView(this).apply {
+            text = "当前键: $key"
+            setTextColor(color(R.color.chat_muted))
+            textSize = 11f
+            setPadding(0, 0, 0, dp(12))
+        })
+        val name = field("预设名称", preset.name)
+        val sys = field("系统提示词", preset.sysPrompt, multiLine = true)
+        val firstUser = field("首条用户消息", preset.firstUser, multiLine = true)
+        val firstAssistant = field("首条助手消息", preset.firstAssistant, multiLine = true)
+        val prefix = field("消息前缀", preset.messagePrefix, multiLine = true)
+        val prefill = field("助手预填内容", preset.assistantPrefill, multiLine = true)
+        listOf(name, sys, firstUser, firstAssistant, prefix, prefill).forEach { host.addView(it.container) }
+
+        host.addView(separator(dp(10)))
+        host.addView(sectionLabel("多步任务编排器"))
+        val multiStep = field("配置(JSON)", preset.multiStepRunnerJson, multiLine = true)
+        host.addView(multiStep.container)
+
+        host.addView(separator(dp(10)))
+        host.addView(sectionLabel("正则替换规则(生成后处理)"))
+        val regexHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
-        return synchronized(executorLock) {
-            if (isDisposed) {
-                return null
-            }
-            if (ioExecutor.isShutdown || ioExecutor.isTerminated) {
-                ioExecutor = createIoExecutor()
-            }
-            ioExecutor
+        renderRegexRuleEditors(regexHost, preset.regexRulesJson)
+        host.addView(regexHost)
+        host.addView(dialogButton("+ 添加规则", primary = true).apply {
+            setOnClickListener { addRegexRuleEditor(regexHost, JSONObject()) }
+        })
+
+        return PromptPresetEditor(
+            key = key,
+            name = name,
+            sys = sys,
+            firstUser = firstUser,
+            firstAssistant = firstAssistant,
+            prefix = prefix,
+            prefill = prefill,
+            multiStep = multiStep,
+            regexHost = regexHost,
+            regexRules = { collectRegexRules(regexHost).toString() }
+        )
+    }
+
+    private fun sectionLabel(textValue: String): TextView {
+        return TextView(this).apply {
+            text = textValue
+            setTextColor(color(R.color.chat_muted))
+            textSize = 13f
+            typeface = systemTypeface(Typeface.BOLD)
+            includeFontPadding = false
+            setPadding(0, dp(12), 0, dp(10))
         }
     }
 
-    companion object {
-        private const val SAVE_PENDING = "__NATIVE_PENDING__"
+    private fun renderRegexRuleEditors(host: LinearLayout, rulesJson: String) {
+        host.removeAllViews()
+        val rules = runCatching { JSONArray(rulesJson) }.getOrDefault(JSONArray())
+        if (rules.length() == 0) {
+            host.addView(TextView(this).apply {
+                tag = "empty"
+                text = "暂无规则。点击下方按钮添加。"
+                setTextColor(color(R.color.chat_muted))
+                textSize = 11f
+                setPadding(0, dp(6), 0, dp(10))
+            })
+            return
+        }
+        for (i in 0 until rules.length()) {
+            addRegexRuleEditor(host, rules.optJSONObject(i) ?: JSONObject())
+        }
+    }
+
+    private fun addRegexRuleEditor(host: LinearLayout, rule: JSONObject) {
+        if (host.childCount == 1 && (host.getChildAt(0).tag as? String) == "empty") {
+            host.removeAllViews()
+        } else if (host.childCount == 1 && host.getChildAt(0) is TextView && host.getChildAt(0).tag == null) {
+            host.removeAllViews()
+        }
+        val name = field("规则名称", rule.optString("name"))
+        val pattern = field("查找正则", rule.optString("pattern"), multiLine = true)
+        val replacement = field("替换为", rule.optString("replacement"), multiLine = true)
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(color(R.color.chat_card), dp(10), dp(1), color(R.color.chat_border))
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            tag = RegexRuleRefs(name, pattern, replacement)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(10) }
+            addView(name.container)
+            addView(pattern.container)
+            addView(replacement.container)
+        }
+        card.addView(dialogButton("删除规则", danger = true).apply {
+            setOnClickListener { host.removeView(card) }
+        })
+        host.addView(card)
+    }
+
+    private fun collectRegexRules(host: LinearLayout): JSONArray {
+        val rules = JSONArray()
+        for (i in 0 until host.childCount) {
+            val refs = host.getChildAt(i).tag as? RegexRuleRefs ?: continue
+            val pattern = refs.pattern.value().trim()
+            if (pattern.isBlank()) continue
+            rules.put(
+                JSONObject()
+                    .put("name", refs.name.value().trim())
+                    .put("pattern", pattern)
+                    .put("replacement", refs.replacement.value())
+            )
+        }
+        return rules
+    }
+
+    private fun uniquePromptKey(seed: String): String {
+        val base = seed.trim()
+            .lowercase(Locale.ROOT)
+            .replace(Regex("[^a-z0-9_\\-]+"), "_")
+            .trim('_')
+            .ifBlank { "preset" }
+        var key = base
+        var index = 2
+        while (state.promptPresets.containsKey(key)) {
+            key = "${base}_$index"
+            index += 1
+        }
+        return key
+    }
+
+    private fun fillBackupPane(host: LinearLayout, dialog: Dialog): () -> Boolean {
+        host.addView(dialogTitle("备份"))
+        host.addView(settingsActionCard(
+            title = "导出数据",
+            description = "导出模型预设、提示词预设和对话记录为 JSON 文件。",
+            actions = listOf(
+                dialogButton("导出所有数据", primary = true).apply { setOnClickListener { exportBackup("all") } },
+                dialogButton("仅导出对话记录").apply { setOnClickListener { exportBackup("sessions") } },
+                dialogButton("仅导出配置预设").apply { setOnClickListener { exportBackup("presets") } }
+            )
+        ))
+        host.addView(settingsActionCard(
+            title = "导入数据",
+            description = "从 JSON 备份文件恢复数据。",
+            actions = listOf(
+                dialogButton("合并导入", primary = true).apply {
+                    setOnClickListener {
+                        pendingImportReplace = false
+                        dialog.dismiss()
+                        importLauncher.launch(arrayOf("application/json", "text/*"))
+                    }
+                },
+                dialogButton("替换导入", danger = true).apply {
+                    setOnClickListener {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("替换导入")
+                            .setMessage("替换模式会清空当前对话和预设，确定继续？")
+                            .setPositiveButton("继续") { _, _ ->
+                                pendingImportReplace = true
+                                dialog.dismiss()
+                                importLauncher.launch(arrayOf("application/json", "text/*"))
+                            }
+                            .setNegativeButton("取消", null)
+                            .show()
+                    }
+                }
+            )
+        ))
+        host.addView(settingsActionCard(
+            title = "危险操作",
+            description = "清空当前所有对话、模型预设、提示词预设和配置。",
+            actions = listOf(
+                dialogButton("清空所有数据", danger = true).apply {
+                    setOnClickListener {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("清空数据")
+                            .setMessage("此操作无法恢复，确定删除所有对话、预设和配置吗？")
+                            .setPositiveButton("清空") { _, _ ->
+                                state = NativeChatState.defaults()
+                                state.ensureSession()
+                                repository.save(state)
+                                dialog.dismiss()
+                                renderAll()
+                                toast("已清空")
+                            }
+                            .setNegativeButton("取消", null)
+                            .show()
+                    }
+                }
+            )
+        ))
+        return { true }
+    }
+
+    private fun settingsActionCard(title: String, description: String, actions: List<View>): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(color(R.color.chat_card), dp(12), dp(1), color(R.color.chat_border))
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(14) }
+            addView(TextView(context).apply {
+                text = title
+                setTextColor(color(R.color.chat_accent_blue))
+                textSize = 15f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+            })
+            addView(TextView(context).apply {
+                text = description
+                setTextColor(color(R.color.chat_muted))
+                textSize = 13f
+                setLineSpacing(dp(3).toFloat(), 1.04f)
+                setPadding(0, dp(14), 0, dp(12))
+            })
+            actions.forEach { action ->
+                addView(action.apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { bottomMargin = dp(10) }
+                })
+            }
+        }
+    }
+
+    private fun exportBackup(kind: String) {
+        runCatching {
+            val json = when (kind) {
+                "sessions" -> state.toBackupJson(includeSessions = true, includePresets = false)
+                "presets" -> state.toBackupJson(includeSessions = false, includePresets = true)
+                else -> state.toBackupJson(includeSessions = true, includePresets = true)
+            }
+            val path = repository.exportBackup(backupFilename(kind), json.toString(2))
+            toast("已保存到: $path")
+        }.onFailure { toast("导出失败: ${it.message}") }
+    }
+
+    private fun modelPresetCard(editor: ModelPresetEditor): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(color(R.color.chat_card), dp(12), dp(1), color(R.color.chat_border))
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(14) }
+            addView(TextView(context).apply {
+                text = "预设${editor.index + 1}"
+                setTextColor(color(R.color.chat_accent_blue))
+                textSize = 14f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+                setPadding(0, 0, 0, dp(12))
+            })
+            editor.rows.forEach { addView(it) }
+        }
+    }
+
+    private fun tinyButton(label: String, danger: Boolean = false, primary: Boolean = false): TextView {
+        return TextView(this).apply {
+            text = label
+            setTextColor(if (danger || primary) Color.WHITE else color(R.color.chat_fg))
+            textSize = 12f
+            typeface = systemTypeface(Typeface.BOLD)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            background = when {
+                danger -> roundedGradient(color(R.color.chat_danger), Color.rgb(220, 38, 38), dp(6))
+                primary -> roundedGradient(color(R.color.chat_accent_blue), Color.rgb(59, 130, 246), dp(6))
+                else -> rounded(color(R.color.chat_panel), dp(6), dp(1), color(R.color.chat_border))
+            }
+            setPadding(dp(10), dp(5), dp(10), dp(5))
+            installPressAnimation(this)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = dp(8) }
+        }
+    }
+
+    private fun dialogTitle(title: String): TextView {
+        return TextView(this).apply {
+            text = title
+            setTextColor(color(R.color.chat_fg))
+            textSize = 16f
+            typeface = systemTypeface(Typeface.BOLD)
+            includeFontPadding = false
+            setPadding(0, 0, 0, dp(18))
+        }
+    }
+
+    private fun dialogButton(label: String, primary: Boolean = false, danger: Boolean = false): TextView {
+        return TextView(this).apply {
+            text = label
+            setTextColor(if (primary || danger) Color.WHITE else color(R.color.chat_fg))
+            textSize = 13f
+            typeface = systemTypeface(Typeface.BOLD)
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            background = when {
+                danger -> roundedGradient(color(R.color.chat_danger), Color.rgb(220, 38, 38), dp(8))
+                primary -> roundedGradient(color(R.color.chat_accent_blue), Color.rgb(59, 130, 246), dp(8))
+                else -> rounded(color(R.color.chat_panel), dp(8), dp(1), color(R.color.chat_border))
+            }
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            installPressAnimation(this)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginStart = dp(10)
+                bottomMargin = dp(10)
+            }
+        }
+    }
+
+    private fun field(label: String, value: String, multiLine: Boolean = false): FieldRef {
+        val input = EditText(this).apply {
+            setText(value)
+            setTextColor(color(R.color.chat_fg))
+            setHintTextColor(color(R.color.chat_muted))
+            textSize = 14f
+            minLines = if (multiLine) 3 else 1
+            maxLines = if (multiLine) 8 else 1
+            setSingleLine(!multiLine)
+            gravity = if (multiLine) Gravity.TOP or Gravity.START else Gravity.CENTER_VERTICAL
+            background = rounded(color(R.color.chat_subtle_surface), dp(8), dp(1), color(R.color.chat_border))
+            setPadding(dp(12), if (multiLine) dp(10) else 0, dp(12), if (multiLine) dp(10) else 0)
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, if (multiLine) dp(120) else dp(44))
+            } else {
+                LinearLayout.LayoutParams(0, if (multiLine) dp(96) else dp(44), 1f)
+            }
+        }
+        val container = LinearLayout(this).apply {
+            orientation = if (settingsCompact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            gravity = if (settingsCompact) Gravity.START else Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, if (settingsCompact) dp(14) else dp(11))
+            addView(TextView(context).apply {
+                text = label
+                setTextColor(color(R.color.chat_muted))
+                textSize = 13f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+                layoutParams = if (settingsCompact) {
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                        .apply { bottomMargin = dp(8) }
+                } else {
+                    LinearLayout.LayoutParams(dp(140), ViewGroup.LayoutParams.WRAP_CONTENT)
+                }
+            })
+            addView(input)
+        }
+        return FieldRef(container, input)
+    }
+
+    private fun selectField(
+        label: String,
+        options: List<Pair<String, String>>,
+        selected: String
+    ): SelectRef {
+        val labels = options.map { it.second }
+        val adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, labels) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                return (super.getView(position, convertView, parent) as TextView).apply {
+                    setTextColor(color(R.color.chat_fg))
+                    textSize = 14f
+                    includeFontPadding = false
+                }
+            }
+
+            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+                return (super.getDropDownView(position, convertView, parent) as TextView).apply {
+                    setTextColor(color(R.color.chat_fg))
+                    setBackgroundColor(color(R.color.chat_panel))
+                    textSize = 14f
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                }
+            }
+        }
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        val spinner = Spinner(this).apply {
+            this.adapter = adapter
+            setSelection(options.indexOfFirst { it.first == selected }.takeIf { it >= 0 } ?: 0)
+            background = rounded(color(R.color.chat_subtle_surface), dp(8), dp(1), color(R.color.chat_border))
+            layoutParams = if (settingsCompact) {
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44))
+            } else {
+                LinearLayout.LayoutParams(0, dp(44), 1f)
+            }
+        }
+        val container = LinearLayout(this).apply {
+            orientation = if (settingsCompact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+            gravity = if (settingsCompact) Gravity.START else Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, if (settingsCompact) dp(14) else dp(11))
+            addView(TextView(context).apply {
+                text = label
+                setTextColor(color(R.color.chat_muted))
+                textSize = 13f
+                typeface = systemTypeface(Typeface.BOLD)
+                includeFontPadding = false
+                layoutParams = if (settingsCompact) {
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                        .apply { bottomMargin = dp(8) }
+                } else {
+                    LinearLayout.LayoutParams(dp(140), ViewGroup.LayoutParams.WRAP_CONTENT)
+                }
+            })
+            addView(spinner)
+        }
+        return SelectRef(container, spinner, options)
+    }
+
+    private fun yesNoOptions(): List<Pair<String, String>> {
+        return listOf("true" to "是", "false" to "否")
+    }
+
+    private fun modelTypeOptions(): List<Pair<String, String>> {
+        return listOf(
+            "openai" to "OpenAI",
+            "anthropic" to "Anthropic兼容",
+            "deepseek" to "DeepSeek直连",
+            "kimi" to "Kimi",
+            "gemini" to "Gemini直连",
+            "gemini-proxy" to "Gemini代理"
+        )
+    }
+
+    private fun providerDefaultBase(type: String, value: String): String {
+        if (value.isNotBlank()) return value
+        return when (type) {
+            "anthropic" -> "https://api.anthropic.com/v1"
+            "deepseek" -> "https://api.deepseek.com"
+            "kimi" -> "https://api.moonshot.cn/v1"
+            "gemini" -> "https://generativelanguage.googleapis.com"
+            else -> "https://api.openai.com/v1"
+        }
+    }
+
+    private fun providerDefaultModel(type: String, value: String): String {
+        if (value.isNotBlank()) return value
+        return when (type) {
+            "anthropic" -> "claude-3-5-sonnet-20240620"
+            "deepseek" -> "deepseek-v4-flash"
+            "kimi" -> "kimi-k2.5"
+            "gemini", "gemini-proxy" -> "gemini-2.5-pro"
+            else -> "gpt-4o-mini"
+        }
+    }
+
+    private fun effortOptions(type: String): List<Pair<String, String>> {
+        return when (type) {
+            "deepseek" -> listOf(
+                "" to "默认(high)",
+                "__omit__" to "不发送(兼容)",
+                "high" to "high",
+                "max" to "max"
+            )
+            "anthropic" -> listOf(
+                "" to "默认(high)",
+                "__omit__" to "不发送(兼容)",
+                "low" to "low",
+                "medium" to "medium",
+                "high" to "high",
+                "xhigh" to "xhigh",
+                "max" to "max"
+            )
+            else -> listOf(
+                "" to "默认(medium)",
+                "__omit__" to "不发送(兼容)",
+                "none" to "none",
+                "minimal" to "minimal",
+                "low" to "low",
+                "medium" to "medium",
+                "high" to "high",
+                "xhigh" to "xhigh"
+            )
+        }
+    }
+
+    private fun geminiThinkingLevelOptions(): List<Pair<String, String>> {
+        return listOf(
+            "" to "默认(high/自动)",
+            "minimal" to "minimal",
+            "low" to "low",
+            "medium" to "medium",
+            "high" to "high"
+        )
+    }
+
+    private fun modelPresetEditor(index: Int, preset: ModelPreset): ModelPresetEditor {
+        val typeValue = preset.type.lowercase(Locale.ROOT).ifBlank { "openai" }
+        val enabled = selectField("启用", yesNoOptions(), if (preset.enabled) "true" else "false")
+        val name = field("显示名称", preset.name)
+        val type = selectField("模型类型", modelTypeOptions(), typeValue)
+        val base = if (typeValue == "gemini-proxy") null else field("Base URL", providerDefaultBase(typeValue, preset.config.base))
+        val proxyUrl = if (typeValue == "gemini-proxy") field("代理URL", preset.config.proxyUrl.ifBlank { "http://127.0.0.1:8889" }) else null
+        val proxyPass = if (typeValue == "gemini-proxy") field("代理密码", preset.config.proxyPass) else null
+        val key = if (typeValue == "gemini-proxy") null else field("API Key", preset.config.key)
+        val model = field("模型名", providerDefaultModel(typeValue, preset.config.model))
+        val temperature = field("温度(0=不发送)", preset.config.temperature.toString())
+        val topP = field("Top P(0=不发送)", preset.config.topP.toString())
+        val topK = if (typeValue == "gemini" || typeValue == "gemini-proxy") field("Top K(0=不发送)", preset.config.topK.takeIf { it != 0 }?.toString().orEmpty()) else null
+        val tokenValue = if (typeValue == "gemini" || typeValue == "gemini-proxy") {
+            preset.config.maxOutputTokens
+        } else {
+            preset.config.maxTokens
+        }
+        val maxTokens = field("最大输出长度(0=不发送)", tokenValue.toString())
+        val stream = selectField("流式输出", yesNoOptions(), if (preset.config.stream) "true" else "false")
+        val useThinking = selectField("启用思维链", yesNoOptions(), if (preset.config.useThinking) "true" else "false")
+        val thinkingEffort = when (typeValue) {
+            "gemini", "gemini-proxy", "kimi" -> null
+            else -> selectField("思维链级别", effortOptions(typeValue), preset.config.thinkingEffort)
+        }
+        val thinkingLevel = if (typeValue == "gemini" || typeValue == "gemini-proxy") {
+            selectField("思维级别", geminiThinkingLevelOptions(), preset.config.thinkingLevel)
+        } else {
+            null
+        }
+        val thinkingBudget = when (typeValue) {
+            "anthropic" -> field("思维预算", preset.config.thinkingBudget.takeIf { it >= 1024 }?.toString().orEmpty())
+            "gemini", "gemini-proxy" -> field("思维预算", preset.config.thinkingBudget.toString())
+            else -> null
+        }
+        val rows = mutableListOf<View>(
+            enabled.container,
+            name.container,
+            type.container
+        )
+        listOf(base, proxyUrl, proxyPass, key, model, temperature, topP, topK, maxTokens).forEach {
+            if (it != null) rows.add(it.container)
+        }
+        rows.add(stream.container)
+        rows.add(useThinking.container)
+        if (thinkingEffort != null) rows.add(thinkingEffort.container)
+        if (thinkingLevel != null) rows.add(thinkingLevel.container)
+        if (thinkingBudget != null) rows.add(thinkingBudget.container)
+
+        return ModelPresetEditor(
+            index = index,
+            rows = rows,
+            enabled = enabled,
+            name = name,
+            type = type,
+            base = base,
+            proxyUrl = proxyUrl,
+            proxyPass = proxyPass,
+            model = model,
+            key = key,
+            temperature = temperature,
+            topP = topP,
+            topK = topK,
+            maxTokens = maxTokens,
+            stream = stream,
+            useThinking = useThinking,
+            thinkingEffort = thinkingEffort,
+            thinkingBudget = thinkingBudget,
+            thinkingLevel = thinkingLevel
+        )
+    }
+
+    private fun applySystemFontTree(view: View) {
+        if (view is TextView) {
+            view.typeface = systemTypeface(view.typeface?.style ?: Typeface.NORMAL)
+            if (view.isClickable) installPressAnimation(view)
+        }
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                applySystemFontTree(view.getChildAt(i))
+            }
+        }
+    }
+
+    private fun systemTypeface(style: Int = Typeface.NORMAL): Typeface {
+        val wantsBold = style and Typeface.BOLD != 0
+        val wantsItalic = style and Typeface.ITALIC != 0
+        return when {
+            wantsBold && wantsItalic -> Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC)
+            wantsBold -> Typeface.DEFAULT_BOLD
+            wantsItalic -> Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+            else -> Typeface.DEFAULT
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun installPressAnimation(view: View) {
+        view.setOnTouchListener { target, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    target.animate().cancel()
+                    target.animate()
+                        .scaleX(0.972f)
+                        .scaleY(0.972f)
+                        .translationY(resources.displayMetrics.density * 0.5f)
+                        .alpha(0.92f)
+                        .setDuration(90)
+                        .setInterpolator(softInterpolator)
+                        .start()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    target.animate().cancel()
+                    target.animate()
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .translationY(0f)
+                        .alpha(1f)
+                        .setDuration(220)
+                        .setInterpolator(entranceInterpolator)
+                        .start()
+                }
+            }
+            false
+        }
+    }
+
+    private fun separator(height: Int = dp(1)): View {
+        return View(this).apply {
+            setBackgroundColor(color(R.color.chat_separator))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height)
+        }
+    }
+
+    private fun solid(@ColorInt color: Int): GradientDrawable {
+        return GradientDrawable().apply { setColor(color) }
+    }
+
+    private fun rounded(
+        @ColorInt color: Int,
+        radius: Int,
+        strokeWidth: Int = 0,
+        @ColorInt strokeColor: Int = Color.TRANSPARENT
+    ): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radius.toFloat()
+            if (strokeWidth > 0) setStroke(strokeWidth, strokeColor)
+        }
+    }
+
+    private fun roundedGradient(
+        @ColorInt startColor: Int,
+        @ColorInt endColor: Int,
+        radius: Int
+    ): GradientDrawable {
+        return GradientDrawable(
+            GradientDrawable.Orientation.TL_BR,
+            intArrayOf(startColor, endColor)
+        ).apply {
+            cornerRadius = radius.toFloat()
+        }
+    }
+
+    private fun color(id: Int): Int = ContextCompat.getColor(this, id)
+
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density + 0.5f).toInt()
+    }
+
+    private fun toast(message: String) {
+        Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
+    }
+
+    private data class FieldRef(val container: View, val input: EditText) {
+        fun value(): String = input.text.toString()
+    }
+
+    private data class SelectRef(
+        val container: View,
+        val spinner: Spinner,
+        val options: List<Pair<String, String>>
+    ) {
+        fun value(): String = options.getOrNull(spinner.selectedItemPosition)?.first.orEmpty()
+    }
+
+    private data class RegexRuleRefs(
+        val name: FieldRef,
+        val pattern: FieldRef,
+        val replacement: FieldRef
+    )
+
+    private data class ScrollAnchor(
+        val position: Int,
+        val offset: Int,
+        val absoluteOffset: Int
+    )
+
+    private data class StreamBodyViews(
+        val host: LinearLayout,
+        val prefix: TextView,
+        val tail: StreamTailView,
+        var prefixMeasuredWidth: Int = -1,
+        var prefixMeasuredTextLength: Int = -1,
+        var prefixMeasuredHeight: Int = 0
+    ) {
+        fun invalidatePrefixMeasure() {
+            prefixMeasuredWidth = -1
+            prefixMeasuredTextLength = -1
+            prefixMeasuredHeight = 0
+        }
+    }
+
+    private data class StreamBodyUpdate(
+        val changed: Boolean = false,
+        val heightChanged: Boolean = false
+    )
+
+    private data class StreamSegmentUpdate(
+        val heightMayHaveChanged: Boolean = false
+    )
+
+    private data class StreamTextSegmentState(
+        var frozenRawLength: Int = 0,
+        var prefixRaw: String = "",
+        var tailRaw: String = "",
+        var prefixFormatter: StreamFormatState? = null,
+        var tailFormatter: StreamFormatState? = null
+    ) {
+        fun reset() {
+            frozenRawLength = 0
+            prefixRaw = ""
+            tailRaw = ""
+            prefixFormatter = null
+            tailFormatter = null
+        }
+    }
+
+    private class StreamTailView(context: Context) : View(context) {
+        private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
+        private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var streamText: CharSequence = ""
+        private var cachedLayout: StaticLayout? = null
+        private var cachedLayoutWidth = -1
+        private val density = resources.displayMetrics.density
+        private val cursorGap = 2f * density
+        private val cursorWidth = (2f * density).coerceAtLeast(1f)
+        private val cursorInset = 3f * density
+        private val cursorBlinkMs = 560L
+
+        init {
+            textPaint.density = resources.displayMetrics.density
+            cursorPaint.color = ContextCompat.getColor(context, R.color.chat_accent_blue)
+        }
+
+        var typeface: Typeface?
+            get() = textPaint.typeface
+            set(value) {
+                textPaint.typeface = value
+                invalidateLayout()
+            }
+
+        var includeFontPadding: Boolean = true
+            set(value) {
+                if (field == value) return
+                field = value
+                invalidateLayout()
+            }
+
+        var lineSpacingExtra: Float = 0f
+            set(value) {
+                if (field == value) return
+                field = value
+                invalidateLayout()
+            }
+
+        var lineSpacingMultiplier: Float = 1f
+            set(value) {
+                if (field == value) return
+                field = value
+                invalidateLayout()
+            }
+
+        fun setTextColorValue(@ColorInt color: Int) {
+            if (textPaint.color == color) return
+            textPaint.color = color
+            invalidate()
+        }
+
+        fun setTextSizePxValue(sizePx: Float) {
+            if (textPaint.textSize == sizePx) return
+            textPaint.textSize = sizePx
+            invalidateLayout()
+        }
+
+        fun clearText(): Boolean {
+            return setStreamText("")
+        }
+
+        fun isTextEmpty(): Boolean = streamText.isEmpty()
+
+        fun desiredHeightForWidth(contentWidth: Int): Int {
+            if (streamText.isEmpty()) return 0
+            return paddingTop + layoutForWidth(contentWidth.coerceAtLeast(1)).height + paddingBottom
+        }
+
+        fun setStreamText(value: CharSequence): Boolean {
+            if (TextUtils.equals(streamText, value)) return false
+            val oldHeight = cachedLayout?.height ?: 0
+            streamText = SpannableStringBuilder(value)
+            val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(0)
+            if (contentWidth <= 0 || !isShown || !ViewCompat.isAttachedToWindow(this)) {
+                invalidateLayout()
+                return true
+            }
+            val nextLayout = buildLayout(contentWidth)
+            cachedLayout = nextLayout
+            cachedLayoutWidth = contentWidth
+            val heightChanged = nextLayout.height != oldHeight
+            if (heightChanged) {
+                requestLayout()
+            }
+            invalidate()
+            return heightChanged
+        }
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val width = View.MeasureSpec.getSize(widthMeasureSpec)
+            val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
+            val layout = layoutForWidth(contentWidth)
+            val desiredHeight = paddingTop + layout.height + paddingBottom
+            setMeasuredDimension(
+                resolveSize(width, widthMeasureSpec),
+                resolveSize(if (streamText.isEmpty()) 0 else desiredHeight, heightMeasureSpec)
+            )
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            if (streamText.isEmpty()) return
+            val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
+            val layout = layoutForWidth(contentWidth)
+            canvas.save()
+            canvas.translate(paddingLeft.toFloat(), paddingTop.toFloat())
+            layout.draw(canvas)
+            drawCursor(canvas, layout, contentWidth)
+            canvas.restore()
+            if (isShown && ViewCompat.isAttachedToWindow(this)) {
+                postInvalidateDelayed(cursorBlinkMs)
+            }
+        }
+
+        private fun drawCursor(canvas: Canvas, layout: StaticLayout, contentWidth: Int) {
+            if ((android.os.SystemClock.uptimeMillis() / cursorBlinkMs) % 2L != 0L) return
+            val line = (layout.lineCount - 1).coerceAtLeast(0)
+            val x = (layout.getLineRight(line) + cursorGap)
+                .coerceAtMost(contentWidth - cursorWidth)
+                .coerceAtLeast(0f)
+            val top = layout.getLineTop(line).toFloat() + cursorInset
+            val bottom = layout.getLineBottom(line).toFloat() - cursorInset
+            if (bottom <= top) return
+            canvas.drawRoundRect(
+                x,
+                top,
+                x + cursorWidth,
+                bottom,
+                cursorWidth / 2f,
+                cursorWidth / 2f,
+                cursorPaint
+            )
+        }
+
+        private fun layoutForWidth(width: Int): StaticLayout {
+            cachedLayout?.let {
+                if (cachedLayoutWidth == width) return it
+            }
+            val layout = buildLayout(width)
+            cachedLayout = layout
+            cachedLayoutWidth = width
+            return layout
+        }
+
+        private fun buildLayout(width: Int): StaticLayout {
+            return StaticLayout.Builder.obtain(streamText, 0, streamText.length, textPaint, width)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setLineSpacing(lineSpacingExtra, lineSpacingMultiplier)
+                .setIncludePad(includeFontPadding)
+                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+                .build()
+        }
+
+        private fun invalidateLayout() {
+            cachedLayout = null
+            cachedLayoutWidth = -1
+            requestLayout()
+            invalidate()
+        }
+    }
+
+    private data class StreamRenderTarget(
+        var message: ChatMessage,
+        var targetContent: String = "",
+        var targetThinking: String = "",
+        var visibleContent: String = "",
+        var visibleThinking: String = "",
+        var visibleContentLength: Int = visibleContent.length,
+        var visibleThinkingLength: Int = visibleThinking.length,
+        var finishWhenCaught: Boolean = false,
+        var lastRevealAt: Long = 0L,
+        var lastTargetUpdateAt: Long = 0L,
+        var lastTickAt: Long = 0L,
+        var contentReleaseEnd: Int = 0,
+        var unreleasedContentSince: Long = 0L,
+        var thinkingRevealCarry: Float = 0f,
+        var lastUiCommitAt: Long = 0L,
+        var lastThinkingUiCommitAt: Long = 0L,
+        var lastOffscreenUiCommitAt: Long = 0L,
+        var forceNextUiCommit: Boolean = false,
+        var contentPrefixValid: Boolean = true,
+        var thinkingPrefixValid: Boolean = true,
+        var releaseScanStart: Int = -1,
+        var releaseScanLength: Int = -1,
+        var releaseScanBoundary: Int = -1
+    )
+
+    private data class RevealBudget(
+        val chars: Int,
+        val carry: Float
+    )
+
+    private data class StreamRenderResult(
+        val text: CharSequence,
+        val changedStart: Int,
+        val changedEnd: Int
+    )
+
+    private data class StreamBodyMeasureState(
+        var width: Int = 0,
+        var textLength: Int = 0,
+        var estimatedLines: Int = 1,
+        var lineUnits: Float = 0f,
+        var unitsPerLine: Float = 1f,
+        var lineHeight: Int = 0,
+        var baseHeight: Int = 0,
+        var targetHeight: Int = 0
+    )
+
+    private enum class StreamMode {
+        PLAIN,
+        DOUBLE_QUOTE,
+        CHINESE_QUOTE,
+        STAR
+    }
+
+    private class StreamFormatState(
+        @ColorInt private val quoteColor: Int,
+        @ColorInt private val starColor: Int
+    ) {
+        private val rendered = SpannableStringBuilder()
+        private var raw = ""
+        private var mode = StreamMode.PLAIN
+        private var specialStart = -1
+
+        fun render(text: String): StreamRenderResult {
+            val previousRenderedLength = rendered.length
+            var appendOnly = true
+            if (!text.startsWith(raw)) {
+                reset()
+                appendOnly = false
+            }
+            val changedStart = feed(text.substring(raw.length), if (appendOnly) previousRenderedLength else 0)
+            raw = text
+            return StreamRenderResult(rendered, changedStart.coerceIn(0, rendered.length), rendered.length)
+        }
+
+        private fun reset() {
+            rendered.clear()
+            raw = ""
+            mode = StreamMode.PLAIN
+            specialStart = -1
+        }
+
+        private fun feed(delta: String, initialChangedStart: Int): Int {
+            var changedStart = initialChangedStart
+            delta.forEach { ch ->
+                when {
+                    mode == StreamMode.PLAIN && isDoubleQuote(ch) -> {
+                        changedStart = min(changedStart, rendered.length)
+                        open(StreamMode.DOUBLE_QUOTE, ch)
+                    }
+                    mode == StreamMode.DOUBLE_QUOTE && isQuote(ch) -> closeQuote(ch)
+                    mode == StreamMode.PLAIN && isChineseOpenQuote(ch) -> {
+                        changedStart = min(changedStart, rendered.length)
+                        open(StreamMode.CHINESE_QUOTE, ch)
+                    }
+                    mode == StreamMode.CHINESE_QUOTE && (isChineseCloseQuote(ch) || isQuote(ch)) -> closeQuote(ch)
+                    mode == StreamMode.PLAIN && isStar(ch) -> {
+                        changedStart = min(changedStart, rendered.length)
+                        open(StreamMode.STAR, ch)
+                    }
+                    mode == StreamMode.STAR && isStar(ch) -> closeStar()
+                    else -> {
+                        changedStart = min(changedStart, rendered.length)
+                        rendered.append(ch)
+                    }
+                }
+            }
+            return changedStart
+        }
+
+        private fun open(nextMode: StreamMode, ch: Char) {
+            mode = nextMode
+            specialStart = rendered.length
+            rendered.append(ch)
+        }
+
+        private fun closeQuote(closer: Char) {
+            val start = specialStart.coerceAtLeast(0)
+            rendered.append(closer)
+            rendered.setSpan(ForegroundColorSpan(quoteColor), start, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            mode = StreamMode.PLAIN
+            specialStart = -1
+        }
+
+        private fun closeStar() {
+            val start = specialStart.coerceAtLeast(0)
+            if (start < rendered.length) rendered.delete(start, start + 1)
+            if (start < rendered.length) {
+                rendered.setSpan(ForegroundColorSpan(starColor), start, rendered.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            mode = StreamMode.PLAIN
+            specialStart = -1
+        }
+
+        private fun isDoubleQuote(ch: Char): Boolean {
+            return ch == '"' || ch == '\uFF02'
+        }
+
+        private fun isChineseOpenQuote(ch: Char): Boolean = ch == '\u201C'
+
+        private fun isChineseCloseQuote(ch: Char): Boolean = ch == '\u201D'
+
+        private fun isQuote(ch: Char): Boolean {
+            return isDoubleQuote(ch) || isChineseOpenQuote(ch) || isChineseCloseQuote(ch)
+        }
+
+        private fun isStar(ch: Char): Boolean {
+            return ch == '*' || ch == '\uFF0A'
+        }
+    }
+
+    private data class PromptPresetEditor(
+        val key: String,
+        val name: FieldRef,
+        val sys: FieldRef,
+        val firstUser: FieldRef,
+        val firstAssistant: FieldRef,
+        val prefix: FieldRef,
+        val prefill: FieldRef,
+        val multiStep: FieldRef,
+        val regexHost: LinearLayout,
+        val regexRules: () -> String
+    ) {
+        fun applyTo(preset: PromptPreset) {
+            preset.name = name.value().ifBlank { preset.name }
+            preset.sysPrompt = sys.value()
+            preset.firstUser = firstUser.value()
+            preset.firstAssistant = firstAssistant.value()
+            preset.messagePrefix = prefix.value()
+            preset.assistantPrefill = prefill.value()
+            preset.multiStepRunnerJson = multiStep.value().ifBlank { "{\"enabled\":false,\"steps\":[]}" }
+            preset.regexRulesJson = regexRules()
+        }
+    }
+
+    private class ModelPresetEditor(
+        val index: Int,
+        val rows: List<View>,
+        val enabled: SelectRef,
+        val name: FieldRef,
+        val type: SelectRef,
+        val base: FieldRef?,
+        val proxyUrl: FieldRef?,
+        val proxyPass: FieldRef?,
+        val model: FieldRef,
+        val key: FieldRef?,
+        val temperature: FieldRef,
+        val topP: FieldRef,
+        val topK: FieldRef?,
+        val maxTokens: FieldRef,
+        val stream: SelectRef,
+        val useThinking: SelectRef,
+        val thinkingEffort: SelectRef?,
+        val thinkingBudget: FieldRef?,
+        val thinkingLevel: SelectRef?
+    ) {
+        fun applyTo(preset: ModelPreset) {
+            preset.enabled = enabled.value() == "true"
+            preset.name = name.value().ifBlank { preset.name }
+            preset.type = type.value().trim().lowercase(Locale.ROOT).ifBlank { "openai" }
+            base?.let { preset.config.base = it.value().trim() }
+            proxyUrl?.let { preset.config.proxyUrl = it.value().trim() }
+            proxyPass?.let { preset.config.proxyPass = it.value().trim() }
+            preset.config.model = model.value().trim()
+            key?.let { preset.config.key = it.value().trim() }
+            preset.config.temperature = temperature.value().toDoubleOrNull() ?: preset.config.temperature
+            preset.config.topP = topP.value().toDoubleOrNull() ?: preset.config.topP
+            topK?.let { preset.config.topK = it.value().toIntOrNull() ?: 0 }
+            val maxValue = maxTokens.value().toIntOrNull()
+            if (preset.type == "gemini" || preset.type == "gemini-proxy") {
+                if (maxValue != null) preset.config.maxOutputTokens = maxValue
+            } else {
+                if (maxValue != null) {
+                    preset.config.maxTokens = maxValue
+                    preset.config.maxOutputTokens = maxValue
+                }
+            }
+            preset.config.stream = stream.value() == "true"
+            preset.config.useThinking = useThinking.value() == "true"
+            thinkingEffort?.let { preset.config.thinkingEffort = it.value() }
+            thinkingBudget?.let { preset.config.thinkingBudget = it.value().toIntOrNull() ?: preset.config.thinkingBudget }
+            thinkingLevel?.let { preset.config.thinkingLevel = it.value() }
+        }
     }
 }
