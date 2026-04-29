@@ -121,8 +121,8 @@ class MainActivity : AppCompatActivity() {
     private var renderMessageLimit = defaultRenderMessageLimit
     private val scrollTrackFrameMs = 96L
     private val streamFrameMs = 120L
-    private val streamDetachedFrameMs = 260L
-    private val streamDetachedVisibleFrameMs = 220L
+    private val streamDetachedFrameMs = 120L
+    private val streamDetachedVisibleFrameMs = 50L
     private val streamLineFlushChars = 120
     private val streamThinkingFlushChars = 480
     private val streamMaxWaitMs = 240L
@@ -1205,6 +1205,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val targetHeight = estimateStreamingTextHeightForSegments(messageId, views, oldWidth, rawContent)
+            .coerceAtLeast(measureStreamingBodyHeight(views, oldWidth))
         val activeTarget = streamBodyHeightTargets[messageId]
         val activeAnimation = streamBodyHeightAnimationTokens[messageId]
         if (activeTarget == targetHeight && activeAnimation != null) {
@@ -1212,7 +1213,11 @@ class MainActivity : AppCompatActivity() {
         }
         val fromHeight = currentBodyHeight(views.host)
         if (targetHeight > fromHeight + dp(1) && targetHeight > (activeTarget ?: 0) + dp(1)) {
-            animateStreamingBodyHeight(messageId, views.host, fromHeight, targetHeight)
+            streamBodyHeightAnimators.remove(messageId)?.cancel()
+            streamBodyHeightAnimationTokens.remove(messageId)
+            streamBodyHeightTargets.remove(messageId)
+            pinBodyHeight(views.host, targetHeight)
+            if (followBottom && !userTouchingMessages) scrollToBottomDuringStream()
             return
         }
         if (activeTarget == null && activeAnimation == null) {
@@ -1233,6 +1238,7 @@ class MainActivity : AppCompatActivity() {
             if (prefixRaw != segment.prefixRaw) {
                 views.prefix.text = formatMessageText(prefixRaw)
                 views.prefix.visibility = if (prefixRaw.isEmpty()) View.GONE else View.VISIBLE
+                views.invalidatePrefixMeasure()
                 segment.prefixRaw = prefixRaw
             }
             segment.frozenRawLength = nextFreezeEnd
@@ -1243,9 +1249,11 @@ class MainActivity : AppCompatActivity() {
         ) {
             views.prefix.text = formatMessageText(segment.prefixRaw)
             views.prefix.visibility = View.VISIBLE
+            views.invalidatePrefixMeasure()
         } else if (segment.prefixRaw.isEmpty() && views.prefix.visibility != View.GONE) {
             views.prefix.text = ""
             views.prefix.visibility = View.GONE
+            views.invalidatePrefixMeasure()
         }
 
         val tailRaw = rawContent.substring(segment.frozenRawLength.coerceIn(0, rawContent.length))
@@ -1358,6 +1366,36 @@ class MainActivity : AppCompatActivity() {
         state.lineHeight = views.prefix.lineHeight.coerceAtLeast(1)
         state.baseHeight = views.host.paddingTop + views.host.paddingBottom + dp(3)
         state.targetHeight = state.baseHeight + state.lineHeight
+    }
+
+    private fun measureStreamingBodyHeight(views: StreamBodyViews, width: Int): Int {
+        val contentWidth = (width - views.host.paddingLeft - views.host.paddingRight).coerceAtLeast(dp(80))
+        val prefixHeight = measureStreamingPrefixHeight(views, contentWidth)
+        val tailHeight = if (views.tail.visibility == View.VISIBLE) {
+            views.tail.desiredHeightForWidth(contentWidth)
+        } else {
+            0
+        }
+        return views.host.paddingTop + views.host.paddingBottom + prefixHeight + tailHeight
+    }
+
+    private fun measureStreamingPrefixHeight(views: StreamBodyViews, contentWidth: Int): Int {
+        if (views.prefix.visibility != View.VISIBLE || views.prefix.text.isEmpty()) return 0
+        val textLength = views.prefix.text.length
+        if (views.prefixMeasuredWidth == contentWidth &&
+            views.prefixMeasuredTextLength == textLength &&
+            views.prefixMeasuredHeight > 0
+        ) {
+            return views.prefixMeasuredHeight
+        }
+        views.prefix.measure(
+            View.MeasureSpec.makeMeasureSpec(contentWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        views.prefixMeasuredWidth = contentWidth
+        views.prefixMeasuredTextLength = textLength
+        views.prefixMeasuredHeight = views.prefix.measuredHeight
+        return views.prefixMeasuredHeight
     }
 
     private fun estimateStreamingTextHeight(
@@ -2119,9 +2157,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun deleteMessage(message: ChatMessage) {
+        val stick = isNearBottom()
+        val anchor = if (stick) null else captureScrollAnchor()
         state.activeSession()?.history?.removeAll { it.id == message.id }
         repository.save(state)
-        renderMessages()
+        renderMessages(scrollToBottom = stick)
+        anchor?.let { restoreScrollAnchorSoon(it) }
         renderSessions()
     }
 
@@ -3142,8 +3183,17 @@ class MainActivity : AppCompatActivity() {
     private data class StreamBodyViews(
         val host: LinearLayout,
         val prefix: TextView,
-        val tail: StreamTailView
-    )
+        val tail: StreamTailView,
+        var prefixMeasuredWidth: Int = -1,
+        var prefixMeasuredTextLength: Int = -1,
+        var prefixMeasuredHeight: Int = 0
+    ) {
+        fun invalidatePrefixMeasure() {
+            prefixMeasuredWidth = -1
+            prefixMeasuredTextLength = -1
+            prefixMeasuredHeight = 0
+        }
+    }
 
     private data class StreamTextSegmentState(
         var frozenRawLength: Int = 0,
@@ -3214,6 +3264,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun isTextEmpty(): Boolean = streamText.isEmpty()
+
+        fun desiredHeightForWidth(contentWidth: Int): Int {
+            if (streamText.isEmpty()) return 0
+            return paddingTop + layoutForWidth(contentWidth.coerceAtLeast(1)).height + paddingBottom
+        }
 
         fun setStreamText(value: CharSequence) {
             streamText = SpannableStringBuilder(value)
