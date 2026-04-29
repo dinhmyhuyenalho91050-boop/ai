@@ -128,7 +128,7 @@ class MainActivity : AppCompatActivity() {
     private val streamThinkingFlushChars = 480
     private val streamLiveFlushMs = 48L
     private val streamFastFlushMs = 900L
-    private val streamRevealFrameMs = 16L
+    private val streamRevealFrameMs = 48L
     private val streamRevealTouchFrameMs = 120L
     private val streamUiCommitFrameMs = 48L
     private val streamContentMaxCharsPerTick = 2048
@@ -3402,12 +3402,19 @@ class MainActivity : AppCompatActivity() {
 
     private class StreamTailView(context: Context) : View(context) {
         private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
+        private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
         private var streamText: CharSequence = ""
         private var cachedLayout: StaticLayout? = null
         private var cachedLayoutWidth = -1
+        private val density = resources.displayMetrics.density
+        private val cursorGap = 2f * density
+        private val cursorWidth = (2f * density).coerceAtLeast(1f)
+        private val cursorInset = 3f * density
+        private val cursorBlinkMs = 560L
 
         init {
             textPaint.density = resources.displayMetrics.density
+            cursorPaint.color = ContextCompat.getColor(context, R.color.chat_accent_blue)
         }
 
         var typeface: Typeface?
@@ -3497,7 +3504,31 @@ class MainActivity : AppCompatActivity() {
             canvas.save()
             canvas.translate(paddingLeft.toFloat(), paddingTop.toFloat())
             layout.draw(canvas)
+            drawCursor(canvas, layout, contentWidth)
             canvas.restore()
+            if (isShown && ViewCompat.isAttachedToWindow(this)) {
+                postInvalidateDelayed(cursorBlinkMs)
+            }
+        }
+
+        private fun drawCursor(canvas: Canvas, layout: StaticLayout, contentWidth: Int) {
+            if ((android.os.SystemClock.uptimeMillis() / cursorBlinkMs) % 2L != 0L) return
+            val line = (layout.lineCount - 1).coerceAtLeast(0)
+            val x = (layout.getLineRight(line) + cursorGap)
+                .coerceAtMost(contentWidth - cursorWidth)
+                .coerceAtLeast(0f)
+            val top = layout.getLineTop(line).toFloat() + cursorInset
+            val bottom = layout.getLineBottom(line).toFloat() - cursorInset
+            if (bottom <= top) return
+            canvas.drawRoundRect(
+                x,
+                top,
+                x + cursorWidth,
+                bottom,
+                cursorWidth / 2f,
+                cursorWidth / 2f,
+                cursorPaint
+            )
         }
 
         private fun layoutForWidth(width: Int): StaticLayout {
