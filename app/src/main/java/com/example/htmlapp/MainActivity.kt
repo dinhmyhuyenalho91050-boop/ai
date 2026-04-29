@@ -3345,6 +3345,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 LinearLayout.LayoutParams(0, if (multiLine) dp(96) else dp(44), 1f)
             }
+            if (multiLine) installNestedEditScroll(this)
         }
         val container = LinearLayout(this).apply {
             orientation = if (settingsCompact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
@@ -3366,6 +3367,34 @@ class MainActivity : AppCompatActivity() {
             addView(input)
         }
         return FieldRef(container, input)
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun installNestedEditScroll(input: EditText) {
+        input.isVerticalScrollBarEnabled = true
+        input.overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+        var lastY = 0f
+        input.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    lastY = event.y
+                    if (view.canScrollVertically(1) || view.canScrollVertically(-1)) {
+                        view.parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dy = event.y - lastY
+                    lastY = event.y
+                    val scrollingDown = dy < 0f
+                    val canScroll = if (scrollingDown) view.canScrollVertically(1) else view.canScrollVertically(-1)
+                    view.parent?.requestDisallowInterceptTouchEvent(canScroll)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    view.parent?.requestDisallowInterceptTouchEvent(false)
+                }
+            }
+            false
+        }
     }
 
     private fun selectField(
