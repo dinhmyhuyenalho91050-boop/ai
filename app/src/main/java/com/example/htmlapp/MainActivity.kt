@@ -140,6 +140,7 @@ class MainActivity : AppCompatActivity() {
     private val streamTailMaxChars = 900
     private val streamFrozenPrefixMinChars = 500
     private val streamBottomScrollFrameMs = 16L
+    private var streamBottomFollowScheduled = false
     private val scrollTouchCooldownMs = 280L
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
     private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
@@ -207,7 +208,7 @@ class MainActivity : AppCompatActivity() {
                     streamLiveModeNow = isWithinLiveStreamDistance()
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (!programmaticScroll) followBottom = isNearBottom()
+                    if (!programmaticScroll && userTouchingMessages) followBottom = isNearBottom()
                     streamLiveModeNow = isWithinLiveStreamDistance()
                     scheduleScrollTracking()
                 }
@@ -254,7 +255,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                if (!programmaticScroll) followBottom = isNearBottom()
+                if (!programmaticScroll && userTouchingMessages) followBottom = isNearBottom()
                 streamLiveModeNow = isWithinLiveStreamDistance()
                 scheduleVisibleStreamRefresh()
                 scheduleScrollTracking()
@@ -272,7 +273,7 @@ class MainActivity : AppCompatActivity() {
         scrollTrackScheduled = true
         mainHandler.postDelayed({
             scrollTrackScheduled = false
-            if (!programmaticScroll) {
+            if (!programmaticScroll && userTouchingMessages) {
                 followBottom = isNearBottom()
                 streamLiveModeNow = isWithinLiveStreamDistance()
             }
@@ -695,7 +696,11 @@ class MainActivity : AppCompatActivity() {
                     if (preset?.config?.stream == true || streamTargets.containsKey(assistant.id)) {
                         updateStreamTarget(assistant, assistant.content, assistant.thinking, finishWhenCaught = true)
                     } else {
-                        updateMessageViews(assistant, final = true)
+                        updateMessageViews(
+                            assistant,
+                            final = true,
+                            revealFromTopWhenStuck = continueMessage == null
+                        )
                     }
                     renderSessions()
                 }
@@ -961,6 +966,12 @@ class MainActivity : AppCompatActivity() {
             notifyDataSetChanged()
         }
 
+        fun positionOfMessage(messageId: String): Int {
+            val index = visibleMessages.indexOfFirst { it.id == messageId }
+            if (index < 0) return RecyclerView.NO_POSITION
+            return index + if (hiddenCount > 0) 1 else 0
+        }
+
         override fun getItemViewType(position: Int): Int {
             return if (hiddenCount > 0 && position == 0) viewTypeLoadMore else viewTypeMessage
         }
@@ -1184,7 +1195,12 @@ class MainActivity : AppCompatActivity() {
         return if (message.role == "assistant" && message.content.isBlank() && isSending) "正在思考..." else message.content
     }
 
-    private fun updateMessageViews(message: ChatMessage, streaming: Boolean = false, final: Boolean = false) {
+    private fun updateMessageViews(
+        message: ChatMessage,
+        streaming: Boolean = false,
+        final: Boolean = false,
+        revealFromTopWhenStuck: Boolean = false
+    ) {
         val stick = shouldFollowBottomForUpdate()
         streamLiveModeNow = isWithinLiveStreamDistance()
         followBottom = stick
@@ -1193,7 +1209,11 @@ class MainActivity : AppCompatActivity() {
         updateThinkingPanel(message)
         anchor?.let { restoreScrollAnchorSoon(it) }
         if (stick) {
-            if (streaming) scrollToBottomDuringStream() else scrollToBottomSoon()
+            when {
+                revealFromTopWhenStuck && final && !streaming -> scrollMessageToTopSoon(message.id)
+                streaming -> scrollToBottomDuringStream()
+                else -> scrollToBottomSoon()
+            }
         }
     }
 
@@ -2057,16 +2077,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isNearBottom(): Boolean {
-        return remainingScrollToBottom() < dp(30)
+        return remainingScrollToBottom() < dp(64)
     }
 
     private fun isWithinLiveStreamDistance(): Boolean {
-        return remainingScrollToBottom() < dp(100)
+        return remainingScrollToBottom() < dp(120)
     }
 
     private fun shouldFollowBottomForUpdate(): Boolean {
         if (userTouchingMessages) return false
-        return isNearBottom() || (followBottom && isWithinLiveStreamDistance())
+        return followBottom || isNearBottom()
     }
 
     private fun captureScrollAnchor(): ScrollAnchor? {
@@ -2096,6 +2116,19 @@ class MainActivity : AppCompatActivity() {
             if (userTouchingMessages || followBottom || isNearBottom()) return@post
             keepProgrammaticScrollActive()
             messagesLayoutManager.scrollToPositionWithOffset(anchor.position, anchor.offset)
+        }
+    }
+
+    private fun scrollMessageToTopSoon(messageId: String) {
+        if (userTouchingMessages) return
+        messagesScroll.post {
+            if (userTouchingMessages) return@post
+            val position = messagesAdapter.positionOfMessage(messageId)
+            if (position == RecyclerView.NO_POSITION) return@post
+            keepProgrammaticScrollActive()
+            messagesLayoutManager.scrollToPositionWithOffset(position, dp(8))
+            followBottom = false
+            streamLiveModeNow = isWithinLiveStreamDistance()
         }
     }
 
@@ -2150,9 +2183,16 @@ class MainActivity : AppCompatActivity() {
     private fun scrollToBottomDuringStream() {
         if (!followBottom) return
         val now = android.os.SystemClock.uptimeMillis()
-        if (now - lastStreamBottomScrollAt < streamBottomScrollFrameMs) return
-        lastStreamBottomScrollAt = now
-        scrollToBottomNow()
+        if (now - lastStreamBottomScrollAt >= streamBottomScrollFrameMs) {
+            lastStreamBottomScrollAt = now
+            scrollToBottomNow()
+        }
+        if (streamBottomFollowScheduled) return
+        streamBottomFollowScheduled = true
+        ViewCompat.postOnAnimation(messagesScroll) {
+            streamBottomFollowScheduled = false
+            if (followBottom && !userTouchingMessages) scrollToBottomNow()
+        }
     }
 
     private fun keepProgrammaticScrollActive() {
@@ -2167,7 +2207,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 programmaticScrollReleaseScheduled = false
                 programmaticScroll = false
-                followBottom = isNearBottom()
+                if (!followBottom || userTouchingMessages) followBottom = isNearBottom()
                 streamLiveModeNow = isWithinLiveStreamDistance()
             }
         }
