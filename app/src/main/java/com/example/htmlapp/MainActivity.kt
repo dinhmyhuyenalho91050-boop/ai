@@ -24,6 +24,7 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.StaticLayout
 import android.text.TextPaint
+import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.MotionEvent
@@ -2527,7 +2528,6 @@ class MainActivity : AppCompatActivity() {
             tab.setOnClickListener { selectTab(index) }
             installPressAnimation(tab)
         }
-        selectTab(0)
 
         dialog.setContentView(shell)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
@@ -2535,18 +2535,19 @@ class MainActivity : AppCompatActivity() {
             val width = min(resources.displayMetrics.widthPixels - dp(24), dp(960))
             val height = min(resources.displayMetrics.heightPixels - dp(72), dp(720))
             dialog.window?.setLayout(width, height)
+            shell.setLayerType(View.LAYER_TYPE_HARDWARE, null)
             shell.alpha = 0f
-            shell.scaleX = 0.96f
-            shell.scaleY = 0.96f
-            shell.translationY = dp(8).toFloat()
+            shell.translationY = dp(14).toFloat()
             shell.animate()
                 .alpha(1f)
-                .scaleX(1f)
-                .scaleY(1f)
                 .translationY(0f)
-                .setDuration(480)
+                .setDuration(320)
                 .setInterpolator(entranceInterpolator)
+                .withEndAction { shell.setLayerType(View.LAYER_TYPE_NONE, null) }
                 .start()
+            mainHandler.postDelayed({
+                if (dialog.isShowing) selectTab(0)
+            }, 80)
         }
         dialog.show()
     }
@@ -2698,12 +2699,14 @@ class MainActivity : AppCompatActivity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = rounded(
-                if (selected) Color.argb(42, 96, 165, 250) else color(R.color.chat_card),
+                if (selected) Color.argb(44, 96, 165, 250) else color(R.color.chat_card),
                 dp(8),
                 dp(1),
                 if (selected) color(R.color.chat_accent_blue) else color(R.color.chat_border)
             )
             setPadding(dp(12), dp(10), dp(12), dp(10))
+            isClickable = true
+            isFocusable = true
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -2719,9 +2722,12 @@ class MainActivity : AppCompatActivity() {
                 text = desc
                 setTextColor(color(R.color.chat_muted))
                 textSize = 11f
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
                 setPadding(0, dp(6), 0, 0)
                 includeFontPadding = false
             })
+            installPressAnimation(this)
         }
     }
 
