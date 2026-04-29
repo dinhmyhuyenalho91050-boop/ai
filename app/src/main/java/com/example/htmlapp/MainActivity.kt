@@ -11,6 +11,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
@@ -121,6 +122,7 @@ class MainActivity : AppCompatActivity() {
     private val scrollTrackFrameMs = 96L
     private val streamFrameMs = 120L
     private val streamDetachedFrameMs = 260L
+    private val streamDetachedVisibleFrameMs = 220L
     private val streamLineFlushChars = 120
     private val streamThinkingFlushChars = 480
     private val streamMaxWaitMs = 240L
@@ -132,9 +134,9 @@ class MainActivity : AppCompatActivity() {
     private val streamExpandedThinkingFrameMs = 120L
     private val streamThinkingCharsPerSecond = 240f
     private val streamMaxThinkingCharsPerFrame = 64
-    private val streamTailTargetChars = 96
-    private val streamTailMaxChars = 220
-    private val streamFrozenPrefixMinChars = 120
+    private val streamTailTargetChars = 420
+    private val streamTailMaxChars = 900
+    private val streamFrozenPrefixMinChars = 500
     private val streamBottomScrollFrameMs = 40L
     private val scrollTouchCooldownMs = 280L
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
@@ -222,6 +224,7 @@ class MainActivity : AppCompatActivity() {
                 if (newState == RecyclerView.SCROLL_STATE_IDLE) {
                     val token = ++messageTouchToken
                     followBottom = isNearBottom()
+                    scheduleVisibleStreamRefresh()
                     mainHandler.postDelayed({
                         if (token == messageTouchToken) userTouchingMessages = false
                     }, scrollTouchCooldownMs)
@@ -230,6 +233,7 @@ class MainActivity : AppCompatActivity() {
 
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                 if (!programmaticScroll) followBottom = isNearBottom()
+                scheduleVisibleStreamRefresh()
                 scheduleScrollTracking()
             }
         })
@@ -249,6 +253,10 @@ class MainActivity : AppCompatActivity() {
                 followBottom = isNearBottom()
             }
         }, scrollTrackFrameMs)
+    }
+
+    private fun scheduleVisibleStreamRefresh() {
+        if (streamTargets.isNotEmpty()) scheduleStreamAnimator()
     }
 
     private fun bindViews() {
@@ -961,6 +969,7 @@ class MainActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { bottomMargin = dp(16) }
             })
+            if (streamTargets.containsKey(message.id)) scheduleVisibleStreamRefresh()
         }
 
         override fun onViewRecycled(holder: MessageHolder) {
@@ -1553,7 +1562,9 @@ class MainActivity : AppCompatActivity() {
             target.unreleasedContentSince = target.lastTargetUpdateAt
         }
         target.finishWhenCaught = target.finishWhenCaught || finishWhenCaught
-        scheduleStreamAnimator()
+        if (isStreamTargetVisible(message.id) || (finishWhenCaught && message.id in messageStreamBodyViews)) {
+            scheduleStreamAnimator()
+        }
     }
 
     private fun contentHasVisiblePrefix(target: StreamRenderTarget, content: String): Boolean {
@@ -1583,7 +1594,7 @@ class MainActivity : AppCompatActivity() {
     private fun scheduleStreamAnimator() {
         if (streamAnimatorScheduled) return
         streamAnimatorScheduled = true
-        val delayMs = if (userTouchingMessages) streamRevealTouchFrameMs else streamRevealFrameMs
+        val delayMs = streamAnimatorDelayMs()
         val tick = Runnable {
             streamAnimatorScheduled = false
             tickStreamAnimator()
@@ -1595,12 +1606,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun streamAnimatorDelayMs(): Long {
+        if (userTouchingMessages) return streamRevealTouchFrameMs
+        if (!followBottom && streamTargets.values.any { isStreamTargetVisible(it.message.id) }) {
+            return streamDetachedVisibleFrameMs
+        }
+        return streamRevealFrameMs
+    }
+
     private fun tickStreamAnimator() {
         val now = android.os.SystemClock.uptimeMillis()
         var needsNextFrame = false
         val iterator = streamTargets.entries.iterator()
         while (iterator.hasNext()) {
             val target = iterator.next().value
+            val targetVisible = isStreamTargetVisible(target.message.id)
+            if (!targetVisible) {
+                if (target.finishWhenCaught && messageStreamBodyViews[target.message.id] == null) {
+                    iterator.remove()
+                    messageStreamSegments.remove(target.message.id)
+                }
+                continue
+            }
             refreshContentReleaseEnd(target)
             val elapsedMs = revealElapsedMs(target, now)
             val thinkingExpanded = target.message.id in messageThinkingExpanded
@@ -1742,7 +1769,11 @@ class MainActivity : AppCompatActivity() {
         ) {
             return true
         }
-        val minInterval = if (userTouchingMessages) streamRevealTouchFrameMs else streamUiCommitFrameMs
+        val minInterval = when {
+            userTouchingMessages -> streamRevealTouchFrameMs
+            !followBottom -> streamDetachedVisibleFrameMs
+            else -> streamUiCommitFrameMs
+        }
         return now - target.lastUiCommitAt >= minInterval
     }
 
@@ -1903,6 +1934,16 @@ class MainActivity : AppCompatActivity() {
         if (position == RecyclerView.NO_POSITION) return null
         val view = messagesLayoutManager.findViewByPosition(position) ?: return null
         return ScrollAnchor(position, view.top - messagesScroll.paddingTop)
+    }
+
+    private fun isStreamTargetVisible(messageId: String): Boolean {
+        val host = messageStreamBodyViews[messageId]?.host ?: return false
+        if (!host.isShown || !ViewCompat.isAttachedToWindow(host)) return false
+        val hostRect = Rect()
+        val listRect = Rect()
+        if (!host.getGlobalVisibleRect(hostRect)) return false
+        if (!messagesScroll.getGlobalVisibleRect(listRect)) return false
+        return hostRect.intersect(listRect) && hostRect.height() > dp(2)
     }
 
     private fun restoreScrollAnchorSoon(anchor: ScrollAnchor) {
@@ -3177,7 +3218,7 @@ class MainActivity : AppCompatActivity() {
         fun setStreamText(value: CharSequence) {
             streamText = SpannableStringBuilder(value)
             val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(0)
-            if (contentWidth <= 0) {
+            if (contentWidth <= 0 || !isShown || !ViewCompat.isAttachedToWindow(this)) {
                 invalidateLayout()
                 return
             }
