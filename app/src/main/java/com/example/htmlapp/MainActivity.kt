@@ -113,6 +113,7 @@ class MainActivity : AppCompatActivity() {
     private var scrollTrackScheduled = false
     private var streamAnimatorScheduled = false
     @Volatile private var streamLiveModeNow = false
+    @Volatile private var streamThrottledModeNow = false
     private var userTouchingMessages = false
     private var messageTouchToken = 0
     private var programmaticScroll = false
@@ -150,9 +151,9 @@ class MainActivity : AppCompatActivity() {
     private val streamExpandedThinkingFrameMs = 120L
     private val streamThinkingCharsPerSecond = 240f
     private val streamMaxThinkingCharsPerFrame = 64
-    private val streamTailTargetChars = 420
-    private val streamTailMaxChars = 900
-    private val streamFrozenPrefixMinChars = 500
+    private val streamTailTargetChars = 720
+    private val streamTailMaxChars = 1200
+    private val streamFrozenPrefixMinChars = 700
     private val streamBottomScrollFrameMs = 16L
     private var streamBottomFollowScheduled = false
     private val scrollTouchCooldownMs = 280L
@@ -219,23 +220,24 @@ class MainActivity : AppCompatActivity() {
                     messageTouchToken++
                     userTouchingMessages = true
                     followBottom = isNearBottom()
-                    streamLiveModeNow = isWithinLiveStreamDistance()
+                    updateStreamDistanceModes()
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (!programmaticScroll && userTouchingMessages) followBottom = isNearBottom()
-                    streamLiveModeNow = isWithinLiveStreamDistance()
+                    updateStreamDistanceModes()
                     scheduleScrollTracking()
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     val token = ++messageTouchToken
                     followBottom = isNearBottom()
-                    streamLiveModeNow = isWithinLiveStreamDistance()
+                    updateStreamDistanceModes()
                     mainHandler.postDelayed({
                         if (token == messageTouchToken) {
                             userTouchingMessages = false
                             if (followBottom || isNearBottom()) {
                                 followBottom = true
                                 streamLiveModeNow = true
+                                streamThrottledModeNow = true
                                 scrollToBottomSoon()
                             }
                             scheduleVisibleStreamRefresh()
@@ -252,7 +254,7 @@ class MainActivity : AppCompatActivity() {
                 if (newState == RecyclerView.SCROLL_STATE_IDLE) {
                     val token = ++messageTouchToken
                     followBottom = isNearBottom()
-                    streamLiveModeNow = isWithinLiveStreamDistance()
+                    updateStreamDistanceModes()
                     scheduleVisibleStreamRefresh()
                     mainHandler.postDelayed({
                         if (token == messageTouchToken) {
@@ -260,6 +262,7 @@ class MainActivity : AppCompatActivity() {
                             if (followBottom || isNearBottom()) {
                                 followBottom = true
                                 streamLiveModeNow = true
+                                streamThrottledModeNow = true
                                 scrollToBottomSoon()
                             }
                             scheduleVisibleStreamRefresh()
@@ -270,7 +273,7 @@ class MainActivity : AppCompatActivity() {
 
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                 if (!programmaticScroll && userTouchingMessages) followBottom = isNearBottom()
-                streamLiveModeNow = isWithinLiveStreamDistance()
+                updateStreamDistanceModes()
                 scheduleVisibleStreamRefresh()
                 scheduleScrollTracking()
             }
@@ -289,13 +292,13 @@ class MainActivity : AppCompatActivity() {
             scrollTrackScheduled = false
             if (!programmaticScroll && userTouchingMessages) {
                 followBottom = isNearBottom()
-                streamLiveModeNow = isWithinLiveStreamDistance()
+                updateStreamDistanceModes()
             }
         }, scrollTrackFrameMs)
     }
 
     private fun scheduleVisibleStreamRefresh() {
-        if (streamTargets.isNotEmpty()) scheduleStreamAnimator()
+        if (streamTargets.isNotEmpty() && shouldUpdateBoundStreamTarget()) scheduleStreamAnimator()
     }
 
     private fun bindViews() {
@@ -951,6 +954,7 @@ class MainActivity : AppCompatActivity() {
         messageRenderedThinking.clear()
         messageStreamSegments.clear()
         streamLiveModeNow = false
+        streamThrottledModeNow = false
         val session = state.ensureSession()
         messagesAdapter.submit(session.history, startIndex = 0, hidden = 0)
         if (scrollToBottom) {
@@ -1317,35 +1321,36 @@ class MainActivity : AppCompatActivity() {
         final: Boolean = false,
         revealFromTopWhenStuck: Boolean = false
     ) {
-        val stick = shouldFollowBottomForUpdate()
-        streamLiveModeNow = isWithinLiveStreamDistance()
+        val bottomDistance = remainingScrollToBottom()
+        val stick = shouldFollowBottomForUpdate(bottomDistance)
+        updateStreamDistanceModes(bottomDistance)
         followBottom = stick
         val anchor = if ((streaming || final) && !stick && !userTouchingMessages) captureScrollAnchor() else null
-        updateBodyText(message, streaming, final)
+        val bodyUpdate = updateBodyText(message, streaming, final)
         updateThinkingPanel(message)
         anchor?.let { restoreScrollAnchorSoon(it) }
         if (stick) {
             when {
                 revealFromTopWhenStuck && final && !streaming -> scrollMessageToTopSoon(message.id)
-                streaming -> scrollToBottomDuringStream()
-                else -> scrollToBottomSoon()
+                streaming -> if (bodyUpdate.heightChanged) scrollToBottomDuringStream()
+                else -> if (bodyUpdate.changed || final) scrollToBottomSoon()
             }
         }
     }
 
-    private fun updateBodyText(message: ChatMessage, streaming: Boolean, final: Boolean) {
-        val views = messageStreamBodyViews[message.id] ?: return
+    private fun updateBodyText(message: ChatMessage, streaming: Boolean, final: Boolean): StreamBodyUpdate {
+        val views = messageStreamBodyViews[message.id] ?: return StreamBodyUpdate()
         val content = displayContent(message)
         val previous = messageRenderedContent[message.id]
         if (streaming && !final) {
-            if (previous == content) return
-            setStreamingBodyText(
+            if (previous == content) return StreamBodyUpdate()
+            val heightChanged = setStreamingBodyText(
                 message.id,
                 views,
                 content
             )
             messageRenderedContent[message.id] = content
-            return
+            return StreamBodyUpdate(changed = true, heightChanged = heightChanged)
         }
         if (final || previous != content) {
             streamBodyMeasureStates.remove(message.id)
@@ -1356,29 +1361,34 @@ class MainActivity : AppCompatActivity() {
             views.tail.clearText()
             views.tail.visibility = View.GONE
             messageRenderedContent[message.id] = content
+            return StreamBodyUpdate(changed = true, heightChanged = true)
         }
+        return StreamBodyUpdate()
     }
 
     private fun setStreamingBodyText(
         messageId: String,
         views: StreamBodyViews,
         rawContent: String
-    ) {
+    ): Boolean {
         val oldHeight = currentBodyHeight(views.host)
         val oldWidth = views.host.width
         if (oldHeight > 0 && oldWidth > 0) {
             pinBodyHeight(views.host, oldHeight)
         }
-        renderStreamingBodySegments(messageId, views, rawContent)
+        val renderUpdate = renderStreamingBodySegments(messageId, views, rawContent)
         if (oldHeight <= 0 || oldWidth <= 0) {
             ensureBodyWrapContent(views.host)
-            return
+            return true
+        }
+        if (!renderUpdate.heightMayHaveChanged) {
+            return false
         }
         val targetHeight = measureStreamingBodyHeight(views, oldWidth)
         val activeTarget = streamBodyHeightTargets[messageId]
         val activeAnimation = streamBodyHeightAnimationTokens[messageId]
         if (activeTarget == targetHeight && activeAnimation != null) {
-            return
+            return false
         }
         val fromHeight = currentBodyHeight(views.host)
         if (abs(targetHeight - fromHeight) > dp(1)) {
@@ -1386,34 +1396,31 @@ class MainActivity : AppCompatActivity() {
             streamBodyHeightAnimationTokens.remove(messageId)
             streamBodyHeightTargets.remove(messageId)
             pinBodyHeight(views.host, targetHeight)
-            if (followBottom && !userTouchingMessages) {
-                scrollToBottomDuringStream()
-                views.host.doOnLayout {
-                    if (followBottom && !userTouchingMessages) scrollToBottomNow()
-                }
-            }
-            return
+            return true
         }
         if (activeTarget == null && activeAnimation == null) {
             pinBodyHeight(views.host, targetHeight)
         }
+        return false
     }
 
-    private fun renderStreamingBodySegments(messageId: String, views: StreamBodyViews, rawContent: String) {
+    private fun renderStreamingBodySegments(messageId: String, views: StreamBodyViews, rawContent: String): StreamSegmentUpdate {
         val segment = messageStreamSegments.getOrPut(messageId) { StreamTextSegmentState() }
         if (rawContent.length < segment.frozenRawLength ||
             segment.prefixRaw.isNotEmpty() && !rawContent.startsWith(segment.prefixRaw)
         ) {
             segment.reset()
         }
+        var heightMayHaveChanged = false
         val nextFreezeEnd = findStreamFreezeBoundary(rawContent, segment.frozenRawLength)
         if (nextFreezeEnd > segment.frozenRawLength) {
             val prefixRaw = rawContent.substring(0, nextFreezeEnd)
             if (prefixRaw != segment.prefixRaw) {
-                views.prefix.text = formatMessageText(prefixRaw)
+                views.prefix.text = renderStreamPrefix(segment, prefixRaw)
                 views.prefix.visibility = if (prefixRaw.isEmpty()) View.GONE else View.VISIBLE
                 views.invalidatePrefixMeasure()
                 segment.prefixRaw = prefixRaw
+                heightMayHaveChanged = true
             }
             segment.frozenRawLength = nextFreezeEnd
             segment.tailFormatter = newStreamFormatter()
@@ -1421,13 +1428,15 @@ class MainActivity : AppCompatActivity() {
         } else if (segment.prefixRaw.isNotEmpty() &&
             (views.prefix.visibility != View.VISIBLE || views.prefix.text.isEmpty())
         ) {
-            views.prefix.text = formatMessageText(segment.prefixRaw)
+            views.prefix.text = renderStreamPrefix(segment, segment.prefixRaw)
             views.prefix.visibility = View.VISIBLE
             views.invalidatePrefixMeasure()
+            heightMayHaveChanged = true
         } else if (segment.prefixRaw.isEmpty() && views.prefix.visibility != View.GONE) {
             views.prefix.text = ""
             views.prefix.visibility = View.GONE
             views.invalidatePrefixMeasure()
+            heightMayHaveChanged = true
         }
 
         val tailRaw = rawContent.substring(segment.frozenRawLength.coerceIn(0, rawContent.length))
@@ -1437,10 +1446,22 @@ class MainActivity : AppCompatActivity() {
         ) {
             val formatter = segment.tailFormatter ?: newStreamFormatter().also { segment.tailFormatter = it }
             val renderedTail = formatter.render(tailRaw).text
-            views.tail.setStreamText(renderedTail)
-            views.tail.visibility = if (tailRaw.isEmpty()) View.GONE else View.VISIBLE
+            val oldVisibility = views.tail.visibility
+            val tailHeightChanged = views.tail.setStreamText(renderedTail)
+            val nextVisibility = if (tailRaw.isEmpty()) View.GONE else View.VISIBLE
+            views.tail.visibility = nextVisibility
+            heightMayHaveChanged = heightMayHaveChanged ||
+                tailHeightChanged ||
+                oldVisibility != nextVisibility
             segment.tailRaw = tailRaw
         }
+        return StreamSegmentUpdate(heightMayHaveChanged)
+    }
+
+    private fun renderStreamPrefix(segment: StreamTextSegmentState, raw: String): CharSequence {
+        if (raw.isEmpty()) return ""
+        val formatter = segment.prefixFormatter ?: newStreamFormatter().also { segment.prefixFormatter = it }
+        return SpannableStringBuilder(formatter.render(raw).text)
     }
 
     private fun findStreamFreezeBoundary(text: String, frozenEnd: Int): Int {
@@ -1449,7 +1470,7 @@ class MainActivity : AppCompatActivity() {
         var boundary = frozenEnd
         var fallback = frozenEnd
         var mode = StreamMode.PLAIN
-        var index = 0
+        var index = frozenEnd.coerceIn(0, scanEnd)
         while (index < scanEnd) {
             val ch = text[index]
             mode = nextStreamMode(mode, ch)
@@ -1775,7 +1796,7 @@ class MainActivity : AppCompatActivity() {
         }
         target.finishWhenCaught = target.finishWhenCaught || finishWhenCaught
         val bound = isStreamTargetBound(message.id)
-        target.forceNextUiCommit = isWithinLiveStreamDistance()
+        target.forceNextUiCommit = followBottom || streamLiveModeNow
         if (bound && shouldUpdateBoundStreamTarget()) {
             scheduleStreamAnimator()
         }
@@ -1821,9 +1842,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun streamAnimatorDelayMs(): Long {
-        val liveMode = isWithinLiveStreamDistance()
-        val throttledMode = isWithinThrottledStreamDistance()
+        val distance = remainingScrollToBottom()
+        val liveMode = distance < dp(streamLiveDistanceDp)
+        val throttledMode = distance < dp(streamThrottledDistanceDp)
         streamLiveModeNow = liveMode
+        streamThrottledModeNow = throttledMode
         return when {
             !throttledMode -> streamOffscreenUiFrameMs
             liveMode -> streamRevealFrameMs
@@ -1834,17 +1857,14 @@ class MainActivity : AppCompatActivity() {
     private fun tickStreamAnimator() {
         val now = android.os.SystemClock.uptimeMillis()
         var needsNextFrame = false
-        val liveMode = isWithinLiveStreamDistance()
-        val throttledMode = isWithinThrottledStreamDistance()
+        val distance = remainingScrollToBottom()
+        val liveMode = distance < dp(streamLiveDistanceDp)
+        val throttledMode = distance < dp(streamThrottledDistanceDp)
         streamLiveModeNow = liveMode
+        streamThrottledModeNow = throttledMode
         val iterator = streamTargets.entries.iterator()
         while (iterator.hasNext()) {
             val target = iterator.next().value
-            val targetVisible = isStreamTargetVisible(target.message.id)
-            refreshContentReleaseEnd(target)
-            val elapsedMs = revealElapsedMs(target, now)
-            val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
-            val contentStepLimit = streamContentMaxCharsPerTick
             if (!throttledMode) {
                 if (target.finishWhenCaught && !isStreamTargetBound(target.message.id)) {
                     iterator.remove()
@@ -1852,6 +1872,11 @@ class MainActivity : AppCompatActivity() {
                 }
                 continue
             }
+            val targetVisible = isStreamTargetVisible(target.message.id)
+            refreshContentReleaseEnd(target)
+            val elapsedMs = revealElapsedMs(target, now)
+            val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
+            val contentStepLimit = streamContentMaxCharsPerTick
             if (!targetVisible) {
                 val targetBound = isStreamTargetBound(target.message.id)
                 val shouldThrottledUpdate = targetBound &&
@@ -2036,7 +2061,7 @@ class MainActivity : AppCompatActivity() {
         }
         val minInterval = when {
             userTouchingMessages -> streamRevealTouchFrameMs
-            isWithinLiveStreamDistance() -> streamUiCommitFrameMs
+            streamLiveModeNow -> streamUiCommitFrameMs
             else -> streamThrottledUiFrameMs
         }
         return now - target.lastUiCommitAt >= minInterval
@@ -2190,25 +2215,22 @@ class MainActivity : AppCompatActivity() {
         return -1
     }
 
-    private fun isNearBottom(): Boolean {
-        return remainingScrollToBottom() < dp(64)
+    private fun isNearBottom(distance: Int = remainingScrollToBottom()): Boolean {
+        return distance < dp(64)
     }
 
-    private fun isWithinLiveStreamDistance(): Boolean {
-        return remainingScrollToBottom() < dp(streamLiveDistanceDp)
-    }
-
-    private fun isWithinThrottledStreamDistance(): Boolean {
-        return remainingScrollToBottom() < dp(streamThrottledDistanceDp)
+    private fun updateStreamDistanceModes(distance: Int = remainingScrollToBottom()) {
+        streamLiveModeNow = distance < dp(streamLiveDistanceDp)
+        streamThrottledModeNow = distance < dp(streamThrottledDistanceDp)
     }
 
     private fun shouldUpdateBoundStreamTarget(): Boolean {
-        return isWithinThrottledStreamDistance()
+        return followBottom || streamThrottledModeNow
     }
 
-    private fun shouldFollowBottomForUpdate(): Boolean {
+    private fun shouldFollowBottomForUpdate(distance: Int = remainingScrollToBottom()): Boolean {
         if (userTouchingMessages) return false
-        return followBottom || isNearBottom()
+        return followBottom || isNearBottom(distance)
     }
 
     private fun captureScrollAnchor(): ScrollAnchor? {
@@ -2272,7 +2294,7 @@ class MainActivity : AppCompatActivity() {
                         messagesScroll.scrollBy(0, delta)
                     }
                 }
-                streamLiveModeNow = isWithinLiveStreamDistance()
+                updateStreamDistanceModes()
             }, delay)
         }
     }
@@ -2286,7 +2308,7 @@ class MainActivity : AppCompatActivity() {
             keepProgrammaticScrollActive()
             messagesLayoutManager.scrollToPositionWithOffset(position, dp(8))
             followBottom = false
-            streamLiveModeNow = isWithinLiveStreamDistance()
+            updateStreamDistanceModes()
         }
     }
 
@@ -2299,10 +2321,12 @@ class MainActivity : AppCompatActivity() {
             if (scrollRemainingToBottom(animated)) {
                 followBottom = true
                 streamLiveModeNow = true
+                streamThrottledModeNow = true
                 return@post
             }
             followBottom = true
             streamLiveModeNow = true
+            streamThrottledModeNow = true
         }
     }
 
@@ -2311,6 +2335,7 @@ class MainActivity : AppCompatActivity() {
         scrollRemainingToBottom(animated = false)
         followBottom = true
         streamLiveModeNow = true
+        streamThrottledModeNow = true
     }
 
     private fun scrollRemainingToBottom(animated: Boolean): Boolean {
@@ -2366,7 +2391,7 @@ class MainActivity : AppCompatActivity() {
                 programmaticScrollReleaseScheduled = false
                 programmaticScroll = false
                 if (!followBottom || userTouchingMessages) followBottom = isNearBottom()
-                streamLiveModeNow = isWithinLiveStreamDistance()
+                updateStreamDistanceModes()
             }
         }
         mainHandler.postDelayed({ releaseWhenQuiet() }, scrollTrackFrameMs)
@@ -3684,16 +3709,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private data class StreamBodyUpdate(
+        val changed: Boolean = false,
+        val heightChanged: Boolean = false
+    )
+
+    private data class StreamSegmentUpdate(
+        val heightMayHaveChanged: Boolean = false
+    )
+
     private data class StreamTextSegmentState(
         var frozenRawLength: Int = 0,
         var prefixRaw: String = "",
         var tailRaw: String = "",
+        var prefixFormatter: StreamFormatState? = null,
         var tailFormatter: StreamFormatState? = null
     ) {
         fun reset() {
             frozenRawLength = 0
             prefixRaw = ""
             tailRaw = ""
+            prefixFormatter = null
             tailFormatter = null
         }
     }
@@ -3755,8 +3791,8 @@ class MainActivity : AppCompatActivity() {
             invalidateLayout()
         }
 
-        fun clearText() {
-            setStreamText("")
+        fun clearText(): Boolean {
+            return setStreamText("")
         }
 
         fun isTextEmpty(): Boolean = streamText.isEmpty()
@@ -3766,21 +3802,24 @@ class MainActivity : AppCompatActivity() {
             return paddingTop + layoutForWidth(contentWidth.coerceAtLeast(1)).height + paddingBottom
         }
 
-        fun setStreamText(value: CharSequence) {
+        fun setStreamText(value: CharSequence): Boolean {
+            if (TextUtils.equals(streamText, value)) return false
+            val oldHeight = cachedLayout?.height ?: 0
             streamText = SpannableStringBuilder(value)
             val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(0)
             if (contentWidth <= 0 || !isShown || !ViewCompat.isAttachedToWindow(this)) {
                 invalidateLayout()
-                return
+                return true
             }
-            val oldHeight = cachedLayout?.height ?: 0
             val nextLayout = buildLayout(contentWidth)
             cachedLayout = nextLayout
             cachedLayoutWidth = contentWidth
-            if (nextLayout.height != oldHeight) {
+            val heightChanged = nextLayout.height != oldHeight
+            if (heightChanged) {
                 requestLayout()
             }
             invalidate()
+            return heightChanged
         }
 
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
