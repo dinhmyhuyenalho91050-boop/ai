@@ -256,7 +256,7 @@ class MainActivity : AppCompatActivity() {
         messagesScroll = findViewById(R.id.messages_scroll)
         messagesLayoutManager = LinearLayoutManager(this).apply {
             orientation = RecyclerView.VERTICAL
-            stackFromEnd = true
+            stackFromEnd = false
         }
         messagesAdapter = MessageAdapter()
         messagesScroll.layoutManager = messagesLayoutManager
@@ -873,8 +873,7 @@ class MainActivity : AppCompatActivity() {
         messageRenderedThinking.clear()
         messageStreamSegments.clear()
         val session = state.ensureSession()
-        val startIndex = max(0, session.history.size - renderMessageLimit)
-        messagesAdapter.submit(session.history.drop(startIndex), startIndex, startIndex)
+        messagesAdapter.submit(session.history, startIndex = 0, hidden = 0)
         if (scrollToBottom) {
             scrollToBottomSoon(animated = false)
         }
@@ -1447,6 +1446,12 @@ class MainActivity : AppCompatActivity() {
         streamBodyHeightAnimationTokens[messageId] = token
         streamBodyHeightTargets[messageId] = toHeight
         pinBodyHeight(body, fromHeight)
+        if (!followBottom) {
+            val anchor = captureScrollAnchor()
+            finishStreamingBodyHeightAnimation(messageId, body, token, toHeight)
+            anchor?.let { restoreScrollAnchorSoon(it) }
+            return
+        }
         if (userTouchingMessages) {
             finishStreamingBodyHeightAnimation(messageId, body, token, toHeight)
             return
@@ -1890,7 +1895,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isNearBottom(): Boolean {
-        return remainingScrollToBottom() <= dp(60)
+        return remainingScrollToBottom() <= dp(2)
     }
 
     private fun captureScrollAnchor(): ScrollAnchor? {
