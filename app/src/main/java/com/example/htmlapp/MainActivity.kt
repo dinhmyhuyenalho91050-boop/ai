@@ -1396,6 +1396,11 @@ class MainActivity : AppCompatActivity() {
             streamBodyHeightAnimationTokens.remove(messageId)
             streamBodyHeightTargets.remove(messageId)
             pinBodyHeight(views.host, targetHeight)
+            if (followBottom && !userTouchingMessages) {
+                views.host.doOnLayout {
+                    if (followBottom && !userTouchingMessages) scrollToBottomNow()
+                }
+            }
             return true
         }
         if (activeTarget == null && activeAnimation == null) {
