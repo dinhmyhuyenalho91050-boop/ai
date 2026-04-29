@@ -1258,24 +1258,28 @@ class MainActivity : AppCompatActivity() {
             ensureBodyWrapContent(views.host)
             return
         }
-        val targetHeight = estimateStreamingTextHeightForSegments(messageId, views, oldWidth, rawContent)
-            .coerceAtLeast(measureStreamingBodyHeight(views, oldWidth))
+        val targetHeight = measureStreamingBodyHeight(views, oldWidth)
         val activeTarget = streamBodyHeightTargets[messageId]
         val activeAnimation = streamBodyHeightAnimationTokens[messageId]
         if (activeTarget == targetHeight && activeAnimation != null) {
             return
         }
         val fromHeight = currentBodyHeight(views.host)
-        if (targetHeight > fromHeight + dp(1) && targetHeight > (activeTarget ?: 0) + dp(1)) {
+        if (abs(targetHeight - fromHeight) > dp(1)) {
             streamBodyHeightAnimators.remove(messageId)?.cancel()
             streamBodyHeightAnimationTokens.remove(messageId)
             streamBodyHeightTargets.remove(messageId)
             pinBodyHeight(views.host, targetHeight)
-            if (followBottom && !userTouchingMessages) scrollToBottomDuringStream()
+            if (followBottom && !userTouchingMessages) {
+                scrollToBottomDuringStream()
+                views.host.doOnLayout {
+                    if (followBottom && !userTouchingMessages) scrollToBottomNow()
+                }
+            }
             return
         }
         if (activeTarget == null && activeAnimation == null) {
-            pinBodyHeight(views.host, max(fromHeight, targetHeight))
+            pinBodyHeight(views.host, targetHeight)
         }
     }
 
