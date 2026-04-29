@@ -501,9 +501,9 @@ data class NativeAiResult(val content: String, val thinking: String = "")
 
 class NativeAiClient {
     private companion object {
-        private const val STREAM_DELTA_EMIT_MS = 96L
-        private const val STREAM_DELTA_CONTENT_CHARS = 160
-        private const val STREAM_DELTA_THINKING_CHARS = 420
+        private const val STREAM_DELTA_EMIT_MS = 120L
+        private const val STREAM_DELTA_CONTENT_CHARS = 240
+        private const val STREAM_DELTA_THINKING_CHARS = 640
     }
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()

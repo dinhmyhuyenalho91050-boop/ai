@@ -78,17 +78,16 @@ class MainActivity : AppCompatActivity() {
 
     private val aiClient = NativeAiClient()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val messageBodyViews = mutableMapOf<String, TextView>()
+    private val messageStreamBodyViews = mutableMapOf<String, StreamBodyViews>()
     private val messageThinkingViews = mutableMapOf<String, TextView>()
     private val messageThinkingContainers = mutableMapOf<String, View>()
     private val messageThinkingSummaries = mutableMapOf<String, TextView>()
     private val messageRenderedContent = mutableMapOf<String, String>()
     private val messageRenderedThinking = mutableMapOf<String, String>()
-    private val messageStreamFormatters = mutableMapOf<String, StreamFormatState>()
+    private val messageStreamSegments = mutableMapOf<String, StreamTextSegmentState>()
     private val streamBodyHeightAnimationTokens = mutableMapOf<String, Int>()
     private val streamBodyHeightAnimators = mutableMapOf<String, ValueAnimator>()
     private val streamBodyHeightTargets = mutableMapOf<String, Int>()
-    private val streamBodyLayoutLengths = mutableMapOf<String, Int>()
     private val streamBodyMeasureStates = mutableMapOf<String, StreamBodyMeasureState>()
     private val streamTargets = mutableMapOf<String, StreamRenderTarget>()
     private val messageThinkingExpanded = mutableSetOf<String>()
@@ -106,6 +105,7 @@ class MainActivity : AppCompatActivity() {
     private var programmaticScrollReleaseScheduled = false
     private var programmaticScrollReleaseAt = 0L
     private var lastBottomTargetY = -1
+    private var lastStreamBottomScrollAt = 0L
     private var settingsCompact = false
     private var streamHeightAnimationSeed = 0
 
@@ -113,11 +113,11 @@ class MainActivity : AppCompatActivity() {
     private val loadOlderMessageBatch = 40
     private var renderMessageLimit = defaultRenderMessageLimit
     private val scrollTrackFrameMs = 96L
-    private val streamFrameMs = 64L
-    private val streamDetachedFrameMs = 220L
-    private val streamLineFlushChars = 64
-    private val streamThinkingFlushChars = 320
-    private val streamMaxWaitMs = 180L
+    private val streamFrameMs = 120L
+    private val streamDetachedFrameMs = 260L
+    private val streamLineFlushChars = 120
+    private val streamThinkingFlushChars = 480
+    private val streamMaxWaitMs = 240L
     private val streamRevealFrameMs = 50L
     private val streamRevealTouchFrameMs = 120L
     private val streamUiCommitFrameMs = 50L
@@ -126,6 +126,11 @@ class MainActivity : AppCompatActivity() {
     private val streamExpandedThinkingFrameMs = 120L
     private val streamThinkingCharsPerSecond = 240f
     private val streamMaxThinkingCharsPerFrame = 64
+    private val streamTailTargetChars = 420
+    private val streamTailMaxChars = 760
+    private val streamFrozenPrefixMinChars = 360
+    private val streamBottomScrollFrameMs = 40L
+    private val scrollTouchCooldownMs = 280L
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
     private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
     private val streamHeightInterpolator by lazy { PathInterpolator(0.2f, 0f, 0.2f, 1f) }
@@ -198,7 +203,7 @@ class MainActivity : AppCompatActivity() {
                     followBottom = isNearBottom()
                     mainHandler.postDelayed({
                         if (token == messageTouchToken) userTouchingMessages = false
-                    }, 120L)
+                    }, scrollTouchCooldownMs)
                 }
             }
             false
@@ -829,15 +834,14 @@ class MainActivity : AppCompatActivity() {
         streamBodyHeightAnimators.clear()
         streamBodyHeightAnimationTokens.clear()
         streamBodyHeightTargets.clear()
-        streamBodyLayoutLengths.clear()
         streamBodyMeasureStates.clear()
-        messageBodyViews.clear()
+        messageStreamBodyViews.clear()
         messageThinkingViews.clear()
         messageThinkingContainers.clear()
         messageThinkingSummaries.clear()
         messageRenderedContent.clear()
         messageRenderedThinking.clear()
-        messageStreamFormatters.clear()
+        messageStreamSegments.clear()
         messagesContainer.removeAllViews()
         val session = state.ensureSession()
         val startIndex = max(0, session.history.size - renderMessageLimit)
@@ -902,13 +906,44 @@ class MainActivity : AppCompatActivity() {
 
         contentColumn.addView(thinkingPanel(message))
 
-        val body = TextView(this).apply {
-            val content = displayContent(message)
-            if (isLiveAssistant(message)) {
-                setText(streamingFormatter(message.id).render(content).text, TextView.BufferType.SPANNABLE)
-            } else {
-                text = formatMessageText(content)
-            }
+        val bodyViews = messageBody(message)
+        contentColumn.addView(bodyViews.host)
+        contentColumn.addView(separator())
+        contentColumn.addView(messageFooter(message))
+        card.addView(contentColumn)
+        return card
+    }
+
+    private fun messageBody(message: ChatMessage): StreamBodyViews {
+        val content = displayContent(message)
+        val host = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(18), dp(16), dp(18))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val prefix = messageBodyTextView()
+        val tail = messageBodyTextView()
+        host.addView(prefix)
+        host.addView(tail)
+        val views = StreamBodyViews(host, prefix, tail)
+        messageStreamBodyViews[message.id] = views
+        if (isLiveAssistant(message)) {
+            setStreamingBodyText(message.id, views, content)
+        } else {
+            prefix.text = formatMessageText(content)
+            prefix.visibility = if (content.isEmpty()) View.GONE else View.VISIBLE
+            tail.text = ""
+            tail.visibility = View.GONE
+        }
+        messageRenderedContent[message.id] = content
+        return views
+    }
+
+    private fun messageBodyTextView(): TextView {
+        return TextView(this).apply {
             setTextColor(color(R.color.chat_fg))
             textSize = 16f
             typeface = systemTypeface()
@@ -916,15 +951,11 @@ class MainActivity : AppCompatActivity() {
             setLineSpacing(dp(4).toFloat(), 1.04f)
             breakStrategy = Layout.BREAK_STRATEGY_SIMPLE
             hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
-            setPadding(dp(16), dp(18), dp(16), dp(18))
-            messageRenderedContent[message.id] = content
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
-        messageBodyViews[message.id] = body
-        contentColumn.addView(body)
-        contentColumn.addView(separator())
-        contentColumn.addView(messageFooter(message))
-        card.addView(contentColumn)
-        return card
     }
 
     private fun thinkingPanel(message: ChatMessage): View {
@@ -1003,79 +1034,180 @@ class MainActivity : AppCompatActivity() {
         updateBodyText(message, streaming, final)
         updateThinkingPanel(message)
         if (stick) {
-            if (streaming) scrollToBottomNow() else scrollToBottomSoon()
+            if (streaming) scrollToBottomDuringStream() else scrollToBottomSoon()
         }
     }
 
     private fun updateBodyText(message: ChatMessage, streaming: Boolean, final: Boolean) {
-        val body = messageBodyViews[message.id] ?: return
+        val views = messageStreamBodyViews[message.id] ?: return
         val content = displayContent(message)
         val previous = messageRenderedContent[message.id]
         if (streaming && !final) {
             if (previous == content) return
-            val renderResult = streamingFormatter(message.id).render(content)
-            val hasNewLine = previous == null ||
-                content.length < previous.length ||
-                content.indexOf('\n', previous.length.coerceIn(0, content.length)) >= 0
             setStreamingBodyText(
                 message.id,
-                body,
-                renderResult.text,
-                visibleLength = content.length,
-                hasNewLine = hasNewLine,
-                changedStart = renderResult.changedStart
+                views,
+                content
             )
             messageRenderedContent[message.id] = content
             return
         }
         if (final || previous != content) {
-            messageStreamFormatters.remove(message.id)
-            streamBodyLayoutLengths.remove(message.id)
             streamBodyMeasureStates.remove(message.id)
-            stopStreamingBodyHeightAnimation(message.id, body)
-            body.text = formatMessageText(content)
+            messageStreamSegments.remove(message.id)
+            stopStreamingBodyHeightAnimation(message.id, views.host)
+            views.prefix.text = formatMessageText(content)
+            views.prefix.visibility = if (content.isEmpty()) View.GONE else View.VISIBLE
+            views.tail.text = ""
+            views.tail.visibility = View.GONE
             messageRenderedContent[message.id] = content
         }
     }
 
     private fun setStreamingBodyText(
         messageId: String,
-        body: TextView,
-        text: CharSequence,
-        visibleLength: Int,
-        hasNewLine: Boolean,
-        changedStart: Int
+        views: StreamBodyViews,
+        rawContent: String
     ) {
-        val oldHeight = currentBodyHeight(body)
-        val oldWidth = body.width
+        val oldHeight = currentBodyHeight(views.host)
+        val oldWidth = views.host.width
         if (oldHeight > 0 && oldWidth > 0) {
-            pinBodyHeight(body, oldHeight)
+            pinBodyHeight(views.host, oldHeight)
         }
-        body.setText(text, TextView.BufferType.SPANNABLE)
+        renderStreamingBodySegments(messageId, views, rawContent)
         if (oldHeight <= 0 || oldWidth <= 0) {
-            ensureBodyWrapContent(body)
+            ensureBodyWrapContent(views.host)
             return
         }
-        val targetHeight = estimateStreamingTextHeight(messageId, body, oldWidth, text, changedStart, hasNewLine)
+        val targetHeight = estimateStreamingTextHeightForSegments(messageId, views, oldWidth, rawContent)
         val activeTarget = streamBodyHeightTargets[messageId]
         val activeAnimation = streamBodyHeightAnimationTokens[messageId]
         if (activeTarget == targetHeight && activeAnimation != null) {
             return
         }
-        val fromHeight = currentBodyHeight(body)
+        val fromHeight = currentBodyHeight(views.host)
         if (targetHeight > fromHeight + dp(1) && targetHeight > (activeTarget ?: 0) + dp(1)) {
-            streamBodyLayoutLengths[messageId] = text.length
-            animateStreamingBodyHeight(messageId, body, fromHeight, targetHeight)
+            animateStreamingBodyHeight(messageId, views.host, fromHeight, targetHeight)
             return
         }
         if (activeTarget == null && activeAnimation == null) {
-            pinBodyHeight(body, max(fromHeight, targetHeight))
+            pinBodyHeight(views.host, max(fromHeight, targetHeight))
         }
     }
 
-    private fun currentBodyHeight(body: TextView): Int {
+    private fun renderStreamingBodySegments(messageId: String, views: StreamBodyViews, rawContent: String) {
+        val segment = messageStreamSegments.getOrPut(messageId) { StreamTextSegmentState() }
+        if (rawContent.length < segment.frozenRawLength ||
+            segment.prefixRaw.isNotEmpty() && !rawContent.startsWith(segment.prefixRaw)
+        ) {
+            segment.reset()
+        }
+        val nextFreezeEnd = findStreamFreezeBoundary(rawContent, segment.frozenRawLength)
+        if (nextFreezeEnd > segment.frozenRawLength) {
+            val prefixRaw = rawContent.substring(0, nextFreezeEnd)
+            if (prefixRaw != segment.prefixRaw) {
+                views.prefix.text = formatMessageText(prefixRaw)
+                views.prefix.visibility = if (prefixRaw.isEmpty()) View.GONE else View.VISIBLE
+                segment.prefixRaw = prefixRaw
+            }
+            segment.frozenRawLength = nextFreezeEnd
+            segment.tailFormatter = newStreamFormatter()
+            segment.tailRaw = ""
+        } else if (segment.prefixRaw.isEmpty() && views.prefix.visibility != View.GONE) {
+            views.prefix.text = ""
+            views.prefix.visibility = View.GONE
+        }
+
+        val tailRaw = rawContent.substring(segment.frozenRawLength.coerceIn(0, rawContent.length))
+        if (tailRaw != segment.tailRaw || tailRaw.isEmpty() && views.tail.text.isNotEmpty()) {
+            val formatter = segment.tailFormatter ?: newStreamFormatter().also { segment.tailFormatter = it }
+            val renderedTail = formatter.render(tailRaw).text
+            views.tail.setText(renderedTail, TextView.BufferType.SPANNABLE)
+            views.tail.visibility = if (tailRaw.isEmpty()) View.GONE else View.VISIBLE
+            segment.tailRaw = tailRaw
+        }
+    }
+
+    private fun findStreamFreezeBoundary(text: String, frozenEnd: Int): Int {
+        if (text.length - frozenEnd <= streamTailMaxChars) return frozenEnd
+        val scanEnd = (text.length - streamTailTargetChars).coerceAtLeast(frozenEnd)
+        var boundary = frozenEnd
+        var index = frozenEnd.coerceAtLeast(0)
+        while (index < scanEnd) {
+            if (text[index] == '\n') {
+                var end = index + 1
+                while (end < scanEnd && text[end] == '\n') end += 1
+                if (end >= streamFrozenPrefixMinChars && isPlainFormatBoundary(text, end)) {
+                    boundary = end
+                }
+                index = end
+            } else {
+                index += 1
+            }
+        }
+        return boundary
+    }
+
+    private fun isPlainFormatBoundary(text: String, end: Int): Boolean {
+        var mode = StreamMode.PLAIN
+        var index = 0
+        val limit = end.coerceIn(0, text.length)
+        while (index < limit) {
+            val ch = text[index]
+            mode = when {
+                mode == StreamMode.PLAIN && (ch == '"' || ch == '\uFF02') -> StreamMode.DOUBLE_QUOTE
+                mode == StreamMode.DOUBLE_QUOTE && (ch == '"' || ch == '\uFF02' || ch == '\u201C' || ch == '\u201D') -> StreamMode.PLAIN
+                mode == StreamMode.PLAIN && ch == '\u201C' -> StreamMode.CHINESE_QUOTE
+                mode == StreamMode.CHINESE_QUOTE && (ch == '\u201D' || ch == '"' || ch == '\uFF02' || ch == '\u201C') -> StreamMode.PLAIN
+                mode == StreamMode.PLAIN && (ch == '*' || ch == '\uFF0A') -> StreamMode.STAR
+                mode == StreamMode.STAR && (ch == '*' || ch == '\uFF0A') -> StreamMode.PLAIN
+                else -> mode
+            }
+            index += 1
+        }
+        return mode == StreamMode.PLAIN
+    }
+
+    private fun currentBodyHeight(body: View): Int {
         val pinned = body.layoutParams?.height ?: 0
         return if (pinned > 0) pinned else body.height
+    }
+
+    private fun estimateStreamingTextHeightForSegments(
+        messageId: String,
+        views: StreamBodyViews,
+        width: Int,
+        text: String
+    ): Int {
+        val state = streamBodyMeasureStates.getOrPut(messageId) { StreamBodyMeasureState() }
+        val reset = state.width != width ||
+            text.length < state.textLength ||
+            state.lineHeight <= 0
+        val start = if (reset) {
+            resetSegmentLineEstimate(state, views, width)
+            0
+        } else {
+            state.textLength
+        }
+        for (index in start until text.length) {
+            addEstimatedChar(state, text[index])
+        }
+        state.textLength = text.length
+        state.targetHeight = state.baseHeight + state.estimatedLines * state.lineHeight
+        return state.targetHeight
+    }
+
+    private fun resetSegmentLineEstimate(state: StreamBodyMeasureState, views: StreamBodyViews, width: Int) {
+        val contentWidth = (width - views.host.paddingLeft - views.host.paddingRight).coerceAtLeast(dp(80))
+        val averageCharWidth = views.tail.paint.measureText("\u4E2D").coerceAtLeast(1f)
+        state.width = width
+        state.textLength = 0
+        state.estimatedLines = 1
+        state.lineUnits = 0f
+        state.unitsPerLine = (contentWidth / averageCharWidth).coerceAtLeast(4f)
+        state.lineHeight = views.tail.lineHeight.coerceAtLeast(1)
+        state.baseHeight = views.host.paddingTop + views.host.paddingBottom + dp(3)
+        state.targetHeight = state.baseHeight + state.lineHeight
     }
 
     private fun estimateStreamingTextHeight(
@@ -1167,7 +1299,7 @@ class MainActivity : AppCompatActivity() {
         return layout.height + body.paddingTop + body.paddingBottom
     }
 
-    private fun animateStreamingBodyHeight(messageId: String, body: TextView, fromHeight: Int, toHeight: Int) {
+    private fun animateStreamingBodyHeight(messageId: String, body: View, fromHeight: Int, toHeight: Int) {
         streamBodyHeightAnimators.remove(messageId)?.cancel()
         val token = ++streamHeightAnimationSeed
         streamBodyHeightAnimationTokens[messageId] = token
@@ -1190,7 +1322,7 @@ class MainActivity : AppCompatActivity() {
             addUpdateListener { animation ->
                 if (streamBodyHeightAnimationTokens[messageId] != token) return@addUpdateListener
                 pinBodyHeight(body, animation.animatedValue as Int)
-                if (followBottom && !userTouchingMessages) scrollToBottomNow()
+                if (followBottom && !userTouchingMessages) scrollToBottomDuringStream()
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationCancel(animation: Animator) {
@@ -1209,26 +1341,24 @@ class MainActivity : AppCompatActivity() {
         animator.start()
     }
 
-    private fun finishStreamingBodyHeightAnimation(messageId: String, body: TextView, token: Int, toHeight: Int) {
+    private fun finishStreamingBodyHeightAnimation(messageId: String, body: View, token: Int, toHeight: Int) {
         if (streamBodyHeightAnimationTokens[messageId] != token) return
         streamBodyHeightAnimators.remove(messageId)
         streamBodyHeightAnimationTokens.remove(messageId)
         streamBodyHeightTargets.remove(messageId)
-        streamBodyLayoutLengths.remove(messageId)
         pinBodyHeight(body, toHeight)
         if (followBottom && !userTouchingMessages) scrollToBottomNow()
     }
 
-    private fun stopStreamingBodyHeightAnimation(messageId: String, body: TextView) {
+    private fun stopStreamingBodyHeightAnimation(messageId: String, body: View) {
         streamBodyHeightAnimators.remove(messageId)?.cancel()
         streamBodyHeightAnimationTokens.remove(messageId)
         streamBodyHeightTargets.remove(messageId)
-        streamBodyLayoutLengths.remove(messageId)
         streamBodyMeasureStates.remove(messageId)
         ensureBodyWrapContent(body)
     }
 
-    private fun pinBodyHeight(body: TextView, height: Int) {
+    private fun pinBodyHeight(body: View, height: Int) {
         val params = body.layoutParams ?: return
         if (params.height != height) {
             params.height = height
@@ -1236,7 +1366,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun ensureBodyWrapContent(body: TextView) {
+    private fun ensureBodyWrapContent(body: View) {
         val params = body.layoutParams ?: return
         if (params.height != ViewGroup.LayoutParams.WRAP_CONTENT) {
             params.height = ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1379,7 +1509,7 @@ class MainActivity : AppCompatActivity() {
             val caughtUp = nextContentLength == target.targetContent.length && nextThinkingLength == target.targetThinking.length
             if (caughtUp && target.finishWhenCaught) {
                 iterator.remove()
-                messageStreamFormatters.remove(target.message.id)
+                messageStreamSegments.remove(target.message.id)
                 updateMessageViews(target.message, final = true)
             } else if (!caughtUp || target.targetContent.length > target.contentReleaseEnd) {
                 needsNextFrame = true
@@ -1480,13 +1610,11 @@ class MainActivity : AppCompatActivity() {
         return if (end == this.length) this else substring(0, end)
     }
 
-    private fun streamingFormatter(messageId: String): StreamFormatState {
-        return messageStreamFormatters.getOrPut(messageId) {
-            StreamFormatState(
-                quoteColor = color(R.color.chat_accent3),
-                starColor = color(R.color.chat_accent)
-            )
-        }
+    private fun newStreamFormatter(): StreamFormatState {
+        return StreamFormatState(
+            quoteColor = color(R.color.chat_accent3),
+            starColor = color(R.color.chat_accent)
+        )
     }
 
     private fun updateThinkingPanel(message: ChatMessage) {
@@ -1657,6 +1785,13 @@ class MainActivity : AppCompatActivity() {
         keepProgrammaticScrollActive()
         messagesScroll.scrollTo(0, targetY)
         followBottom = true
+    }
+
+    private fun scrollToBottomDuringStream() {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastStreamBottomScrollAt < streamBottomScrollFrameMs) return
+        lastStreamBottomScrollAt = now
+        scrollToBottomNow()
     }
 
     private fun keepProgrammaticScrollActive() {
@@ -2785,6 +2920,26 @@ class MainActivity : AppCompatActivity() {
         val pattern: FieldRef,
         val replacement: FieldRef
     )
+
+    private data class StreamBodyViews(
+        val host: LinearLayout,
+        val prefix: TextView,
+        val tail: TextView
+    )
+
+    private data class StreamTextSegmentState(
+        var frozenRawLength: Int = 0,
+        var prefixRaw: String = "",
+        var tailRaw: String = "",
+        var tailFormatter: StreamFormatState? = null
+    ) {
+        fun reset() {
+            frozenRawLength = 0
+            prefixRaw = ""
+            tailRaw = ""
+            tailFormatter = null
+        }
+    }
 
     private data class StreamRenderTarget(
         var message: ChatMessage,
