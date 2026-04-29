@@ -127,7 +127,6 @@ class MainActivity : AppCompatActivity() {
     private var editingMessageEditor: EditText? = null
     private var editingFloatingButton: TextView? = null
     private var baseMessagesBottomPadding = 0
-    private var sendPulseAnimator: ValueAnimator? = null
     private var editScrollRestoreToken = 0
 
     private val defaultRenderMessageLimit = 80
@@ -787,18 +786,12 @@ class MainActivity : AppCompatActivity() {
         } else {
             roundedGradient(color(R.color.chat_accent_blue), Color.rgb(59, 130, 246), dp(8))
         }
-        if (sending) {
-            mainHandler.postDelayed({
-                if (isSending) startSendPulse()
-            }, 380)
-        } else {
-            stopSendPulse()
+        if (!sending) {
+            settleSendButton()
         }
     }
 
     private fun animateSendAction() {
-        sendPulseAnimator?.cancel()
-        sendPulseAnimator = null
         sendButton.animate().cancel()
         sendButton.pivotX = sendButton.width / 2f
         sendButton.pivotY = sendButton.height / 2f
@@ -820,28 +813,7 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
-    private fun startSendPulse() {
-        sendPulseAnimator?.cancel()
-        sendButton.animate().cancel()
-        sendButton.scaleX = 1f
-        sendButton.scaleY = 1f
-        sendPulseAnimator = ValueAnimator.ofFloat(0f, -resources.displayMetrics.density).apply {
-            duration = 900L
-            repeatMode = ValueAnimator.REVERSE
-            repeatCount = ValueAnimator.INFINITE
-            interpolator = softInterpolator
-            addUpdateListener { animation ->
-                if (isSending) {
-                    sendButton.translationY = animation.animatedValue as Float
-                }
-            }
-            start()
-        }
-    }
-
-    private fun stopSendPulse() {
-        sendPulseAnimator?.cancel()
-        sendPulseAnimator = null
+    private fun settleSendButton() {
         sendButton.animate().cancel()
         sendButton.animate()
             .scaleX(1f)
@@ -2243,7 +2215,11 @@ class MainActivity : AppCompatActivity() {
         val position = messagesLayoutManager.findFirstVisibleItemPosition()
         if (position == RecyclerView.NO_POSITION) return null
         val view = messagesLayoutManager.findViewByPosition(position) ?: return null
-        return ScrollAnchor(position, view.top - messagesScroll.paddingTop)
+        return ScrollAnchor(
+            position = position,
+            offset = view.top - messagesScroll.paddingTop,
+            absoluteOffset = messagesScroll.computeVerticalScrollOffset()
+        )
     }
 
     private fun isStreamTargetVisible(messageId: String): Boolean {
@@ -2281,13 +2257,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun restoreScrollAnchorAfterEdit(anchor: ScrollAnchor) {
         val token = ++editScrollRestoreToken
-        val delays = longArrayOf(0L, 80L, 180L, 320L)
+        val delays = longArrayOf(0L, 80L, 180L, 320L, 520L, 760L)
         delays.forEach { delay ->
             mainHandler.postDelayed({
                 if (token != editScrollRestoreToken || userTouchingMessages) return@postDelayed
                 keepProgrammaticScrollActive()
                 followBottom = false
                 messagesLayoutManager.scrollToPositionWithOffset(anchor.position, anchor.offset)
+                messagesScroll.post {
+                    if (token != editScrollRestoreToken || userTouchingMessages) return@post
+                    val delta = anchor.absoluteOffset - messagesScroll.computeVerticalScrollOffset()
+                    if (delta != 0) {
+                        keepProgrammaticScrollActive()
+                        messagesScroll.scrollBy(0, delta)
+                    }
+                }
                 streamLiveModeNow = isWithinLiveStreamDistance()
             }, delay)
         }
@@ -3681,7 +3665,8 @@ class MainActivity : AppCompatActivity() {
 
     private data class ScrollAnchor(
         val position: Int,
-        val offset: Int
+        val offset: Int,
+        val absoluteOffset: Int
     )
 
     private data class StreamBodyViews(
