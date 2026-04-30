@@ -38,8 +38,6 @@ import android.text.TextWatcher
 import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
 import android.graphics.text.LineBreakConfig
-import android.graphics.text.LineBreaker
-import android.graphics.text.MeasuredText
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -1830,26 +1828,15 @@ class MainActivity : AppCompatActivity() {
         consume: (Int) -> Unit
     ) {
         if (text.isEmpty()) return
-        val breaker = LineBreaker.Builder()
-            .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
-            .setHyphenationFrequency(LineBreaker.HYPHENATION_FREQUENCY_NONE)
-            .setUseBoundsForWidth(false)
-            .build()
         var paragraphStart = 0
         while (paragraphStart < text.length) {
             val newline = text.indexOf('\n', paragraphStart)
             val paragraphEnd = if (newline >= 0) newline else text.length
             if (paragraphEnd > paragraphStart) {
                 val paragraph = text.substring(paragraphStart, paragraphEnd)
-                val measured = MeasuredText.Builder(paragraph.toCharArray())
-                    .appendStyleRun(paint, streamLineBreakConfig, paragraph.length, false)
-                    .build()
-                val constraints = LineBreaker.ParagraphConstraints().apply {
-                    setWidth(width.toFloat().coerceAtLeast(1f))
-                }
-                val result = breaker.computeLineBreaks(measured, constraints, 0)
-                for (line in 0 until result.lineCount) {
-                    val paragraphLineEnd = result.getLineBreakOffset(line).coerceIn(0, paragraph.length)
+                val layout = buildStreamStaticLayout(paragraph, paint, width)
+                for (line in 0 until layout.lineCount) {
+                    val paragraphLineEnd = layout.getLineEnd(line).coerceIn(0, paragraph.length)
                     var renderedEnd = paragraphStart + paragraphLineEnd
                     if (newline >= 0 && renderedEnd == paragraphEnd) renderedEnd = newline + 1
                     consume(renderedEnd.coerceIn(0, text.length))
@@ -1860,6 +1847,17 @@ class MainActivity : AppCompatActivity() {
             if (newline < 0) break
             paragraphStart = newline + 1
         }
+    }
+
+    private fun buildStreamStaticLayout(text: CharSequence, paint: TextPaint, width: Int): StaticLayout {
+        return StaticLayout.Builder.obtain(text, 0, text.length, paint, width.coerceAtLeast(1))
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setIncludePad(true)
+            .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+            .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+            .setLineBreakConfig(streamLineBreakConfig)
+            .setUseBoundsForWidth(false)
+            .build()
     }
 
     private fun findNewlineFreezeBoundary(text: String, frozenEnd: Int): Int {
@@ -4508,11 +4506,6 @@ class MainActivity : AppCompatActivity() {
             .setLineBreakWordStyle(LineBreakConfig.LINE_BREAK_WORD_STYLE_NONE)
             .setHyphenation(LineBreakConfig.HYPHENATION_DISABLED)
             .build()
-        private val lineBreaker = LineBreaker.Builder()
-            .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
-            .setHyphenationFrequency(LineBreaker.HYPHENATION_FREQUENCY_NONE)
-            .setUseBoundsForWidth(false)
-            .build()
         private val density = resources.displayMetrics.density
         private val minUsefulContentWidth = (80f * density).toInt().coerceAtLeast(1)
         private val cursorGap = 2f * density
@@ -4719,7 +4712,6 @@ class MainActivity : AppCompatActivity() {
                 lineSpacingExtra = lineSpacingExtra,
                 lineSpacingMultiplier = lineSpacingMultiplier,
                 lineBreakConfig = lineBreakConfig,
-                lineBreaker = lineBreaker,
                 paragraphCache = paragraphCache
             )
         }
@@ -4765,7 +4757,6 @@ class MainActivity : AppCompatActivity() {
             lineSpacingExtra: Float,
             lineSpacingMultiplier: Float,
             private val lineBreakConfig: LineBreakConfig,
-            private val lineBreaker: LineBreaker,
             private val paragraphCache: ParagraphRenderCache
         ) {
             private val paint = TextPaint(basePaint)
@@ -4811,7 +4802,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             fun draw(canvas: Canvas) {
-                paragraphs.forEach { it.draw(canvas, paint) }
+                paragraphs.forEach { it.draw(canvas) }
             }
 
             private fun buildParagraph(paragraph: CharSequence, top: Int): ParagraphRender {
@@ -4827,79 +4818,45 @@ class MainActivity : AppCompatActivity() {
                     includeFontPadding = fontTop != fontMetrics.ascent || fontBottom != fontMetrics.descent
                 )
                 val snapshot = paragraphCache.getOrBuild(key) {
-                    val lines = breakParagraphIntoLines(paragraph)
-                    val paragraphHeight = (lines.lastOrNull()?.bottom ?: lineHeight).coerceAtLeast(lineHeight)
-                    val node = recordParagraphNode(paragraph, lines, width, paragraphHeight, paint)
+                    val layout = buildParagraphLayout(paragraph)
+                    val paragraphHeight = layout.height.coerceAtLeast(lineHeight)
+                    val lastLine = (layout.lineCount - 1).coerceAtLeast(0)
+                    val node = recordParagraphNode(layout, width, paragraphHeight)
                     ParagraphRenderSnapshot(
-                        text = SpannableStringBuilder(paragraph),
-                        lines = lines,
+                        layout = layout,
                         height = paragraphHeight,
-                        lastLineRight = lines.lastOrNull()?.right ?: 0f,
-                        lastLineTop = lines.lastOrNull()?.top?.toFloat() ?: 0f,
-                        lastLineBottom = lines.lastOrNull()?.bottom?.toFloat() ?: lineHeight.toFloat(),
+                        lastLineRight = if (layout.lineCount > 0) layout.getLineRight(lastLine) else 0f,
+                        lastLineTop = if (layout.lineCount > 0) layout.getLineTop(lastLine).toFloat() else 0f,
+                        lastLineBottom = if (layout.lineCount > 0) layout.getLineBottom(lastLine).toFloat() else lineHeight.toFloat(),
                         node = node
                     )
                 }
                 return ParagraphRender(top, snapshot)
             }
 
-            private fun breakParagraphIntoLines(paragraph: CharSequence): List<TextLine> {
-                if (paragraph.isEmpty()) {
-                    return listOf(TextLine(0, 0, -fontTop.toFloat(), 0, lineHeight, 0f))
-                }
-                val text = paragraph.toString()
-                val chars = text.toCharArray()
-                val measured = MeasuredText.Builder(chars)
-                    .appendStyleRun(paint, lineBreakConfig, chars.size, false)
+            private fun buildParagraphLayout(paragraph: CharSequence): StaticLayout {
+                return StaticLayout.Builder.obtain(paragraph, 0, paragraph.length, paint, width.coerceAtLeast(1))
+                    .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                    .setLineSpacing(lineSpacingExtra, lineSpacingMultiplier)
+                    .setIncludePad(includeFontPadding)
+                    .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+                    .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+                    .setLineBreakConfig(lineBreakConfig)
+                    .setUseBoundsForWidth(false)
                     .build()
-                val constraints = LineBreaker.ParagraphConstraints().apply {
-                    setWidth(width.toFloat().coerceAtLeast(1f))
-                }
-                val result = lineBreaker.computeLineBreaks(measured, constraints, 0)
-                val lineEnds = ArrayList<Int>(result.lineCount.coerceAtLeast(1))
-                for (lineIndex in 0 until result.lineCount) {
-                    lineEnds.add(result.getLineBreakOffset(lineIndex).coerceIn(0, text.length))
-                }
-                val lines = ArrayList<TextLine>(result.lineCount.coerceAtLeast(1))
-                var lineStart = 0
-                var y = 0
-                for (lineIndex in lineEnds.indices) {
-                    var lineEnd = lineEnds[lineIndex].coerceIn(lineStart, text.length)
-                    if (lineEnd <= lineStart && lineStart < text.length) {
-                        lineEnd = lineStart + 1
-                    }
-                    lines.add(
-                        TextLine(
-                            start = lineStart,
-                            end = lineEnd,
-                            baseline = y - fontTop.toFloat(),
-                            top = y,
-                            bottom = y + lineHeight,
-                            right = result.getLineWidth(lineIndex).coerceAtLeast(0f)
-                        )
-                    )
-                    y += lineHeight
-                    lineStart = lineEnd
-                }
-                if (lines.isEmpty()) {
-                    lines.add(TextLine(0, text.length, -fontTop.toFloat(), 0, lineHeight, paint.measureText(text)))
-                }
-                return lines
             }
 
             private fun recordParagraphNode(
-                paragraph: CharSequence,
-                lines: List<TextLine>,
+                layout: StaticLayout,
                 width: Int,
-                height: Int,
-                paint: TextPaint
+                height: Int
             ): RenderNode? {
                 return runCatching {
                     RenderNode("stream-paragraph").apply {
                         setPosition(0, 0, width, height)
                         val recordingCanvas: RecordingCanvas = beginRecording(width, height)
                         try {
-                            drawParagraphLines(recordingCanvas, paragraph, lines, paint)
+                            layout.draw(recordingCanvas)
                         } finally {
                             endRecording()
                         }
@@ -4907,55 +4864,14 @@ class MainActivity : AppCompatActivity() {
                 }.getOrNull()
             }
 
-            private fun drawParagraphLines(
-                canvas: Canvas,
-                paragraph: CharSequence,
-                lines: List<TextLine>,
-                paint: TextPaint
-            ) {
-                lines.forEach { line ->
-                    if (line.end > line.start) {
-                        drawStyledText(canvas, paragraph, line.start, line.end, line.baseline, paint)
-                    }
-                }
-            }
-
-            private fun drawStyledText(
-                canvas: Canvas,
-                text: CharSequence,
-                start: Int,
-                end: Int,
-                baseline: Float,
-                paint: TextPaint
-            ) {
-                val oldColor = paint.color
-                var x = 0f
-                if (text is Spanned) {
-                    var cursor = start
-                    while (cursor < end) {
-                        val next = text.nextSpanTransition(cursor, end, ForegroundColorSpan::class.java)
-                        val spanColor = text.getSpans(cursor, next, ForegroundColorSpan::class.java)
-                            .lastOrNull()
-                            ?.foregroundColor
-                        paint.color = spanColor ?: oldColor
-                        canvas.drawText(text, cursor, next, x, baseline, paint)
-                        x += paint.measureText(text, cursor, next)
-                        cursor = next
-                    }
-                } else {
-                    canvas.drawText(text, start, end, 0f, baseline, paint)
-                }
-                paint.color = oldColor
-            }
-
-            private fun ParagraphRender.draw(canvas: Canvas, paint: TextPaint) {
+            private fun ParagraphRender.draw(canvas: Canvas) {
                 canvas.save()
                 canvas.translate(0f, top.toFloat())
                 val node = snapshot.node
                 if (canvas.isHardwareAccelerated && node != null && node.hasDisplayList()) {
                     canvas.drawRenderNode(node)
                 } else {
-                    drawParagraphLines(canvas, snapshot.text, snapshot.lines, paint)
+                    snapshot.layout.draw(canvas)
                 }
                 canvas.restore()
             }
@@ -4994,22 +4910,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         private data class ParagraphRenderSnapshot(
-            val text: CharSequence,
-            val lines: List<TextLine>,
+            val layout: StaticLayout,
             val height: Int,
             val lastLineRight: Float,
             val lastLineTop: Float,
             val lastLineBottom: Float,
             val node: RenderNode?
-        )
-
-        private data class TextLine(
-            val start: Int,
-            val end: Int,
-            val baseline: Float,
-            val top: Int,
-            val bottom: Int,
-            val right: Float
         )
 
         private data class ParagraphRenderKey(
