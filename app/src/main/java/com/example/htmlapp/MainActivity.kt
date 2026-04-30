@@ -37,6 +37,7 @@ import android.text.TextPaint
 import android.text.TextWatcher
 import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
+import android.graphics.text.LineBreakConfig
 import android.graphics.text.LineBreaker
 import android.graphics.text.MeasuredText
 import android.view.Gravity
@@ -189,6 +190,13 @@ class MainActivity : AppCompatActivity() {
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
     private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
     private val streamHeightInterpolator by lazy { PathInterpolator(0.2f, 0f, 0.2f, 1f) }
+    private val streamLineBreakConfig: LineBreakConfig by lazy {
+        LineBreakConfig.Builder()
+            .setLineBreakStyle(LineBreakConfig.LINE_BREAK_STYLE_NONE)
+            .setLineBreakWordStyle(LineBreakConfig.LINE_BREAK_WORD_STYLE_NONE)
+            .setHyphenation(LineBreakConfig.HYPHENATION_DISABLED)
+            .build()
+    }
     private val compositeRevealShaderSource = """
         uniform shader input;
         uniform float progress;
@@ -1804,6 +1812,7 @@ class MainActivity : AppCompatActivity() {
         val breaker = LineBreaker.Builder()
             .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
             .setHyphenationFrequency(LineBreaker.HYPHENATION_FREQUENCY_NONE)
+            .setUseBoundsForWidth(false)
             .build()
         var paragraphStart = 0
         while (paragraphStart < text.length) {
@@ -1812,18 +1821,25 @@ class MainActivity : AppCompatActivity() {
             if (paragraphEnd > paragraphStart) {
                 val paragraph = text.substring(paragraphStart, paragraphEnd)
                 val measured = MeasuredText.Builder(paragraph.toCharArray())
-                    .appendStyleRun(paint, paragraph.length, false)
+                    .appendStyleRun(paint, streamLineBreakConfig, paragraph.length, false)
                     .build()
                 val constraints = LineBreaker.ParagraphConstraints().apply {
                     setWidth(width.toFloat().coerceAtLeast(1f))
                 }
                 val result = breaker.computeLineBreaks(measured, constraints, 0)
+                val lineEnds = ArrayList<Int>(result.lineCount.coerceAtLeast(1))
                 for (line in 0 until result.lineCount) {
-                    var renderedEnd = paragraphStart + result.getLineBreakOffset(line)
-                    if (newline >= 0 && renderedEnd == paragraphEnd) {
-                        renderedEnd = newline + 1
-                    }
+                    lineEnds.add(result.getLineBreakOffset(line).coerceIn(0, paragraph.length))
+                }
+                val emitLineEnd: (Int) -> Unit = { paragraphLineEnd ->
+                    var renderedEnd = paragraphStart + paragraphLineEnd
+                    if (newline >= 0 && renderedEnd == paragraphEnd) renderedEnd = newline + 1
                     consume(renderedEnd.coerceIn(0, text.length))
+                }
+                if (isCollapsedLineBreakResult(lineEnds, paragraph.length, width, paint)) {
+                    forEachGreedyLineBreakEnd(paragraph, paint, width, emitLineEnd)
+                } else {
+                    lineEnds.forEach(emitLineEnd)
                 }
             } else if (newline >= 0) {
                 consume((newline + 1).coerceIn(0, text.length))
@@ -1831,6 +1847,40 @@ class MainActivity : AppCompatActivity() {
             if (newline < 0) break
             paragraphStart = newline + 1
         }
+    }
+
+    private inline fun forEachGreedyLineBreakEnd(
+        text: String,
+        paint: TextPaint,
+        width: Int,
+        consume: (Int) -> Unit
+    ) {
+        var start = 0
+        val safeWidth = width.toFloat().coerceAtLeast(paint.measureText("\u4E2D").coerceAtLeast(1f))
+        while (start < text.length) {
+            val count = paint.breakText(text, start, text.length, true, safeWidth, null)
+                .coerceAtLeast(1)
+            start = (start + count).coerceAtMost(text.length)
+            consume(start)
+        }
+    }
+
+    private fun isCollapsedLineBreakResult(
+        lineEnds: List<Int>,
+        textLength: Int,
+        width: Int,
+        paint: TextPaint
+    ): Boolean {
+        if (textLength < 8 || lineEnds.size < 6) return false
+        val averageCharWidth = paint.measureText("\u4E2D").coerceAtLeast(1f)
+        if (width / averageCharWidth < 6f) return false
+        var previous = 0
+        var oneCharLines = 0
+        lineEnds.forEach { end ->
+            if (end - previous <= 1) oneCharLines += 1
+            previous = end
+        }
+        return oneCharLines >= 6 && oneCharLines >= lineEnds.size * 3 / 4
     }
 
     private fun findNewlineFreezeBoundary(text: String, frozenEnd: Int): Int {
@@ -4473,15 +4523,23 @@ class MainActivity : AppCompatActivity() {
         private var cachedPrefixWidth = -1
         private var cachedTailWidth = -1
         private val paragraphCache = ParagraphRenderCache(160)
+        private val lineBreakConfig = LineBreakConfig.Builder()
+            .setLineBreakStyle(LineBreakConfig.LINE_BREAK_STYLE_NONE)
+            .setLineBreakWordStyle(LineBreakConfig.LINE_BREAK_WORD_STYLE_NONE)
+            .setHyphenation(LineBreakConfig.HYPHENATION_DISABLED)
+            .build()
         private val lineBreaker = LineBreaker.Builder()
             .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
             .setHyphenationFrequency(LineBreaker.HYPHENATION_FREQUENCY_NONE)
+            .setUseBoundsForWidth(false)
             .build()
         private val density = resources.displayMetrics.density
+        private val minUsefulContentWidth = (80f * density).toInt().coerceAtLeast(1)
         private val cursorGap = 2f * density
         private val cursorWidth = (2f * density).coerceAtLeast(1f)
         private val cursorInset = 3f * density
         private val cursorBlinkMs = 560L
+        private var lastKnownContentWidth = 0
 
         init {
             textPaint.density = resources.displayMetrics.density
@@ -4543,7 +4601,7 @@ class MainActivity : AppCompatActivity() {
 
         fun desiredHeightForWidth(contentWidth: Int): Int {
             if (isTextEmpty()) return 0
-            val width = contentWidth.coerceAtLeast(1)
+            val width = resolveContentWidth(contentWidth + paddingLeft + paddingRight)
             return paddingTop + layoutHeight(prefixLayoutForWidth(width)) + layoutHeight(tailLayoutForWidth(width)) + paddingBottom
         }
 
@@ -4566,13 +4624,14 @@ class MainActivity : AppCompatActivity() {
                 cachedTailLayout = null
                 cachedTailWidth = -1
             }
-            val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(0)
+            val contentWidth = rawContentWidth(width).coerceAtLeast(0)
             if (contentWidth <= 0 || !isShown || !ViewCompat.isAttachedToWindow(this)) {
                 if (prefixChanged || tailChanged) requestLayout()
                 invalidate()
                 return true
             }
-            val nextHeight = layoutHeight(prefixLayoutForWidth(contentWidth)) + layoutHeight(tailLayoutForWidth(contentWidth))
+            val nextHeight = layoutHeight(prefixLayoutForWidth(resolveContentWidth(width))) +
+                layoutHeight(tailLayoutForWidth(resolveContentWidth(width)))
             val heightChanged = nextHeight != oldHeight
             if (heightChanged) {
                 requestLayout()
@@ -4582,14 +4641,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val width = View.MeasureSpec.getSize(widthMeasureSpec)
-            val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
+            val measuredWidth = View.MeasureSpec.getSize(widthMeasureSpec)
+            val contentWidth = resolveContentWidth(measuredWidth)
+            val desiredWidth = contentWidth + paddingLeft + paddingRight
             val desiredHeight = paddingTop +
                 layoutHeight(prefixLayoutForWidth(contentWidth)) +
                 layoutHeight(tailLayoutForWidth(contentWidth)) +
                 paddingBottom
             setMeasuredDimension(
-                resolveSize(width, widthMeasureSpec),
+                resolveSize(desiredWidth, widthMeasureSpec),
                 resolveSize(if (isTextEmpty()) 0 else desiredHeight, heightMeasureSpec)
             )
         }
@@ -4597,7 +4657,7 @@ class MainActivity : AppCompatActivity() {
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             if (isTextEmpty()) return
-            val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
+            val contentWidth = resolveContentWidth(width)
             val prefixLayout = prefixLayoutForWidth(contentWidth)
             val tailLayout = tailLayoutForWidth(contentWidth)
             canvas.save()
@@ -4668,12 +4728,28 @@ class MainActivity : AppCompatActivity() {
                 includeFontPadding = includeFontPadding,
                 lineSpacingExtra = lineSpacingExtra,
                 lineSpacingMultiplier = lineSpacingMultiplier,
+                lineBreakConfig = lineBreakConfig,
                 lineBreaker = lineBreaker,
                 paragraphCache = paragraphCache
             )
         }
 
         private fun layoutHeight(layout: StreamMeasuredLayout?): Int = layout?.height ?: 0
+
+        private fun rawContentWidth(outerWidth: Int): Int {
+            return outerWidth - paddingLeft - paddingRight
+        }
+
+        private fun resolveContentWidth(outerWidth: Int): Int {
+            val candidate = rawContentWidth(outerWidth)
+            if (candidate >= minUsefulContentWidth) {
+                lastKnownContentWidth = candidate
+                return candidate
+            }
+            if (lastKnownContentWidth >= minUsefulContentWidth) return lastKnownContentWidth
+            val displayFallback = resources.displayMetrics.widthPixels - (96f * density).toInt()
+            return displayFallback.coerceAtLeast(minUsefulContentWidth)
+        }
 
         private fun invalidateLayouts(clearParagraphCache: Boolean = false) {
             cachedPrefixLayout = null
@@ -4697,6 +4773,7 @@ class MainActivity : AppCompatActivity() {
             includeFontPadding: Boolean,
             lineSpacingExtra: Float,
             lineSpacingMultiplier: Float,
+            private val lineBreakConfig: LineBreakConfig,
             private val lineBreaker: LineBreaker,
             private val paragraphCache: ParagraphRenderCache
         ) {
@@ -4782,17 +4859,24 @@ class MainActivity : AppCompatActivity() {
                 val text = paragraph.toString()
                 val chars = text.toCharArray()
                 val measured = MeasuredText.Builder(chars)
-                    .appendStyleRun(paint, chars.size, false)
+                    .appendStyleRun(paint, lineBreakConfig, chars.size, false)
                     .build()
                 val constraints = LineBreaker.ParagraphConstraints().apply {
                     setWidth(width.toFloat().coerceAtLeast(1f))
                 }
                 val result = lineBreaker.computeLineBreaks(measured, constraints, 0)
+                val lineEnds = ArrayList<Int>(result.lineCount.coerceAtLeast(1))
+                for (lineIndex in 0 until result.lineCount) {
+                    lineEnds.add(result.getLineBreakOffset(lineIndex).coerceIn(0, text.length))
+                }
+                if (isCollapsedLineBreakResult(lineEnds, text.length)) {
+                    return breakParagraphGreedy(text)
+                }
                 val lines = ArrayList<TextLine>(result.lineCount.coerceAtLeast(1))
                 var lineStart = 0
                 var y = 0
-                for (lineIndex in 0 until result.lineCount) {
-                    var lineEnd = result.getLineBreakOffset(lineIndex).coerceIn(lineStart, text.length)
+                for (lineIndex in lineEnds.indices) {
+                    var lineEnd = lineEnds[lineIndex].coerceIn(lineStart, text.length)
                     if (lineEnd <= lineStart && lineStart < text.length) {
                         lineEnd = lineStart + 1
                     }
@@ -4813,6 +4897,47 @@ class MainActivity : AppCompatActivity() {
                     lines.add(TextLine(0, text.length, -fontTop.toFloat(), 0, lineHeight, paint.measureText(text)))
                 }
                 return lines
+            }
+
+            private fun breakParagraphGreedy(text: String): List<TextLine> {
+                val lines = ArrayList<TextLine>()
+                val safeWidth = width.toFloat().coerceAtLeast(paint.measureText("\u4E2D").coerceAtLeast(1f))
+                var lineStart = 0
+                var y = 0
+                while (lineStart < text.length) {
+                    val count = paint.breakText(text, lineStart, text.length, true, safeWidth, null)
+                        .coerceAtLeast(1)
+                    val lineEnd = (lineStart + count).coerceAtMost(text.length)
+                    lines.add(
+                        TextLine(
+                            start = lineStart,
+                            end = lineEnd,
+                            baseline = y - fontTop.toFloat(),
+                            top = y,
+                            bottom = y + lineHeight,
+                            right = paint.measureText(text, lineStart, lineEnd)
+                        )
+                    )
+                    y += lineHeight
+                    lineStart = lineEnd
+                }
+                if (lines.isEmpty()) {
+                    lines.add(TextLine(0, text.length, -fontTop.toFloat(), 0, lineHeight, paint.measureText(text)))
+                }
+                return lines
+            }
+
+            private fun isCollapsedLineBreakResult(lineEnds: List<Int>, textLength: Int): Boolean {
+                if (textLength < 8 || lineEnds.size < 6) return false
+                val averageCharWidth = paint.measureText("\u4E2D").coerceAtLeast(1f)
+                if (width / averageCharWidth < 6f) return false
+                var previous = 0
+                var oneCharLines = 0
+                lineEnds.forEach { end ->
+                    if (end - previous <= 1) oneCharLines += 1
+                    previous = end
+                }
+                return oneCharLines >= 6 && oneCharLines >= lineEnds.size * 3 / 4
             }
 
             private fun recordParagraphNode(
