@@ -1849,7 +1849,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private inline fun forEachGreedyLineBreakEnd(
+    private fun forEachGreedyLineBreakEnd(
         text: String,
         paint: TextPaint,
         width: Int,
