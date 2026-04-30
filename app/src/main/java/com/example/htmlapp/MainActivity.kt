@@ -98,7 +98,6 @@ class MainActivity : AppCompatActivity() {
     private val messageRenderedContent = mutableMapOf<String, String>()
     private val messageRenderedThinking = mutableMapOf<String, String>()
     private val messageStreamSegments = mutableMapOf<String, StreamTextSegmentState>()
-    private val messageCardViews = mutableMapOf<String, View>()
     private val streamBodyHeightAnimationTokens = mutableMapOf<String, Int>()
     private val streamBodyHeightAnimators = mutableMapOf<String, ValueAnimator>()
     private val streamBodyHeightTargets = mutableMapOf<String, Int>()
@@ -986,7 +985,6 @@ class MainActivity : AppCompatActivity() {
         messageRenderedContent.clear()
         messageRenderedThinking.clear()
         messageStreamSegments.clear()
-        messageCardViews.clear()
         streamLiveModeNow = false
         streamThrottledModeNow = false
         val session = state.ensureSession()
@@ -1030,7 +1028,6 @@ class MainActivity : AppCompatActivity() {
         messageThinkingSummaries.remove(messageId)
         messageRenderedContent.remove(messageId)
         messageRenderedThinking.remove(messageId)
-        messageCardViews.remove(messageId)
     }
 
     private inner class MessageAdapter : RecyclerView.Adapter<MessageAdapter.MessageHolder>() {
@@ -1153,7 +1150,6 @@ class MainActivity : AppCompatActivity() {
             contentColumn.addView(messageFooter(message))
         }
         card.addView(contentColumn)
-        messageCardViews[message.id] = card
         if (recentlyInsertedMessageIds.remove(message.id)) {
             card.post { animateMessageEntrance(card) }
         } else if (editTransitionMessageIds.remove(message.id)) {
@@ -1425,7 +1421,7 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     ensureBodyWrapContent(views.host)
                 }
-                animateContentSettled(message.id, views.host)
+                animateContentSettled(views.host)
                 return StreamBodyUpdate(
                     changed = true,
                     heightChanged = renderUpdate.heightMayHaveChanged || targetHeight != oldHeight
@@ -1439,7 +1435,7 @@ class MainActivity : AppCompatActivity() {
             views.tail.visibility = View.GONE
             messageRenderedContent[message.id] = content
             if (final && message.role == "assistant") {
-                animateContentSettled(message.id, views.host)
+                animateContentSettled(views.host)
             }
             return StreamBodyUpdate(changed = true, heightChanged = true)
         }
@@ -2666,7 +2662,7 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
-    private fun animateContentSettled(messageId: String, view: View) {
+    private fun animateContentSettled(view: View) {
         view.animate().cancel()
         view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         view.alpha = 0.82f
@@ -2680,7 +2676,13 @@ class MainActivity : AppCompatActivity() {
             .setInterpolator(entranceInterpolator)
             .withEndAction { view.setLayerType(View.LAYER_TYPE_NONE, null) }
             .start()
-        messageCardViews[messageId]?.let { animateMessageFrameSettled(it) }
+        findMessageCardForBody(view)?.let { animateMessageFrameSettled(it) }
+    }
+
+    private fun findMessageCardForBody(body: View): View? {
+        val contentColumn = body.parent as? View ?: return null
+        val card = contentColumn.parent as? View ?: return null
+        return card.takeIf { it.isShown && ViewCompat.isAttachedToWindow(it) }
     }
 
     private fun animateMessageFrameSettled(card: View) {
