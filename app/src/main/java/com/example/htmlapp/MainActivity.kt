@@ -1802,7 +1802,7 @@ class MainActivity : AppCompatActivity() {
         return boundary
     }
 
-    private inline fun forEachLineBreakEnd(
+    private fun forEachLineBreakEnd(
         text: String,
         paint: TextPaint,
         width: Int,
