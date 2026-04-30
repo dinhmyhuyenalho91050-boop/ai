@@ -1,0 +1,13 @@
+HSPLcom/example/htmlapp/MainActivity;-><init>()V
+HSPLcom/example/htmlapp/MainActivity;->onCreate(Landroid/os/Bundle;)V
+HSPLcom/example/htmlapp/MainActivity;->bindViews()V
+HSPLcom/example/htmlapp/MainActivity;->setupDevicePerformanceControls()V
+HSPLcom/example/htmlapp/MainActivity;->setupEdgeToEdge()V
+HSPLcom/example/htmlapp/MainActivity;->setupClicks()V
+HSPLcom/example/htmlapp/MainActivity;->renderAll()V
+HSPLcom/example/htmlapp/MainActivity;->renderModelTabs()V
+HSPLcom/example/htmlapp/MainActivity;->renderMessages(Z)V
+HSPLcom/example/htmlapp/MainActivity$MessageAdapter;-><init>(Lcom/example/htmlapp/MainActivity;)V
+HSPLcom/example/htmlapp/NativeChatRepository;-><init>(Landroid/content/Context;)V
+HSPLcom/example/htmlapp/NativeChatRepository;->load()Lcom/example/htmlapp/NativeChatState;
+HSPLcom/example/htmlapp/NativeChatState$Companion;->defaults()Lcom/example/htmlapp/NativeChatState;

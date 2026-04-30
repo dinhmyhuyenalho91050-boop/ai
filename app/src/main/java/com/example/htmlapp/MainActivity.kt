@@ -12,6 +12,10 @@ import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.RecordingCanvas
+import android.graphics.RenderEffect
+import android.graphics.RenderNode
+import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
@@ -21,6 +25,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PerformanceHintManager
 import android.os.Process
+import android.os.SystemClock
+import android.os.WorkDuration
 import android.text.Editable
 import android.text.InputType
 import android.text.Layout
@@ -31,6 +37,8 @@ import android.text.TextPaint
 import android.text.TextWatcher
 import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
+import android.graphics.text.LineBreaker
+import android.graphics.text.MeasuredText
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -68,6 +76,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.ArrayDeque
 import java.util.Locale
+import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
@@ -133,6 +142,8 @@ class MainActivity : AppCompatActivity() {
     private var editScrollRestoreToken = 0
     private var sendButtonVisualSending = false
     private var sendButtonAnimationToken = 0
+    private val compositeEffectTokens = WeakHashMap<View, Int>()
+    private var compositeEffectTokenSeed = 0
     private val recentlyInsertedMessageIds = mutableSetOf<String>()
     private val editTransitionMessageIds = mutableSetOf<String>()
     private val editExitLockedHeights = mutableMapOf<String, Int>()
@@ -141,8 +152,11 @@ class MainActivity : AppCompatActivity() {
     private val formattedTextCache = LruCacheMap<TextFormatCacheKey, CharSequence>(180)
     private var displayPerformanceMode: DisplayPerformanceMode? = null
     private var currentRequestedFrameRate = View.REQUESTED_FRAME_RATE_CATEGORY_NO_PREFERENCE
+    private var performanceHintManager: PerformanceHintManager? = null
     private var uiPerformanceHintSession: PerformanceHintManager.Session? = null
     private var uiPerformanceHintTargetNs = 0L
+    private var uiPerformanceHintPowerEfficient: Boolean? = null
+    private var streamBottomFollowToken = 0
 
     private val defaultRenderMessageLimit = 80
     private val loadOlderMessageBatch = 40
@@ -175,6 +189,18 @@ class MainActivity : AppCompatActivity() {
     private val softInterpolator by lazy { PathInterpolator(0.2f, 0f, 0f, 1f) }
     private val entranceInterpolator by lazy { PathInterpolator(0.16f, 1f, 0.3f, 1f) }
     private val streamHeightInterpolator by lazy { PathInterpolator(0.2f, 0f, 0.2f, 1f) }
+    private val compositeRevealShaderSource = """
+        uniform shader input;
+        uniform float progress;
+        uniform float2 size;
+        half4 main(float2 p) {
+            half4 c = input.eval(p);
+            float y = clamp(p.y / max(size.y, 1.0), 0.0, 1.0);
+            float reveal = smoothstep(0.0, 1.0, progress + (1.0 - y) * 0.08);
+            float lift = 0.985 + reveal * 0.015;
+            return half4(c.rgb * lift, c.a);
+        }
+    """.trimIndent()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -217,8 +243,9 @@ class MainActivity : AppCompatActivity() {
         attrs.setFrameRatePowerSavingsBalanced(true)
         attrs.setFrameRateBoostOnTouchEnabled(false)
         window.attributes = attrs
+        performanceHintManager = getSystemService(PerformanceHintManager::class.java)
         uiPerformanceHintSession = runCatching {
-            getSystemService(PerformanceHintManager::class.java)
+            performanceHintManager
                 ?.createHintSession(intArrayOf(Process.myTid()), displayPerformanceTargetNs(DisplayPerformanceMode.IDLE))
         }.getOrNull()
         applyDisplayPerformanceMode(DisplayPerformanceMode.IDLE, force = true)
@@ -252,9 +279,15 @@ class MainActivity : AppCompatActivity() {
     private fun updateUiPerformanceHintTarget(mode: DisplayPerformanceMode) {
         val session = uiPerformanceHintSession ?: return
         val targetNs = displayPerformanceTargetNs(mode)
-        if (targetNs == uiPerformanceHintTargetNs) return
-        uiPerformanceHintTargetNs = targetNs
-        runCatching { session.updateTargetWorkDuration(targetNs) }
+        if (targetNs != uiPerformanceHintTargetNs) {
+            uiPerformanceHintTargetNs = targetNs
+            runCatching { session.updateTargetWorkDuration(targetNs) }
+        }
+        val preferPower = mode != DisplayPerformanceMode.STREAM_LIVE
+        if (uiPerformanceHintPowerEfficient != preferPower) {
+            uiPerformanceHintPowerEfficient = preferPower
+            runCatching { session.setPreferPowerEfficiency(preferPower) }
+        }
     }
 
     private fun displayPerformanceFrameRate(mode: DisplayPerformanceMode): Float {
@@ -276,15 +309,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun beginUiWorkHint(): Long {
-        return if (uiPerformanceHintSession == null) 0L else System.nanoTime()
+        return if (uiPerformanceHintSession == null) 0L else SystemClock.uptimeNanos()
     }
 
     @SuppressLint("NewApi")
     private fun finishUiWorkHint(startNs: Long) {
         val session = uiPerformanceHintSession ?: return
         if (startNs <= 0L) return
-        val elapsedNs = (System.nanoTime() - startNs).coerceAtLeast(1L)
-        runCatching { session.reportActualWorkDuration(elapsedNs) }
+        val elapsedNs = (SystemClock.uptimeNanos() - startNs).coerceAtLeast(1L)
+        val duration = WorkDuration().apply {
+            setWorkPeriodStartTimestampNanos(startNs)
+            setActualTotalDurationNanos(elapsedNs)
+            setActualCpuDurationNanos(elapsedNs)
+            setActualGpuDurationNanos(0L)
+        }
+        runCatching { session.reportActualWorkDuration(duration) }
+    }
+
+    @SuppressLint("NewApi")
+    private fun beginBackgroundWorkHint(targetNs: Long): PerformanceWorkSession? {
+        val manager = performanceHintManager ?: return null
+        val startNs = SystemClock.uptimeNanos()
+        val session = runCatching {
+            manager.createHintSession(intArrayOf(Process.myTid()), targetNs)?.apply {
+                setPreferPowerEfficiency(true)
+            }
+        }.getOrNull() ?: return null
+        return PerformanceWorkSession(session, startNs)
     }
 
     private fun registerImportLauncher() {
@@ -314,11 +365,11 @@ class MainActivity : AppCompatActivity() {
                     messageTouchToken++
                     editScrollRestoreToken++
                     userTouchingMessages = true
-                    followBottom = isNearBottom()
+                    detachBottomFollowForTouch()
                     updateStreamDistanceModes()
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (!programmaticScroll && userTouchingMessages) followBottom = isNearBottom()
+                    if (userTouchingMessages) followBottom = false
                     updateStreamDistanceModes()
                     scheduleScrollTracking()
                 }
@@ -367,7 +418,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                if (!programmaticScroll && userTouchingMessages) followBottom = isNearBottom()
+                if (userTouchingMessages) followBottom = false
                 updateStreamDistanceModes()
                 scheduleVisibleStreamRefresh()
                 scheduleScrollTracking()
@@ -680,6 +731,7 @@ class MainActivity : AppCompatActivity() {
             sidebar.translationX = -sidebarWidth
             sidebar.alpha = 0.96f
             sidebar.visibility = View.VISIBLE
+            animateCompositeLayer(sidebar, 480L)
             backdrop.animate().alpha(1f).setDuration(360).setInterpolator(softInterpolator).start()
             sidebar.animate()
                 .alpha(1f)
@@ -775,7 +827,9 @@ class MainActivity : AppCompatActivity() {
             var renderedContentLength = continuationPrefill.length
             var renderedThinkingLength = assistant.thinking.length
             val uiUpdatePosted = AtomicBoolean(false)
-            runCatching {
+            val requestHint = beginBackgroundWorkHint(50_000_000L)
+            try {
+                runCatching {
                 aiClient.send(state, session, continuationPrefill.takeIf { it.isNotBlank() }) { content, thinking ->
                     latestContent = content
                     latestThinking = thinking
@@ -807,7 +861,7 @@ class MainActivity : AppCompatActivity() {
                         }
                 }
             }
-            }.onSuccess { result ->
+                }.onSuccess { result ->
                 val finalContent = applyPromptRegex(
                     mergeContinuationContent(continuationPrefill, result.content),
                     promptForRegex
@@ -867,6 +921,9 @@ class MainActivity : AppCompatActivity() {
                     }
                     renderSessions()
                 }
+                }
+            } finally {
+                requestHint?.finish()
             }
         }.start()
     }
@@ -907,6 +964,7 @@ class MainActivity : AppCompatActivity() {
     private fun animateSendButtonState(sending: Boolean) {
         val token = ++sendButtonAnimationToken
         sendButton.animate().cancel()
+        animateCompositeLayer(sendButton, 360L)
         sendButton.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         sendButton.pivotX = sendButton.width / 2f
         sendButton.pivotY = sendButton.height / 2f
@@ -1711,22 +1769,20 @@ class MainActivity : AppCompatActivity() {
         val scanEnd = (text.length - streamTailTargetChars).coerceAtLeast(frozenEnd)
         val mapping = buildStreamDisplayMapping(text, scanEnd)
         if (mapping.text.isEmpty()) return frozenEnd
-        val layout = StaticLayout.Builder.obtain(
-            mapping.text,
-            0,
-            mapping.text.length,
-            views.prefix.paint,
-            contentWidth
-        )
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setLineSpacing(views.prefix.lineSpacingExtra, views.prefix.lineSpacingMultiplier)
-            .setIncludePad(views.prefix.includeFontPadding)
-            .setBreakStrategy(views.prefix.breakStrategy)
-            .setHyphenationFrequency(views.prefix.hyphenationFrequency)
+        val measured = MeasuredText.Builder(mapping.text.toCharArray())
+            .appendStyleRun(views.prefix.paint, mapping.text.length, false)
             .build()
+        val constraints = LineBreaker.ParagraphConstraints().apply {
+            setWidth(contentWidth.toFloat().coerceAtLeast(1f))
+        }
+        val layout = LineBreaker.Builder()
+            .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
+            .setHyphenationFrequency(LineBreaker.HYPHENATION_FREQUENCY_NONE)
+            .build()
+            .computeLineBreaks(measured, constraints, 0)
         var boundary = frozenEnd
         for (line in 0 until layout.lineCount) {
-            val renderedEnd = layout.getLineEnd(line).coerceIn(0, mapping.rawEnds.size)
+            val renderedEnd = layout.getLineBreakOffset(line).coerceIn(0, mapping.rawEnds.size)
             if (renderedEnd <= 0) continue
             val rawEnd = mapping.rawEnds[renderedEnd - 1].coerceIn(0, scanEnd)
             if (rawEnd <= frozenEnd) continue
@@ -2584,6 +2640,15 @@ class MainActivity : AppCompatActivity() {
         return followBottom || isNearBottom(distance)
     }
 
+    private fun detachBottomFollowForTouch() {
+        followBottom = false
+        streamBottomFollowToken++
+        streamBottomFollowScheduled = false
+        bottomScrollScheduled = false
+        lastBottomTargetY = -1
+        messagesScroll.stopScroll()
+    }
+
     private fun captureScrollAnchor(): ScrollAnchor? {
         val position = messagesLayoutManager.findFirstVisibleItemPosition()
         if (position == RecyclerView.NO_POSITION) return null
@@ -2698,6 +2763,7 @@ class MainActivity : AppCompatActivity() {
         bottomScrollScheduled = true
         messagesScroll.post {
             bottomScrollScheduled = false
+            if (userTouchingMessages) return@post
             if (scrollRemainingToBottom(animated)) {
                 followBottom = true
                 streamLiveModeNow = true
@@ -2745,6 +2811,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun scrollToBottomDuringStream() {
         if (!followBottom) return
+        if (userTouchingMessages) return
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastStreamBottomScrollAt >= streamBottomScrollFrameMs) {
             lastStreamBottomScrollAt = now
@@ -2752,8 +2819,10 @@ class MainActivity : AppCompatActivity() {
         }
         if (streamBottomFollowScheduled) return
         streamBottomFollowScheduled = true
+        val token = streamBottomFollowToken
         ViewCompat.postOnAnimation(messagesScroll) {
             streamBottomFollowScheduled = false
+            if (token != streamBottomFollowToken) return@postOnAnimation
             if (followBottom && !userTouchingMessages) scrollToBottomNow()
         }
     }
@@ -2777,7 +2846,42 @@ class MainActivity : AppCompatActivity() {
         mainHandler.postDelayed({ releaseWhenQuiet() }, scrollTrackFrameMs)
     }
 
+    @SuppressLint("NewApi")
+    private fun animateCompositeLayer(view: View, durationMs: Long) {
+        if (view.width <= 0 || view.height <= 0 || !ViewCompat.isAttachedToWindow(view)) return
+        val shader = runCatching { RuntimeShader(compositeRevealShaderSource) }.getOrNull() ?: return
+        val effect = runCatching { RenderEffect.createRuntimeShaderEffect(shader, "input") }.getOrNull() ?: return
+        val token = ++compositeEffectTokenSeed
+        compositeEffectTokens[view] = token
+        shader.setFloatUniform("size", view.width.toFloat(), view.height.toFloat())
+        shader.setFloatUniform("progress", 0f)
+        view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        view.setRenderEffect(effect)
+        ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = durationMs
+            interpolator = entranceInterpolator
+            addUpdateListener { animation ->
+                if (compositeEffectTokens[view] != token) return@addUpdateListener
+                shader.setFloatUniform("progress", animation.animatedValue as Float)
+                view.invalidate()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) = clear()
+                override fun onAnimationCancel(animation: Animator) = clear()
+
+                private fun clear() {
+                    if (compositeEffectTokens[view] != token) return
+                    compositeEffectTokens.remove(view)
+                    view.setRenderEffect(null)
+                    view.setLayerType(View.LAYER_TYPE_NONE, null)
+                }
+            })
+            start()
+        }
+    }
+
     private fun animateIn(view: View) {
+        animateCompositeLayer(view, 560L)
         view.alpha = 0f
         view.scaleX = 0.985f
         view.scaleY = 0.985f
@@ -2794,6 +2898,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun animateMessageEntrance(view: View) {
         view.animate().cancel()
+        animateCompositeLayer(view, 340L)
         view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         view.alpha = 0f
         view.scaleX = 0.995f
@@ -2812,6 +2917,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun animateEditCardTransition(view: View) {
         view.animate().cancel()
+        animateCompositeLayer(view, 300L)
         view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         view.alpha = 0.9f
         view.animate()
@@ -2825,6 +2931,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun animateContentSettled(view: View) {
         view.animate().cancel()
+        animateCompositeLayer(view, 520L)
         view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         view.alpha = 0.82f
         view.scaleX = 0.999f
@@ -3302,6 +3409,7 @@ class MainActivity : AppCompatActivity() {
             shell.setLayerType(View.LAYER_TYPE_HARDWARE, null)
             shell.alpha = 0f
             shell.translationY = dp(14).toFloat()
+            animateCompositeLayer(shell, 320L)
             shell.animate()
                 .alpha(1f)
                 .translationY(0f)
@@ -4139,6 +4247,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     target.animate().cancel()
+                    animateCompositeLayer(target, 220L)
                     target.animate()
                         .scaleX(1f)
                         .scaleY(1f)
@@ -4198,6 +4307,26 @@ class MainActivity : AppCompatActivity() {
 
     private fun toast(message: String) {
         Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
+    }
+
+    private class PerformanceWorkSession(
+        private val session: PerformanceHintManager.Session,
+        private val startNs: Long
+    ) {
+        @SuppressLint("NewApi")
+        fun finish() {
+            val elapsedNs = (SystemClock.uptimeNanos() - startNs).coerceAtLeast(1L)
+            runCatching {
+                val duration = WorkDuration().apply {
+                    setWorkPeriodStartTimestampNanos(startNs)
+                    setActualTotalDurationNanos(elapsedNs)
+                    setActualCpuDurationNanos(elapsedNs)
+                    setActualGpuDurationNanos(0L)
+                }
+                session.reportActualWorkDuration(duration)
+            }
+            runCatching { session.close() }
+        }
     }
 
     private class LruCacheMap<K, V>(private val maxEntries: Int) : LinkedHashMap<K, V>(maxEntries, 0.75f, true) {
@@ -4310,10 +4439,15 @@ class MainActivity : AppCompatActivity() {
         private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
         private var prefixText: CharSequence = ""
         private var tailText: CharSequence = ""
-        private var cachedPrefixLayout: StaticLayout? = null
-        private var cachedTailLayout: StaticLayout? = null
+        private var cachedPrefixLayout: StreamMeasuredLayout? = null
+        private var cachedTailLayout: StreamMeasuredLayout? = null
         private var cachedPrefixWidth = -1
         private var cachedTailWidth = -1
+        private val paragraphCache = ParagraphRenderCache(160)
+        private val lineBreaker = LineBreaker.Builder()
+            .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
+            .setHyphenationFrequency(LineBreaker.HYPHENATION_FREQUENCY_NONE)
+            .build()
         private val density = resources.displayMetrics.density
         private val cursorGap = 2f * density
         private val cursorWidth = (2f * density).coerceAtLeast(1f)
@@ -4363,7 +4497,7 @@ class MainActivity : AppCompatActivity() {
         fun setTextColorValue(@ColorInt color: Int) {
             if (textPaint.color == color) return
             textPaint.color = color
-            invalidate()
+            invalidateLayouts(clearParagraphCache = true)
         }
 
         fun setTextSizePxValue(sizePx: Float) {
@@ -4390,7 +4524,7 @@ class MainActivity : AppCompatActivity() {
 
         fun setStreamSegments(prefix: CharSequence, tail: CharSequence): Boolean {
             if (TextUtils.equals(prefixText, prefix) && TextUtils.equals(tailText, tail)) return false
-            val oldHeight = cachedPrefixLayout?.height.orZero() + cachedTailLayout?.height.orZero()
+            val oldHeight = (cachedPrefixLayout?.height ?: 0) + (cachedTailLayout?.height ?: 0)
             val prefixChanged = !TextUtils.equals(prefixText, prefix)
             val tailChanged = !TextUtils.equals(tailText, tail)
             prefixText = SpannableStringBuilder(prefix)
@@ -4454,16 +4588,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        private fun drawCursor(canvas: Canvas, layout: StaticLayout?, contentWidth: Int) {
+        private fun drawCursor(canvas: Canvas, layout: StreamMeasuredLayout?, contentWidth: Int) {
             if (!showCursor) return
             if (layout == null) return
             if ((android.os.SystemClock.uptimeMillis() / cursorBlinkMs) % 2L != 0L) return
-            val line = (layout.lineCount - 1).coerceAtLeast(0)
-            val x = (layout.getLineRight(line) + cursorGap)
+            val x = (layout.lastLineRight + cursorGap)
                 .coerceAtMost(contentWidth - cursorWidth)
                 .coerceAtLeast(0f)
-            val top = layout.getLineTop(line).toFloat() + cursorInset
-            val bottom = layout.getLineBottom(line).toFloat() - cursorInset
+            val top = layout.lastLineTop + cursorInset
+            val bottom = layout.lastLineBottom - cursorInset
             if (bottom <= top) return
             canvas.drawRoundRect(
                 x,
@@ -4476,7 +4609,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        private fun prefixLayoutForWidth(width: Int): StaticLayout? {
+        private fun prefixLayoutForWidth(width: Int): StreamMeasuredLayout? {
             if (prefixText.isEmpty()) return null
             cachedPrefixLayout?.let {
                 if (cachedPrefixWidth == width) return it
@@ -4487,7 +4620,7 @@ class MainActivity : AppCompatActivity() {
             return layout
         }
 
-        private fun tailLayoutForWidth(width: Int): StaticLayout? {
+        private fun tailLayoutForWidth(width: Int): StreamMeasuredLayout? {
             if (tailText.isEmpty()) return null
             cachedTailLayout?.let {
                 if (cachedTailWidth == width) return it
@@ -4498,28 +4631,318 @@ class MainActivity : AppCompatActivity() {
             return layout
         }
 
-        private fun buildLayout(text: CharSequence, width: Int): StaticLayout {
-            return StaticLayout.Builder.obtain(text, 0, text.length, textPaint, width)
-                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                .setLineSpacing(lineSpacingExtra, lineSpacingMultiplier)
-                .setIncludePad(includeFontPadding)
-                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
-                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
-                .build()
+        private fun buildLayout(text: CharSequence, width: Int): StreamMeasuredLayout {
+            return StreamMeasuredLayout(
+                source = SpannableStringBuilder(text),
+                width = width,
+                basePaint = textPaint,
+                includeFontPadding = includeFontPadding,
+                lineSpacingExtra = lineSpacingExtra,
+                lineSpacingMultiplier = lineSpacingMultiplier,
+                lineBreaker = lineBreaker,
+                paragraphCache = paragraphCache
+            )
         }
 
-        private fun layoutHeight(layout: StaticLayout?): Int = layout?.height ?: 0
+        private fun layoutHeight(layout: StreamMeasuredLayout?): Int = layout?.height ?: 0
 
-        private fun invalidateLayouts() {
+        private fun invalidateLayouts(clearParagraphCache: Boolean = false) {
             cachedPrefixLayout = null
             cachedTailLayout = null
             cachedPrefixWidth = -1
             cachedTailWidth = -1
+            if (clearParagraphCache) paragraphCache.clearAndDiscard()
             requestLayout()
             invalidate()
         }
 
-        private fun Int?.orZero(): Int = this ?: 0
+        override fun onDetachedFromWindow() {
+            paragraphCache.clearAndDiscard()
+            super.onDetachedFromWindow()
+        }
+
+        private class StreamMeasuredLayout(
+            private val source: CharSequence,
+            private val width: Int,
+            basePaint: TextPaint,
+            includeFontPadding: Boolean,
+            lineSpacingExtra: Float,
+            lineSpacingMultiplier: Float,
+            private val lineBreaker: LineBreaker,
+            private val paragraphCache: ParagraphRenderCache
+        ) {
+            private val paint = TextPaint(basePaint)
+            private val fontMetrics = paint.fontMetricsInt
+            private val fontTop = if (includeFontPadding) fontMetrics.top else fontMetrics.ascent
+            private val fontBottom = if (includeFontPadding) fontMetrics.bottom else fontMetrics.descent
+            private val lineHeight = (((fontBottom - fontTop).coerceAtLeast(1) + lineSpacingExtra) *
+                lineSpacingMultiplier).toInt().coerceAtLeast(1)
+            private val paragraphs: List<ParagraphRender>
+            val height: Int
+            val lastLineRight: Float
+            val lastLineTop: Float
+            val lastLineBottom: Float
+
+            init {
+                val built = ArrayList<ParagraphRender>()
+                var y = 0
+                if (source.isNotEmpty()) {
+                    var start = 0
+                    while (start <= source.length) {
+                        val newline = indexOfNewline(source, start)
+                        val end = if (newline >= 0) newline else source.length
+                        val paragraph = source.subSequence(start, end)
+                        val render = buildParagraph(paragraph, y)
+                        built.add(render)
+                        y += render.height
+                        if (newline < 0) break
+                        start = newline + 1
+                        if (start == source.length) {
+                            val blank = buildParagraph("", y)
+                            built.add(blank)
+                            y += blank.height
+                            break
+                        }
+                    }
+                }
+                paragraphs = built
+                height = y
+                val last = paragraphs.lastOrNull()
+                lastLineRight = last?.snapshot?.lastLineRight ?: 0f
+                lastLineTop = (last?.top ?: 0) + (last?.snapshot?.lastLineTop ?: 0f)
+                lastLineBottom = (last?.top ?: 0) + (last?.snapshot?.lastLineBottom ?: 0f)
+            }
+
+            fun draw(canvas: Canvas) {
+                paragraphs.forEach { it.draw(canvas, paint) }
+            }
+
+            private fun buildParagraph(paragraph: CharSequence, top: Int): ParagraphRender {
+                val key = ParagraphRenderKey(
+                    text = paragraph.toString(),
+                    spans = spanSignature(paragraph),
+                    width = width,
+                    textSizeBits = paint.textSize.toRawBits(),
+                    color = paint.color,
+                    typefaceStyle = paint.typeface?.style ?: Typeface.NORMAL,
+                    lineHeight = lineHeight,
+                    fontTop = fontTop,
+                    includeFontPadding = fontTop != fontMetrics.ascent || fontBottom != fontMetrics.descent
+                )
+                val snapshot = paragraphCache.getOrBuild(key) {
+                    val lines = breakParagraphIntoLines(paragraph)
+                    val paragraphHeight = (lines.lastOrNull()?.bottom ?: lineHeight).coerceAtLeast(lineHeight)
+                    val node = recordParagraphNode(paragraph, lines, width, paragraphHeight, paint)
+                    ParagraphRenderSnapshot(
+                        text = SpannableStringBuilder(paragraph),
+                        lines = lines,
+                        height = paragraphHeight,
+                        lastLineRight = lines.lastOrNull()?.right ?: 0f,
+                        lastLineTop = lines.lastOrNull()?.top?.toFloat() ?: 0f,
+                        lastLineBottom = lines.lastOrNull()?.bottom?.toFloat() ?: lineHeight.toFloat(),
+                        node = node
+                    )
+                }
+                return ParagraphRender(top, snapshot)
+            }
+
+            private fun breakParagraphIntoLines(paragraph: CharSequence): List<TextLine> {
+                if (paragraph.isEmpty()) {
+                    return listOf(TextLine(0, 0, -fontTop.toFloat(), 0, lineHeight, 0f))
+                }
+                val text = paragraph.toString()
+                val chars = text.toCharArray()
+                val measured = MeasuredText.Builder(chars)
+                    .appendStyleRun(paint, chars.size, false)
+                    .build()
+                val constraints = LineBreaker.ParagraphConstraints().apply {
+                    setWidth(width.toFloat().coerceAtLeast(1f))
+                }
+                val result = lineBreaker.computeLineBreaks(measured, constraints, 0)
+                val lines = ArrayList<TextLine>(result.lineCount.coerceAtLeast(1))
+                var lineStart = 0
+                var y = 0
+                for (lineIndex in 0 until result.lineCount) {
+                    var lineEnd = result.getLineBreakOffset(lineIndex).coerceIn(lineStart, text.length)
+                    if (lineEnd <= lineStart && lineStart < text.length) {
+                        lineEnd = lineStart + 1
+                    }
+                    lines.add(
+                        TextLine(
+                            start = lineStart,
+                            end = lineEnd,
+                            baseline = y - fontTop.toFloat(),
+                            top = y,
+                            bottom = y + lineHeight,
+                            right = result.getLineWidth(lineIndex).coerceAtLeast(0f)
+                        )
+                    )
+                    y += lineHeight
+                    lineStart = lineEnd
+                }
+                if (lines.isEmpty()) {
+                    lines.add(TextLine(0, text.length, -fontTop.toFloat(), 0, lineHeight, paint.measureText(text)))
+                }
+                return lines
+            }
+
+            private fun recordParagraphNode(
+                paragraph: CharSequence,
+                lines: List<TextLine>,
+                width: Int,
+                height: Int,
+                paint: TextPaint
+            ): RenderNode? {
+                return runCatching {
+                    RenderNode("stream-paragraph").apply {
+                        setPosition(0, 0, width, height)
+                        val recordingCanvas: RecordingCanvas = beginRecording(width, height)
+                        try {
+                            drawParagraphLines(recordingCanvas, paragraph, lines, paint)
+                        } finally {
+                            endRecording()
+                        }
+                    }
+                }.getOrNull()
+            }
+
+            private fun drawParagraphLines(
+                canvas: Canvas,
+                paragraph: CharSequence,
+                lines: List<TextLine>,
+                paint: TextPaint
+            ) {
+                lines.forEach { line ->
+                    if (line.end > line.start) {
+                        drawStyledText(canvas, paragraph, line.start, line.end, line.baseline, paint)
+                    }
+                }
+            }
+
+            private fun drawStyledText(
+                canvas: Canvas,
+                text: CharSequence,
+                start: Int,
+                end: Int,
+                baseline: Float,
+                paint: TextPaint
+            ) {
+                val oldColor = paint.color
+                var x = 0f
+                if (text is Spanned) {
+                    var cursor = start
+                    while (cursor < end) {
+                        val next = text.nextSpanTransition(cursor, end, ForegroundColorSpan::class.java)
+                        val spanColor = text.getSpans(cursor, next, ForegroundColorSpan::class.java)
+                            .lastOrNull()
+                            ?.foregroundColor
+                        paint.color = spanColor ?: oldColor
+                        canvas.drawText(text, cursor, next, x, baseline, paint)
+                        x += paint.measureText(text, cursor, next)
+                        cursor = next
+                    }
+                } else {
+                    canvas.drawText(text, start, end, 0f, baseline, paint)
+                }
+                paint.color = oldColor
+            }
+
+            private fun ParagraphRender.draw(canvas: Canvas, paint: TextPaint) {
+                canvas.save()
+                canvas.translate(0f, top.toFloat())
+                val node = snapshot.node
+                if (canvas.isHardwareAccelerated && node != null && node.hasDisplayList()) {
+                    canvas.drawRenderNode(node)
+                } else {
+                    drawParagraphLines(canvas, snapshot.text, snapshot.lines, paint)
+                }
+                canvas.restore()
+            }
+
+            private fun indexOfNewline(text: CharSequence, start: Int): Int {
+                var index = start
+                while (index < text.length) {
+                    if (text[index] == '\n') return index
+                    index += 1
+                }
+                return -1
+            }
+
+            private fun spanSignature(text: CharSequence): String {
+                if (text !is Spanned) return ""
+                val spans = text.getSpans(0, text.length, ForegroundColorSpan::class.java)
+                if (spans.isEmpty()) return ""
+                val out = StringBuilder(spans.size * 12)
+                spans.forEach { span ->
+                    out.append(text.getSpanStart(span))
+                        .append(':')
+                        .append(text.getSpanEnd(span))
+                        .append(':')
+                        .append(span.foregroundColor)
+                        .append(';')
+                }
+                return out.toString()
+            }
+        }
+
+        private data class ParagraphRender(
+            val top: Int,
+            val snapshot: ParagraphRenderSnapshot
+        ) {
+            val height: Int get() = snapshot.height
+        }
+
+        private data class ParagraphRenderSnapshot(
+            val text: CharSequence,
+            val lines: List<TextLine>,
+            val height: Int,
+            val lastLineRight: Float,
+            val lastLineTop: Float,
+            val lastLineBottom: Float,
+            val node: RenderNode?
+        )
+
+        private data class TextLine(
+            val start: Int,
+            val end: Int,
+            val baseline: Float,
+            val top: Int,
+            val bottom: Int,
+            val right: Float
+        )
+
+        private data class ParagraphRenderKey(
+            val text: String,
+            val spans: String,
+            val width: Int,
+            val textSizeBits: Int,
+            val color: Int,
+            val typefaceStyle: Int,
+            val lineHeight: Int,
+            val fontTop: Int,
+            val includeFontPadding: Boolean
+        )
+
+        private class ParagraphRenderCache(private val maxEntries: Int) :
+            LinkedHashMap<ParagraphRenderKey, ParagraphRenderSnapshot>(maxEntries, 0.75f, true) {
+            fun getOrBuild(key: ParagraphRenderKey, builder: () -> ParagraphRenderSnapshot): ParagraphRenderSnapshot {
+                get(key)?.let { return it }
+                val value = builder()
+                put(key, value)
+                return value
+            }
+
+            fun clearAndDiscard() {
+                values.forEach { it.node?.discardDisplayList() }
+                clear()
+            }
+
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ParagraphRenderKey, ParagraphRenderSnapshot>?): Boolean {
+                val shouldRemove = size > maxEntries
+                if (shouldRemove) eldest?.value?.node?.discardDisplayList()
+                return shouldRemove
+            }
+        }
     }
 
     private data class StreamRenderTarget(
