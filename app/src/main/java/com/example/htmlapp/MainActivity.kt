@@ -4753,9 +4753,9 @@ class MainActivity : AppCompatActivity() {
             private val source: CharSequence,
             private val width: Int,
             basePaint: TextPaint,
-            includeFontPadding: Boolean,
-            lineSpacingExtra: Float,
-            lineSpacingMultiplier: Float,
+            private val includeFontPadding: Boolean,
+            private val lineSpacingExtra: Float,
+            private val lineSpacingMultiplier: Float,
             private val lineBreakConfig: LineBreakConfig,
             private val paragraphCache: ParagraphRenderCache
         ) {
