@@ -1082,6 +1082,9 @@ class NativeAiClient {
     ) {
         private var lastContentLength = 0
         private var lastThinkingLength = 0
+        private var lastEmitAtNs = 0L
+        private val minEmitIntervalNs = TimeUnit.MILLISECONDS.toNanos(24)
+        private val maxBufferedChars = 160
 
         fun maybeEmit(
             content: StringBuilder,
@@ -1090,6 +1093,12 @@ class NativeAiClient {
             val contentDelta = content.length - lastContentLength
             val thinkingDelta = thinking.length - lastThinkingLength
             if (contentDelta <= 0 && thinkingDelta <= 0) return
+            val now = System.nanoTime()
+            val enoughTime = lastEmitAtNs == 0L || now - lastEmitAtNs >= minEmitIntervalNs
+            val enoughText = contentDelta + thinkingDelta >= maxBufferedChars
+            val boundary = hasReadableBoundary(content, lastContentLength) ||
+                hasReadableBoundary(thinking, lastThinkingLength)
+            if (!enoughTime && !enoughText && !boundary) return
             emit(content, thinking)
         }
 
@@ -1100,7 +1109,19 @@ class NativeAiClient {
             if (content.length == lastContentLength && thinking.length == lastThinkingLength) return
             lastContentLength = content.length
             lastThinkingLength = thinking.length
+            lastEmitAtNs = System.nanoTime()
             onDelta(content.toString(), thinking.toString())
+        }
+
+        private fun hasReadableBoundary(builder: StringBuilder, start: Int): Boolean {
+            val from = start.coerceIn(0, builder.length)
+            for (index in from until builder.length) {
+                val ch = builder[index]
+                if (ch == '\n' || ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?') {
+                    return true
+                }
+            }
+            return false
         }
     }
 

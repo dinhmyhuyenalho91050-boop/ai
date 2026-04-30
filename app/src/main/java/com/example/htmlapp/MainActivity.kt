@@ -135,6 +135,8 @@ class MainActivity : AppCompatActivity() {
     private val editTransitionMessageIds = mutableSetOf<String>()
     private val editExitLockedHeights = mutableMapOf<String, Int>()
     private val nonStreamingAssistantIds = mutableSetOf<String>()
+    private val messageHeightCache = LruCacheMap<MessageHeightKey, Int>(260)
+    private val formattedTextCache = LruCacheMap<TextFormatCacheKey, CharSequence>(180)
 
     private val defaultRenderMessageLimit = 80
     private val loadOlderMessageBatch = 40
@@ -321,6 +323,8 @@ class MainActivity : AppCompatActivity() {
         messagesScroll.adapter = messagesAdapter
         messagesScroll.itemAnimator = null
         messagesScroll.setHasFixedSize(false)
+        messagesScroll.setItemViewCacheSize(14)
+        messagesScroll.recycledViewPool.setMaxRecycledViews(2, 18)
         inputMessage = findViewById(R.id.input_message)
         sendButton = findViewById(R.id.btn_send)
         composer = findViewById(R.id.composer)
@@ -1032,12 +1036,42 @@ class MainActivity : AppCompatActivity() {
         messageRenderedThinking.remove(messageId)
     }
 
+    private fun stableMessageItemId(id: String): Long {
+        var hash = -3750763034362895579L
+        id.forEach { ch ->
+            hash = hash xor ch.code.toLong()
+            hash *= 1099511628211L
+        }
+        return hash
+    }
+
+    private fun messageHeightKey(message: ChatMessage, width: Int): MessageHeightKey? {
+        if (width <= 0 || message.id == editingMessageId || isLiveAssistant(message)) return null
+        val thinkingExpanded = message.id in messageThinkingExpanded
+        return MessageHeightKey(
+            id = message.id,
+            width = width,
+            roleHash = message.role.hashCode(),
+            modelHash = message.modelName.hashCode(),
+            contentLength = message.content.length,
+            contentHash = message.content.hashCode(),
+            thinkingLength = message.thinking.length,
+            thinkingHash = message.thinking.hashCode(),
+            thinkingExpanded = thinkingExpanded,
+            uiMode = resources.configuration.uiMode
+        )
+    }
+
     private inner class MessageAdapter : RecyclerView.Adapter<MessageAdapter.MessageHolder>() {
         private val viewTypeLoadMore = 1
         private val viewTypeMessage = 2
         private val visibleMessages = mutableListOf<ChatMessage>()
         private var hiddenCount = 0
         private var visibleStartIndex = 0
+
+        init {
+            setHasStableIds(true)
+        }
 
         fun submit(messages: List<ChatMessage>, startIndex: Int, hidden: Int) {
             visibleMessages.clear()
@@ -1062,6 +1096,13 @@ class MainActivity : AppCompatActivity() {
 
         override fun getItemViewType(position: Int): Int {
             return if (hiddenCount > 0 && position == 0) viewTypeLoadMore else viewTypeMessage
+        }
+
+        override fun getItemId(position: Int): Long {
+            if (getItemViewType(position) == viewTypeLoadMore) return Long.MIN_VALUE + hiddenCount
+            val messageIndex = position - if (hiddenCount > 0) 1 else 0
+            val message = visibleMessages.getOrNull(messageIndex) ?: return RecyclerView.NO_ID
+            return stableMessageItemId(message.id)
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): MessageHolder {
@@ -1090,12 +1131,21 @@ class MainActivity : AppCompatActivity() {
             val message = visibleMessages.getOrNull(messageIndex) ?: return
             holder.boundMessageId = message.id
             val lockedHeight = editExitLockedHeights.remove(message.id)?.takeIf { it > 0 }
-            holder.container.addView(messageCard(message, visibleStartIndex + messageIndex + 1, lockedHeight).apply {
+            val heightKey = messageHeightKey(message, messagesScroll.width)
+            val cachedHeight = lockedHeight ?: heightKey?.let { messageHeightCache[it] }
+            holder.container.minimumHeight = cachedHeight ?: 0
+            holder.container.addView(messageCard(message, visibleStartIndex + messageIndex + 1, cachedHeight).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    lockedHeight ?: ViewGroup.LayoutParams.WRAP_CONTENT
+                    cachedHeight ?: ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { bottomMargin = dp(16) }
             })
+            if (heightKey != null) {
+                holder.container.doOnLayout {
+                    val measured = holder.container.getChildAt(0)?.height ?: 0
+                    if (measured > 0) messageHeightCache[heightKey] = measured
+                }
+            }
             if (streamTargets.containsKey(message.id)) scheduleVisibleStreamRefresh()
         }
 
@@ -1503,14 +1553,17 @@ class MainActivity : AppCompatActivity() {
         ) {
             segment.reset()
         }
+        if (views.prefix.visibility != View.GONE) {
+            views.prefix.text = ""
+            views.prefix.visibility = View.GONE
+            views.invalidatePrefixMeasure()
+        }
         var heightMayHaveChanged = false
         val nextFreezeEnd = findStreamFreezeBoundary(rawContent, segment.frozenRawLength, views, segment)
         if (nextFreezeEnd > segment.frozenRawLength) {
             val prefixRaw = rawContent.substring(0, nextFreezeEnd)
             if (prefixRaw != segment.prefixRaw) {
-                views.prefix.text = renderStreamPrefix(segment, prefixRaw)
-                views.prefix.visibility = if (prefixRaw.isEmpty()) View.GONE else View.VISIBLE
-                views.invalidatePrefixMeasure()
+                segment.prefixRendered = renderStreamPrefix(segment, prefixRaw)
                 segment.prefixRaw = prefixRaw
                 heightMayHaveChanged = true
             }
@@ -1518,36 +1571,30 @@ class MainActivity : AppCompatActivity() {
             segment.tailFormatter = newStreamFormatter()
             segment.tailRaw = ""
             segment.clearFreezeScanCache()
-        } else if (segment.prefixRaw.isNotEmpty() &&
-            (views.prefix.visibility != View.VISIBLE || views.prefix.text.isEmpty())
-        ) {
-            views.prefix.text = renderStreamPrefix(segment, segment.prefixRaw)
-            views.prefix.visibility = View.VISIBLE
-            views.invalidatePrefixMeasure()
-            heightMayHaveChanged = true
-        } else if (segment.prefixRaw.isEmpty() && views.prefix.visibility != View.GONE) {
-            views.prefix.text = ""
-            views.prefix.visibility = View.GONE
-            views.invalidatePrefixMeasure()
-            heightMayHaveChanged = true
         }
 
         val tailRaw = rawContent.substring(segment.frozenRawLength.coerceIn(0, rawContent.length))
+        var shouldUpdateText = false
+        var renderedTail: CharSequence = segment.tailRendered
         if (tailRaw != segment.tailRaw ||
             tailRaw.isEmpty() && !views.tail.isTextEmpty() ||
             tailRaw.isNotEmpty() && views.tail.isTextEmpty()
         ) {
             val formatter = segment.tailFormatter ?: newStreamFormatter().also { segment.tailFormatter = it }
-            val renderedTail = formatter.render(tailRaw).text
+            renderedTail = formatter.render(tailRaw).text
+            segment.tailRendered = renderedTail
+            segment.tailRaw = tailRaw
+            shouldUpdateText = true
+        }
+        if (heightMayHaveChanged || shouldUpdateText) {
             val oldVisibility = views.tail.visibility
-            views.tail.showCursor = tailRaw.isNotEmpty()
-            val tailHeightChanged = views.tail.setStreamText(renderedTail)
-            val nextVisibility = if (tailRaw.isEmpty()) View.GONE else View.VISIBLE
+            views.tail.showCursor = rawContent.isNotEmpty()
+            val tailHeightChanged = views.tail.setStreamSegments(segment.prefixRendered, renderedTail)
+            val nextVisibility = if (rawContent.isEmpty()) View.GONE else View.VISIBLE
             views.tail.visibility = nextVisibility
             heightMayHaveChanged = heightMayHaveChanged ||
                 tailHeightChanged ||
                 oldVisibility != nextVisibility
-            segment.tailRaw = tailRaw
         }
         return StreamSegmentUpdate(heightMayHaveChanged)
     }
@@ -1981,6 +2028,10 @@ class MainActivity : AppCompatActivity() {
             target.releaseScanLength = -1
             target.releaseScanBoundary = -1
         }
+        target.contentBuffer.replaceWith(content)
+        target.thinkingBuffer.replaceWith(thinking)
+        target.contentBuffer.compactIfNeeded()
+        target.thinkingBuffer.compactIfNeeded()
         target.targetContent = content
         target.targetThinking = thinking
         target.lastTargetUpdateAt = android.os.SystemClock.uptimeMillis()
@@ -2165,8 +2216,8 @@ class MainActivity : AppCompatActivity() {
         nextThinkingLength: Int,
         streaming: Boolean
     ) {
-        val nextContent = target.targetContent.prefixAt(nextContentLength)
-        val nextThinking = target.targetThinking.prefixAt(nextThinkingLength)
+        val nextContent = target.contentBuffer.prefixAt(nextContentLength, target.targetContent)
+        val nextThinking = target.thinkingBuffer.prefixAt(nextThinkingLength, target.targetThinking)
         val thinkingChanged = nextThinkingLength != target.visibleThinkingLength
         target.visibleContentLength = nextContentLength
         target.visibleThinkingLength = nextThinkingLength
@@ -2321,6 +2372,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun formatMessageText(text: String): CharSequence {
         if (text.isEmpty()) return text
+        val key = TextFormatCacheKey(
+            text = text,
+            quoteColor = color(R.color.chat_accent3),
+            starColor = color(R.color.chat_accent)
+        )
+        formattedTextCache[key]?.let { return it }
         val out = SpannableStringBuilder()
         var index = 0
         while (index < text.length) {
@@ -2356,7 +2413,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        return out
+        return out.also { formattedTextCache[key] = it }
     }
 
     private fun applyPromptRegex(content: String): String {
@@ -4047,6 +4104,31 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
     }
 
+    private class LruCacheMap<K, V>(private val maxEntries: Int) : LinkedHashMap<K, V>(maxEntries, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean {
+            return size > maxEntries
+        }
+    }
+
+    private data class MessageHeightKey(
+        val id: String,
+        val width: Int,
+        val roleHash: Int,
+        val modelHash: Int,
+        val contentLength: Int,
+        val contentHash: Int,
+        val thinkingLength: Int,
+        val thinkingHash: Int,
+        val thinkingExpanded: Boolean,
+        val uiMode: Int
+    )
+
+    private data class TextFormatCacheKey(
+        val text: String,
+        val quoteColor: Int,
+        val starColor: Int
+    )
+
     private data class FieldRef(val container: View, val input: EditText) {
         fun value(): String = input.text.toString()
     }
@@ -4099,6 +4181,8 @@ class MainActivity : AppCompatActivity() {
         var frozenRawLength: Int = 0,
         var prefixRaw: String = "",
         var tailRaw: String = "",
+        var prefixRendered: CharSequence = "",
+        var tailRendered: CharSequence = "",
         var prefixFormatter: StreamFormatState? = null,
         var tailFormatter: StreamFormatState? = null,
         var freezeScanWidth: Int = -1,
@@ -4110,6 +4194,8 @@ class MainActivity : AppCompatActivity() {
             frozenRawLength = 0
             prefixRaw = ""
             tailRaw = ""
+            prefixRendered = ""
+            tailRendered = ""
             prefixFormatter = null
             tailFormatter = null
             clearFreezeScanCache()
@@ -4126,9 +4212,12 @@ class MainActivity : AppCompatActivity() {
     private class StreamTailView(context: Context) : View(context) {
         private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
         private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private var streamText: CharSequence = ""
-        private var cachedLayout: StaticLayout? = null
-        private var cachedLayoutWidth = -1
+        private var prefixText: CharSequence = ""
+        private var tailText: CharSequence = ""
+        private var cachedPrefixLayout: StaticLayout? = null
+        private var cachedTailLayout: StaticLayout? = null
+        private var cachedPrefixWidth = -1
+        private var cachedTailWidth = -1
         private val density = resources.displayMetrics.density
         private val cursorGap = 2f * density
         private val cursorWidth = (2f * density).coerceAtLeast(1f)
@@ -4151,28 +4240,28 @@ class MainActivity : AppCompatActivity() {
             get() = textPaint.typeface
             set(value) {
                 textPaint.typeface = value
-                invalidateLayout()
+                invalidateLayouts()
             }
 
         var includeFontPadding: Boolean = true
             set(value) {
                 if (field == value) return
                 field = value
-                invalidateLayout()
+                invalidateLayouts()
             }
 
         var lineSpacingExtra: Float = 0f
             set(value) {
                 if (field == value) return
                 field = value
-                invalidateLayout()
+                invalidateLayouts()
             }
 
         var lineSpacingMultiplier: Float = 1f
             set(value) {
                 if (field == value) return
                 field = value
-                invalidateLayout()
+                invalidateLayouts()
             }
 
         fun setTextColorValue(@ColorInt color: Int) {
@@ -4184,33 +4273,48 @@ class MainActivity : AppCompatActivity() {
         fun setTextSizePxValue(sizePx: Float) {
             if (textPaint.textSize == sizePx) return
             textPaint.textSize = sizePx
-            invalidateLayout()
+            invalidateLayouts()
         }
 
         fun clearText(): Boolean {
             return setStreamText("")
         }
 
-        fun isTextEmpty(): Boolean = streamText.isEmpty()
+        fun isTextEmpty(): Boolean = prefixText.isEmpty() && tailText.isEmpty()
 
         fun desiredHeightForWidth(contentWidth: Int): Int {
-            if (streamText.isEmpty()) return 0
-            return paddingTop + layoutForWidth(contentWidth.coerceAtLeast(1)).height + paddingBottom
+            if (isTextEmpty()) return 0
+            val width = contentWidth.coerceAtLeast(1)
+            return paddingTop + layoutHeight(prefixLayoutForWidth(width)) + layoutHeight(tailLayoutForWidth(width)) + paddingBottom
         }
 
         fun setStreamText(value: CharSequence): Boolean {
-            if (TextUtils.equals(streamText, value)) return false
-            val oldHeight = cachedLayout?.height ?: 0
-            streamText = SpannableStringBuilder(value)
+            return setStreamSegments("", value)
+        }
+
+        fun setStreamSegments(prefix: CharSequence, tail: CharSequence): Boolean {
+            if (TextUtils.equals(prefixText, prefix) && TextUtils.equals(tailText, tail)) return false
+            val oldHeight = cachedPrefixLayout?.height.orZero() + cachedTailLayout?.height.orZero()
+            val prefixChanged = !TextUtils.equals(prefixText, prefix)
+            val tailChanged = !TextUtils.equals(tailText, tail)
+            prefixText = SpannableStringBuilder(prefix)
+            tailText = SpannableStringBuilder(tail)
+            if (prefixChanged) {
+                cachedPrefixLayout = null
+                cachedPrefixWidth = -1
+            }
+            if (tailChanged) {
+                cachedTailLayout = null
+                cachedTailWidth = -1
+            }
             val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(0)
             if (contentWidth <= 0 || !isShown || !ViewCompat.isAttachedToWindow(this)) {
-                invalidateLayout()
+                if (prefixChanged || tailChanged) requestLayout()
+                invalidate()
                 return true
             }
-            val nextLayout = buildLayout(contentWidth)
-            cachedLayout = nextLayout
-            cachedLayoutWidth = contentWidth
-            val heightChanged = nextLayout.height != oldHeight
+            val nextHeight = layoutHeight(prefixLayoutForWidth(contentWidth)) + layoutHeight(tailLayoutForWidth(contentWidth))
+            val heightChanged = nextHeight != oldHeight
             if (heightChanged) {
                 requestLayout()
             }
@@ -4221,31 +4325,42 @@ class MainActivity : AppCompatActivity() {
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
             val width = View.MeasureSpec.getSize(widthMeasureSpec)
             val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
-            val layout = layoutForWidth(contentWidth)
-            val desiredHeight = paddingTop + layout.height + paddingBottom
+            val desiredHeight = paddingTop +
+                layoutHeight(prefixLayoutForWidth(contentWidth)) +
+                layoutHeight(tailLayoutForWidth(contentWidth)) +
+                paddingBottom
             setMeasuredDimension(
                 resolveSize(width, widthMeasureSpec),
-                resolveSize(if (streamText.isEmpty()) 0 else desiredHeight, heightMeasureSpec)
+                resolveSize(if (isTextEmpty()) 0 else desiredHeight, heightMeasureSpec)
             )
         }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            if (streamText.isEmpty()) return
+            if (isTextEmpty()) return
             val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
-            val layout = layoutForWidth(contentWidth)
+            val prefixLayout = prefixLayoutForWidth(contentWidth)
+            val tailLayout = tailLayoutForWidth(contentWidth)
             canvas.save()
             canvas.translate(paddingLeft.toFloat(), paddingTop.toFloat())
-            layout.draw(canvas)
-            drawCursor(canvas, layout, contentWidth)
+            prefixLayout?.draw(canvas)
+            val prefixHeight = layoutHeight(prefixLayout)
+            if (tailLayout != null) {
+                if (prefixHeight > 0) canvas.translate(0f, prefixHeight.toFloat())
+                tailLayout.draw(canvas)
+                drawCursor(canvas, tailLayout, contentWidth)
+            } else {
+                drawCursor(canvas, prefixLayout, contentWidth)
+            }
             canvas.restore()
             if (showCursor && isShown && ViewCompat.isAttachedToWindow(this)) {
                 postInvalidateDelayed(cursorBlinkMs)
             }
         }
 
-        private fun drawCursor(canvas: Canvas, layout: StaticLayout, contentWidth: Int) {
+        private fun drawCursor(canvas: Canvas, layout: StaticLayout?, contentWidth: Int) {
             if (!showCursor) return
+            if (layout == null) return
             if ((android.os.SystemClock.uptimeMillis() / cursorBlinkMs) % 2L != 0L) return
             val line = (layout.lineCount - 1).coerceAtLeast(0)
             val x = (layout.getLineRight(line) + cursorGap)
@@ -4265,18 +4380,30 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        private fun layoutForWidth(width: Int): StaticLayout {
-            cachedLayout?.let {
-                if (cachedLayoutWidth == width) return it
+        private fun prefixLayoutForWidth(width: Int): StaticLayout? {
+            if (prefixText.isEmpty()) return null
+            cachedPrefixLayout?.let {
+                if (cachedPrefixWidth == width) return it
             }
-            val layout = buildLayout(width)
-            cachedLayout = layout
-            cachedLayoutWidth = width
+            val layout = buildLayout(prefixText, width)
+            cachedPrefixLayout = layout
+            cachedPrefixWidth = width
             return layout
         }
 
-        private fun buildLayout(width: Int): StaticLayout {
-            return StaticLayout.Builder.obtain(streamText, 0, streamText.length, textPaint, width)
+        private fun tailLayoutForWidth(width: Int): StaticLayout? {
+            if (tailText.isEmpty()) return null
+            cachedTailLayout?.let {
+                if (cachedTailWidth == width) return it
+            }
+            val layout = buildLayout(tailText, width)
+            cachedTailLayout = layout
+            cachedTailWidth = width
+            return layout
+        }
+
+        private fun buildLayout(text: CharSequence, width: Int): StaticLayout {
+            return StaticLayout.Builder.obtain(text, 0, text.length, textPaint, width)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
                 .setLineSpacing(lineSpacingExtra, lineSpacingMultiplier)
                 .setIncludePad(includeFontPadding)
@@ -4285,12 +4412,18 @@ class MainActivity : AppCompatActivity() {
                 .build()
         }
 
-        private fun invalidateLayout() {
-            cachedLayout = null
-            cachedLayoutWidth = -1
+        private fun layoutHeight(layout: StaticLayout?): Int = layout?.height ?: 0
+
+        private fun invalidateLayouts() {
+            cachedPrefixLayout = null
+            cachedTailLayout = null
+            cachedPrefixWidth = -1
+            cachedTailWidth = -1
             requestLayout()
             invalidate()
         }
+
+        private fun Int?.orZero(): Int = this ?: 0
     }
 
     private data class StreamRenderTarget(
@@ -4316,8 +4449,55 @@ class MainActivity : AppCompatActivity() {
         var thinkingPrefixValid: Boolean = true,
         var releaseScanStart: Int = -1,
         var releaseScanLength: Int = -1,
-        var releaseScanBoundary: Int = -1
+        var releaseScanBoundary: Int = -1,
+        val contentBuffer: StreamTextBuffer = StreamTextBuffer(),
+        val thinkingBuffer: StreamTextBuffer = StreamTextBuffer()
     )
+
+    private class StreamTextBuffer {
+        private val chunks = ArrayDeque<String>()
+        private var cachedFull: String = ""
+        var length: Int = 0
+            private set
+
+        fun replaceWith(value: String) {
+            if (value.length >= length && value.startsWith(cachedFull)) {
+                val delta = value.substring(length)
+                if (delta.isNotEmpty()) {
+                    chunks.addLast(delta)
+                    cachedFull = value
+                    length = value.length
+                }
+                return
+            }
+            chunks.clear()
+            if (value.isNotEmpty()) chunks.addLast(value)
+            cachedFull = value
+            length = value.length
+        }
+
+        fun prefixAt(prefixLength: Int, fallback: String): String {
+            val end = prefixLength.coerceIn(0, length)
+            if (end == length) return cachedFull.ifEmpty { fallback.prefixAt(end) }
+            if (chunks.isEmpty()) return fallback.prefixAt(end)
+            val out = StringBuilder(end)
+            var remaining = end
+            val iterator = chunks.iterator()
+            while (iterator.hasNext() && remaining > 0) {
+                val chunk = iterator.next()
+                val take = min(remaining, chunk.length)
+                out.append(chunk, 0, take)
+                remaining -= take
+            }
+            return out.toString()
+        }
+
+        fun compactIfNeeded(maxChunks: Int = 64) {
+            if (chunks.size <= maxChunks) return
+            chunks.clear()
+            if (cachedFull.isNotEmpty()) chunks.addLast(cachedFull)
+        }
+    }
 
     private data class RevealBudget(
         val chars: Int,
