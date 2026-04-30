@@ -132,6 +132,8 @@ class MainActivity : AppCompatActivity() {
     private var sendButtonVisualSending = false
     private var sendButtonAnimationToken = 0
     private val recentlyInsertedMessageIds = mutableSetOf<String>()
+    private val editTransitionMessageIds = mutableSetOf<String>()
+    private val nonStreamingAssistantIds = mutableSetOf<String>()
 
     private val defaultRenderMessageLimit = 80
     private val loadOlderMessageBatch = 40
@@ -663,6 +665,11 @@ class MainActivity : AppCompatActivity() {
         val continuationPrefill = continueMessage?.content.orEmpty()
         val promptForRegex = state.promptFor(session).copy()
         assistant.modelName = preset?.name.orEmpty()
+        if (preset?.config?.stream == true) {
+            nonStreamingAssistantIds.remove(assistant.id)
+        } else {
+            nonStreamingAssistantIds.add(assistant.id)
+        }
         followBottom = true
         activeAssistantId = assistant.id
         repository.save(state)
@@ -717,6 +724,7 @@ class MainActivity : AppCompatActivity() {
                 mainHandler.post {
                     stoppedAssistantIds.remove(assistant.id)
                     if (activeAssistantId == assistant.id) activeAssistantId = null
+                    nonStreamingAssistantIds.remove(assistant.id)
                     assistant.content = finalContent
                     assistant.thinking = result.thinking
                     repository.save(state)
@@ -736,6 +744,7 @@ class MainActivity : AppCompatActivity() {
                 mainHandler.post {
                     val stopped = stoppedAssistantIds.remove(assistant.id)
                     if (activeAssistantId == assistant.id) activeAssistantId = null
+                    nonStreamingAssistantIds.remove(assistant.id)
                     if (stopped) {
                         val partialContent = latestDisplayContent.ifBlank { assistant.content }
                         val partialThinking = latestThinking.ifBlank { assistant.thinking }
@@ -1142,6 +1151,8 @@ class MainActivity : AppCompatActivity() {
         card.addView(contentColumn)
         if (recentlyInsertedMessageIds.remove(message.id)) {
             card.post { animateMessageEntrance(card) }
+        } else if (editTransitionMessageIds.remove(message.id)) {
+            card.post { animateEditCardTransition(card) }
         }
         return card
     }
@@ -1340,7 +1351,18 @@ class MainActivity : AppCompatActivity() {
                 return target.visibleContent
             }
         }
-        return if (message.role == "assistant" && message.content.isBlank() && isSending) "正在思考..." else message.content
+        if (message.role == "assistant" &&
+            message.content.isBlank() &&
+            isSending &&
+            state.activeSession()?.history?.lastOrNull()?.id == message.id
+        ) {
+            return if (message.id in nonStreamingAssistantIds) {
+                "非流式请求中，等待完整回复..."
+            } else {
+                "正在思考..."
+            }
+        }
+        return message.content
     }
 
     private fun updateMessageViews(
@@ -1389,6 +1411,9 @@ class MainActivity : AppCompatActivity() {
             views.tail.clearText()
             views.tail.visibility = View.GONE
             messageRenderedContent[message.id] = content
+            if (final && message.role == "assistant") {
+                animateContentSettled(views.host)
+            }
             return StreamBodyUpdate(changed = true, heightChanged = true)
         }
         return StreamBodyUpdate()
@@ -1498,35 +1523,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun findStreamFreezeBoundary(text: String, frozenEnd: Int): Int {
-        if (text.length - frozenEnd <= streamTailMaxChars) return frozenEnd
-        val scanEnd = (text.length - streamTailTargetChars).coerceAtLeast(frozenEnd)
-        var boundary = frozenEnd
-        var fallback = frozenEnd
-        var mode = StreamMode.PLAIN
-        var index = frozenEnd.coerceIn(0, scanEnd)
-        while (index < scanEnd) {
-            val ch = text[index]
-            mode = nextStreamMode(mode, ch)
-            if (index + 1 > frozenEnd &&
-                index + 1 >= streamFrozenPrefixMinChars &&
-                mode == StreamMode.PLAIN
-            ) {
-                if (ch.isWhitespace()) fallback = index + 1
-                if (isStreamFreezeChar(ch)) boundary = index + 1
-            }
-            if (ch == '\n') {
-                var end = index + 1
-                while (end < scanEnd && text[end] == '\n') end += 1
-                if (end > frozenEnd && end >= streamFrozenPrefixMinChars && mode == StreamMode.PLAIN) {
-                    boundary = end
-                }
-                index = end
-            } else {
-                index += 1
-            }
-        }
-        if (boundary > frozenEnd) return boundary
-        if (fallback > frozenEnd && text.length - frozenEnd > streamTailMaxChars * 2) return fallback
         return frozenEnd
     }
 
@@ -2151,6 +2147,7 @@ class MainActivity : AppCompatActivity() {
     private fun isLiveAssistant(message: ChatMessage): Boolean {
         return isSending &&
             message.role == "assistant" &&
+            message.id !in nonStreamingAssistantIds &&
             state.activeSession()?.history?.lastOrNull()?.id == message.id
     }
 
@@ -2312,7 +2309,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun restoreScrollAnchorAfterEdit(anchor: ScrollAnchor) {
         val token = ++editScrollRestoreToken
-        val delays = longArrayOf(0L, 32L, 96L, 180L)
+        val delays = longArrayOf(0L, 32L, 96L, 180L, 320L)
         delays.forEach { delay ->
             mainHandler.postDelayed({
                 if (token != editScrollRestoreToken || userTouchingMessages) return@postDelayed
@@ -2342,6 +2339,35 @@ class MainActivity : AppCompatActivity() {
             messagesLayoutManager.scrollToPositionWithOffset(position, dp(8))
             followBottom = false
             updateStreamDistanceModes()
+        }
+    }
+
+    private fun scrollMessageToTopForEdit(messageId: String) {
+        val token = ++editScrollRestoreToken
+        messagesScroll.post {
+            if (token != editScrollRestoreToken || userTouchingMessages) return@post
+            val position = messagesAdapter.positionOfMessage(messageId)
+            if (position == RecyclerView.NO_POSITION) return@post
+            keepProgrammaticScrollActive()
+            followBottom = false
+            updateStreamDistanceModes()
+            val view = messagesLayoutManager.findViewByPosition(position)
+            if (view != null) {
+                val dy = view.top - messagesScroll.paddingTop - dp(8)
+                if (abs(dy) > dp(2)) {
+                    messagesScroll.smoothScrollBy(0, dy)
+                } else {
+                    messagesLayoutManager.scrollToPositionWithOffset(position, dp(8))
+                }
+            } else {
+                messagesScroll.smoothScrollToPosition(position)
+                messagesScroll.postDelayed({
+                    if (token == editScrollRestoreToken && !userTouchingMessages) {
+                        keepProgrammaticScrollActive()
+                        messagesLayoutManager.scrollToPositionWithOffset(position, dp(8))
+                    }
+                }, 220L)
+            }
         }
     }
 
@@ -2463,6 +2489,34 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
+    private fun animateEditCardTransition(view: View) {
+        view.animate().cancel()
+        view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        view.alpha = 0.9f
+        view.scaleX = 0.998f
+        view.scaleY = 0.998f
+        view.animate()
+            .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(240)
+            .setInterpolator(entranceInterpolator)
+            .withEndAction { view.setLayerType(View.LAYER_TYPE_NONE, null) }
+            .start()
+    }
+
+    private fun animateContentSettled(view: View) {
+        view.animate().cancel()
+        view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        view.alpha = 0.92f
+        view.animate()
+            .alpha(1f)
+            .setDuration(260)
+            .setInterpolator(entranceInterpolator)
+            .withEndAction { view.setLayerType(View.LAYER_TYPE_NONE, null) }
+            .start()
+    }
+
     private fun messageHeader(message: ChatMessage, index: Int): View {
         val roleLabel = if (message.role == "assistant") "ASSISTANT" else "USER"
         val modelLabel = message.modelName.ifBlank { state.currentPreset()?.name.orEmpty() }
@@ -2525,22 +2579,23 @@ class MainActivity : AppCompatActivity() {
             finishEditingMessage()
             return
         }
-        val anchor = captureScrollAnchor()
         messagesScroll.stopScroll()
         val previousEditingId = editingMessageId
         if (previousEditingId != null) {
             commitEditingDraft(previousEditingId)
+            editTransitionMessageIds.add(previousEditingId)
         }
         followBottom = false
         editingMessageId = message.id
         editingMessageDraft = message.content
         editingMessageEditor = null
+        editTransitionMessageIds.add(message.id)
         setEditingFloatingButtonVisible(true)
         refreshMessagesPreservingScroll(
             listOfNotNull(previousEditingId, message.id),
-            anchor,
-            editMode = true
+            anchor = null
         )
+        scrollMessageToTopForEdit(message.id)
     }
 
     private fun finishEditingMessage() {
@@ -2549,6 +2604,7 @@ class MainActivity : AppCompatActivity() {
         messagesScroll.stopScroll()
         followBottom = false
         commitEditingDraft(id)
+        editTransitionMessageIds.add(id)
         editingMessageId = null
         editingMessageDraft = ""
         editingMessageEditor = null
