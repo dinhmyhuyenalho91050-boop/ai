@@ -19,6 +19,8 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PerformanceHintManager
+import android.os.Process
 import android.text.Editable
 import android.text.InputType
 import android.text.Layout
@@ -137,6 +139,10 @@ class MainActivity : AppCompatActivity() {
     private val nonStreamingAssistantIds = mutableSetOf<String>()
     private val messageHeightCache = LruCacheMap<MessageHeightKey, Int>(260)
     private val formattedTextCache = LruCacheMap<TextFormatCacheKey, CharSequence>(180)
+    private var displayPerformanceMode: DisplayPerformanceMode? = null
+    private var currentRequestedFrameRate = View.REQUESTED_FRAME_RATE_CATEGORY_NO_PREFERENCE
+    private var uiPerformanceHintSession: PerformanceHintManager.Session? = null
+    private var uiPerformanceHintTargetNs = 0L
 
     private val defaultRenderMessageLimit = 80
     private val loadOlderMessageBatch = 40
@@ -181,6 +187,7 @@ class MainActivity : AppCompatActivity() {
         state = repository.load()
         registerImportLauncher()
         bindViews()
+        setupDevicePerformanceControls()
         setupEdgeToEdge()
         setupTitleGradient()
         setupClicks()
@@ -199,7 +206,85 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         aiClient.abort()
+        uiPerformanceHintSession?.close()
+        uiPerformanceHintSession = null
         super.onDestroy()
+    }
+
+    @SuppressLint("NewApi")
+    private fun setupDevicePerformanceControls() {
+        val attrs = window.attributes
+        attrs.setFrameRatePowerSavingsBalanced(true)
+        attrs.setFrameRateBoostOnTouchEnabled(false)
+        window.attributes = attrs
+        uiPerformanceHintSession = runCatching {
+            getSystemService(PerformanceHintManager::class.java)
+                ?.createHintSession(intArrayOf(Process.myTid()), displayPerformanceTargetNs(DisplayPerformanceMode.IDLE))
+        }.getOrNull()
+        applyDisplayPerformanceMode(DisplayPerformanceMode.IDLE, force = true)
+    }
+
+    @SuppressLint("NewApi")
+    private fun refreshDisplayPerformanceMode() {
+        if (!::root.isInitialized || !::messagesScroll.isInitialized) return
+        val mode = when {
+            streamTargets.isNotEmpty() && streamLiveModeNow -> DisplayPerformanceMode.STREAM_LIVE
+            userTouchingMessages -> DisplayPerformanceMode.TOUCH_SCROLL
+            streamTargets.isNotEmpty() -> DisplayPerformanceMode.STREAM_BACKGROUND
+            else -> DisplayPerformanceMode.IDLE
+        }
+        applyDisplayPerformanceMode(mode)
+    }
+
+    @SuppressLint("NewApi")
+    private fun applyDisplayPerformanceMode(mode: DisplayPerformanceMode, force: Boolean = false) {
+        if (!force && displayPerformanceMode == mode) return
+        displayPerformanceMode = mode
+        val frameRate = displayPerformanceFrameRate(mode)
+        currentRequestedFrameRate = frameRate
+        root.propagateRequestedFrameRate(frameRate, true)
+        messagesScroll.propagateRequestedFrameRate(frameRate, true)
+        composer.setRequestedFrameRate(frameRate)
+        updateUiPerformanceHintTarget(mode)
+    }
+
+    @SuppressLint("NewApi")
+    private fun updateUiPerformanceHintTarget(mode: DisplayPerformanceMode) {
+        val session = uiPerformanceHintSession ?: return
+        val targetNs = displayPerformanceTargetNs(mode)
+        if (targetNs == uiPerformanceHintTargetNs) return
+        uiPerformanceHintTargetNs = targetNs
+        runCatching { session.updateTargetWorkDuration(targetNs) }
+    }
+
+    private fun displayPerformanceFrameRate(mode: DisplayPerformanceMode): Float {
+        return when (mode) {
+            DisplayPerformanceMode.IDLE -> View.REQUESTED_FRAME_RATE_CATEGORY_NO_PREFERENCE
+            DisplayPerformanceMode.STREAM_BACKGROUND -> View.REQUESTED_FRAME_RATE_CATEGORY_LOW
+            DisplayPerformanceMode.TOUCH_SCROLL -> View.REQUESTED_FRAME_RATE_CATEGORY_NORMAL
+            DisplayPerformanceMode.STREAM_LIVE -> View.REQUESTED_FRAME_RATE_CATEGORY_HIGH
+        }
+    }
+
+    private fun displayPerformanceTargetNs(mode: DisplayPerformanceMode): Long {
+        return when (mode) {
+            DisplayPerformanceMode.STREAM_LIVE -> 8_333_333L
+            DisplayPerformanceMode.TOUCH_SCROLL -> 16_666_667L
+            DisplayPerformanceMode.STREAM_BACKGROUND -> 33_333_333L
+            DisplayPerformanceMode.IDLE -> 33_333_333L
+        }
+    }
+
+    private fun beginUiWorkHint(): Long {
+        return if (uiPerformanceHintSession == null) 0L else System.nanoTime()
+    }
+
+    @SuppressLint("NewApi")
+    private fun finishUiWorkHint(startNs: Long) {
+        val session = uiPerformanceHintSession ?: return
+        if (startNs <= 0L) return
+        val elapsedNs = (System.nanoTime() - startNs).coerceAtLeast(1L)
+        runCatching { session.reportActualWorkDuration(elapsedNs) }
     }
 
     private fun registerImportLauncher() {
@@ -1326,6 +1411,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun streamTailView(): StreamTailView {
         return StreamTailView(this).apply {
+            setRequestedFrameRate(currentRequestedFrameRate)
             setTextColorValue(color(R.color.chat_fg))
             setTextSizePxValue(16f * resources.displayMetrics.scaledDensity)
             typeface = systemTypeface()
@@ -2045,6 +2131,7 @@ class MainActivity : AppCompatActivity() {
         target.finishWhenCaught = target.finishWhenCaught || finishWhenCaught
         val bound = isStreamTargetBound(message.id)
         target.forceNextUiCommit = followBottom || streamLiveModeNow
+        refreshDisplayPerformanceMode()
         if (bound && shouldUpdateBoundStreamTarget()) {
             scheduleStreamAnimator()
         }
@@ -2095,6 +2182,7 @@ class MainActivity : AppCompatActivity() {
         val throttledMode = distance < dp(streamThrottledDistanceDp)
         streamLiveModeNow = liveMode
         streamThrottledModeNow = throttledMode
+        refreshDisplayPerformanceMode()
         return when {
             !throttledMode -> streamOffscreenUiFrameMs
             liveMode -> streamRevealFrameMs
@@ -2103,110 +2191,117 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun tickStreamAnimator() {
-        val now = android.os.SystemClock.uptimeMillis()
-        var needsNextFrame = false
-        val distance = remainingScrollToBottom()
-        val liveMode = distance < dp(streamLiveDistanceDp)
-        val throttledMode = distance < dp(streamThrottledDistanceDp)
-        streamLiveModeNow = liveMode
-        streamThrottledModeNow = throttledMode
-        val iterator = streamTargets.entries.iterator()
-        while (iterator.hasNext()) {
-            val target = iterator.next().value
-            if (!throttledMode) {
-                if (target.finishWhenCaught && !isStreamTargetBound(target.message.id)) {
-                    iterator.remove()
-                    messageStreamSegments.remove(target.message.id)
-                }
-                continue
-            }
-            val targetVisible = isStreamTargetVisible(target.message.id)
-            refreshContentReleaseEnd(target)
-            val elapsedMs = revealElapsedMs(target, now)
-            val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
-            val contentStepLimit = streamContentMaxCharsPerTick
-            if (!targetVisible) {
-                val targetBound = isStreamTargetBound(target.message.id)
-                val shouldThrottledUpdate = targetBound &&
-                    shouldCommitOffscreenStreamFrame(target, now)
-                if (shouldThrottledUpdate) {
-                    val nextContentLength = if (target.contentPrefixValid) {
-                        advanceVisibleLength(target.visibleContentLength, contentEnd, contentStepLimit)
-                    } else {
-                        contentEnd
-                    }
-                    commitStreamFrame(
-                        target,
-                        now,
-                        nextContentLength,
-                        target.targetThinking.length,
-                        streaming = !target.finishWhenCaught
-                    )
-                    target.lastOffscreenUiCommitAt = now
-                    val caughtUp = nextContentLength == target.targetContent.length &&
-                        target.visibleThinkingLength == target.targetThinking.length
-                    if (caughtUp && target.finishWhenCaught) {
+        val hintStartNs = beginUiWorkHint()
+        try {
+            val now = android.os.SystemClock.uptimeMillis()
+            var needsNextFrame = false
+            val distance = remainingScrollToBottom()
+            val liveMode = distance < dp(streamLiveDistanceDp)
+            val throttledMode = distance < dp(streamThrottledDistanceDp)
+            streamLiveModeNow = liveMode
+            streamThrottledModeNow = throttledMode
+            refreshDisplayPerformanceMode()
+            val iterator = streamTargets.entries.iterator()
+            while (iterator.hasNext()) {
+                val target = iterator.next().value
+                if (!throttledMode) {
+                    if (target.finishWhenCaught && !isStreamTargetBound(target.message.id)) {
                         iterator.remove()
                         messageStreamSegments.remove(target.message.id)
-                    } else if (target.targetContent.length > target.visibleContentLength ||
-                        target.targetThinking.length > target.visibleThinkingLength
-                    ) {
+                    }
+                    continue
+                }
+                val targetVisible = isStreamTargetVisible(target.message.id)
+                refreshContentReleaseEnd(target)
+                val elapsedMs = revealElapsedMs(target, now)
+                val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
+                val contentStepLimit = streamContentMaxCharsPerTick
+                if (!targetVisible) {
+                    val targetBound = isStreamTargetBound(target.message.id)
+                    val shouldThrottledUpdate = targetBound &&
+                        shouldCommitOffscreenStreamFrame(target, now)
+                    if (shouldThrottledUpdate) {
+                        val nextContentLength = if (target.contentPrefixValid) {
+                            advanceVisibleLength(target.visibleContentLength, contentEnd, contentStepLimit)
+                        } else {
+                            contentEnd
+                        }
+                        commitStreamFrame(
+                            target,
+                            now,
+                            nextContentLength,
+                            target.targetThinking.length,
+                            streaming = !target.finishWhenCaught
+                        )
+                        target.lastOffscreenUiCommitAt = now
+                        val caughtUp = nextContentLength == target.targetContent.length &&
+                            target.visibleThinkingLength == target.targetThinking.length
+                        if (caughtUp && target.finishWhenCaught) {
+                            iterator.remove()
+                            messageStreamSegments.remove(target.message.id)
+                        } else if (target.targetContent.length > target.visibleContentLength ||
+                            target.targetThinking.length > target.visibleThinkingLength
+                        ) {
+                            needsNextFrame = true
+                        }
+                    } else if (target.finishWhenCaught && !targetBound) {
+                        iterator.remove()
+                        messageStreamSegments.remove(target.message.id)
+                    } else if (targetBound && shouldUpdateBoundStreamTarget()) {
                         needsNextFrame = true
                     }
-                } else if (target.finishWhenCaught && !targetBound) {
+                    continue
+                }
+                val thinkingExpanded = target.message.id in messageThinkingExpanded
+                val thinkingInterval = if (thinkingExpanded) streamExpandedThinkingFrameMs else streamCollapsedThinkingFrameMs
+                val thinkingDue = target.finishWhenCaught ||
+                    !target.thinkingPrefixValid ||
+                    now - target.lastThinkingUiCommitAt >= thinkingInterval
+                val thinkingBudget = if (thinkingDue) {
+                    revealBudget(
+                        target.thinkingRevealCarry,
+                        streamThinkingCharsPerSecond,
+                        elapsedMs,
+                        streamMaxThinkingCharsPerFrame
+                    )
+                } else {
+                    RevealBudget(0, target.thinkingRevealCarry)
+                }
+                target.thinkingRevealCarry = thinkingBudget.carry
+                val nextContentLength = if (target.contentPrefixValid) {
+                    advanceVisibleLength(target.visibleContentLength, contentEnd, contentStepLimit)
+                } else {
+                    contentEnd
+                }
+                val nextThinkingLength = if (target.thinkingPrefixValid && !target.finishWhenCaught) {
+                    advanceVisibleLength(target.visibleThinkingLength, target.targetThinking.length, thinkingBudget.chars)
+                } else {
+                    target.targetThinking.length
+                }
+                val contentChanged = nextContentLength != target.visibleContentLength || !target.contentPrefixValid
+                val thinkingChanged = nextThinkingLength != target.visibleThinkingLength || !target.thinkingPrefixValid
+                val changed = contentChanged || thinkingChanged
+                if (changed) {
+                    if (shouldCommitStreamFrame(target, now, contentChanged, thinkingChanged, nextContentLength, nextThinkingLength)) {
+                        commitStreamFrame(target, now, nextContentLength, nextThinkingLength, streaming = true)
+                    } else {
+                        needsNextFrame = true
+                    }
+                }
+                val caughtUp = nextContentLength == target.targetContent.length && nextThinkingLength == target.targetThinking.length
+                if (caughtUp && target.finishWhenCaught) {
                     iterator.remove()
                     messageStreamSegments.remove(target.message.id)
-                } else if (targetBound && shouldUpdateBoundStreamTarget()) {
-                    needsNextFrame = true
-                }
-                continue
-            }
-            val thinkingExpanded = target.message.id in messageThinkingExpanded
-            val thinkingInterval = if (thinkingExpanded) streamExpandedThinkingFrameMs else streamCollapsedThinkingFrameMs
-            val thinkingDue = target.finishWhenCaught ||
-                !target.thinkingPrefixValid ||
-                now - target.lastThinkingUiCommitAt >= thinkingInterval
-            val thinkingBudget = if (thinkingDue) {
-                revealBudget(
-                    target.thinkingRevealCarry,
-                    streamThinkingCharsPerSecond,
-                    elapsedMs,
-                    streamMaxThinkingCharsPerFrame
-                )
-            } else {
-                RevealBudget(0, target.thinkingRevealCarry)
-            }
-            target.thinkingRevealCarry = thinkingBudget.carry
-            val nextContentLength = if (target.contentPrefixValid) {
-                advanceVisibleLength(target.visibleContentLength, contentEnd, contentStepLimit)
-            } else {
-                contentEnd
-            }
-            val nextThinkingLength = if (target.thinkingPrefixValid && !target.finishWhenCaught) {
-                advanceVisibleLength(target.visibleThinkingLength, target.targetThinking.length, thinkingBudget.chars)
-            } else {
-                target.targetThinking.length
-            }
-            val contentChanged = nextContentLength != target.visibleContentLength || !target.contentPrefixValid
-            val thinkingChanged = nextThinkingLength != target.visibleThinkingLength || !target.thinkingPrefixValid
-            val changed = contentChanged || thinkingChanged
-            if (changed) {
-                if (shouldCommitStreamFrame(target, now, contentChanged, thinkingChanged, nextContentLength, nextThinkingLength)) {
-                    commitStreamFrame(target, now, nextContentLength, nextThinkingLength, streaming = true)
-                } else {
+                    updateMessageViews(target.message, final = true)
+                } else if (!caughtUp || target.targetContent.length > target.contentReleaseEnd) {
                     needsNextFrame = true
                 }
             }
-            val caughtUp = nextContentLength == target.targetContent.length && nextThinkingLength == target.targetThinking.length
-            if (caughtUp && target.finishWhenCaught) {
-                iterator.remove()
-                messageStreamSegments.remove(target.message.id)
-                updateMessageViews(target.message, final = true)
-            } else if (!caughtUp || target.targetContent.length > target.contentReleaseEnd) {
-                needsNextFrame = true
-            }
+            if (needsNextFrame) scheduleStreamAnimator()
+        } finally {
+            finishUiWorkHint(hintStartNs)
+            refreshDisplayPerformanceMode()
         }
-        if (needsNextFrame) scheduleStreamAnimator()
     }
 
     private fun commitStreamFrame(
@@ -2477,6 +2572,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateStreamDistanceModes(distance: Int = remainingScrollToBottom()) {
         streamLiveModeNow = distance < dp(streamLiveDistanceDp)
         streamThrottledModeNow = distance < dp(streamThrottledDistanceDp)
+        refreshDisplayPerformanceMode()
     }
 
     private fun shouldUpdateBoundStreamTarget(): Boolean {
@@ -4546,6 +4642,13 @@ class MainActivity : AppCompatActivity() {
         var baseHeight: Int = 0,
         var targetHeight: Int = 0
     )
+
+    private enum class DisplayPerformanceMode {
+        IDLE,
+        STREAM_BACKGROUND,
+        TOUCH_SCROLL,
+        STREAM_LIVE
+    }
 
     private enum class StreamMode {
         PLAIN,
