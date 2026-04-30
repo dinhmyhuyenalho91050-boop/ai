@@ -1429,12 +1429,7 @@ class MainActivity : AppCompatActivity() {
         if (oldHeight > 0 && oldWidth > 0) {
             pinBodyHeight(views.host, oldHeight)
         }
-        val renderUpdate = renderStreamingBodySegments(
-            messageId,
-            views,
-            rawContent,
-            unifiedLayout = shouldUseUnifiedStreamLayout(messageId)
-        )
+        val renderUpdate = renderStreamingBodySegments(messageId, views, rawContent)
         if (oldHeight <= 0 || oldWidth <= 0) {
             ensureBodyWrapContent(views.host)
             return true
@@ -1467,16 +1462,7 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    private fun shouldUseUnifiedStreamLayout(messageId: String): Boolean {
-        return streamLiveModeNow || isStreamTargetVisible(messageId)
-    }
-
-    private fun renderStreamingBodySegments(
-        messageId: String,
-        views: StreamBodyViews,
-        rawContent: String,
-        unifiedLayout: Boolean
-    ): StreamSegmentUpdate {
+    private fun renderStreamingBodySegments(messageId: String, views: StreamBodyViews, rawContent: String): StreamSegmentUpdate {
         val segment = messageStreamSegments.getOrPut(messageId) { StreamTextSegmentState() }
         if (rawContent.length < segment.frozenRawLength ||
             segment.prefixRaw.isNotEmpty() && !rawContent.startsWith(segment.prefixRaw)
@@ -1484,20 +1470,8 @@ class MainActivity : AppCompatActivity() {
             segment.reset()
         }
         var heightMayHaveChanged = false
-        val nextFreezeEnd = if (unifiedLayout) {
-            segment.frozenRawLength
-        } else {
-            findStreamFreezeBoundary(rawContent, segment.frozenRawLength)
-        }
-        if (unifiedLayout && (segment.frozenRawLength > 0 || segment.prefixRaw.isNotEmpty())) {
-            segment.reset()
-            if (views.prefix.visibility != View.GONE || views.prefix.text.isNotEmpty()) {
-                views.prefix.text = ""
-                views.prefix.visibility = View.GONE
-                views.invalidatePrefixMeasure()
-                heightMayHaveChanged = true
-            }
-        } else if (nextFreezeEnd > segment.frozenRawLength) {
+        val nextFreezeEnd = findStreamFreezeBoundary(rawContent, segment.frozenRawLength)
+        if (nextFreezeEnd > segment.frozenRawLength) {
             val prefixRaw = rawContent.substring(0, nextFreezeEnd)
             if (prefixRaw != segment.prefixRaw) {
                 views.prefix.text = renderStreamPrefix(segment, prefixRaw)
