@@ -133,6 +133,7 @@ class MainActivity : AppCompatActivity() {
     private var sendButtonAnimationToken = 0
     private val recentlyInsertedMessageIds = mutableSetOf<String>()
     private val editTransitionMessageIds = mutableSetOf<String>()
+    private val editExitLockedHeights = mutableMapOf<String, Int>()
     private val nonStreamingAssistantIds = mutableSetOf<String>()
 
     private val defaultRenderMessageLimit = 80
@@ -985,6 +986,7 @@ class MainActivity : AppCompatActivity() {
         messageRenderedContent.clear()
         messageRenderedThinking.clear()
         messageStreamSegments.clear()
+        editExitLockedHeights.clear()
         streamLiveModeNow = false
         streamThrottledModeNow = false
         val session = state.ensureSession()
@@ -1087,10 +1089,11 @@ class MainActivity : AppCompatActivity() {
             val messageIndex = position - if (hiddenCount > 0) 1 else 0
             val message = visibleMessages.getOrNull(messageIndex) ?: return
             holder.boundMessageId = message.id
-            holder.container.addView(messageCard(message, visibleStartIndex + messageIndex + 1).apply {
+            val lockedHeight = editExitLockedHeights.remove(message.id)?.takeIf { it > 0 }
+            holder.container.addView(messageCard(message, visibleStartIndex + messageIndex + 1, lockedHeight).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
+                    lockedHeight ?: ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { bottomMargin = dp(16) }
             })
             if (streamTargets.containsKey(message.id)) scheduleVisibleStreamRefresh()
@@ -1110,7 +1113,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun messageCard(message: ChatMessage, index: Int): View {
+    private fun messageCard(message: ChatMessage, index: Int, lockedHeight: Int? = null): View {
         val isAssistant = message.role == "assistant"
         val editing = message.id == editingMessageId
         val accent = if (isAssistant) Color.rgb(100, 210, 255) else color(R.color.chat_accent_blue)
@@ -1145,11 +1148,19 @@ class MainActivity : AppCompatActivity() {
 
         val bodyViews = messageBody(message)
         contentColumn.addView(bodyViews.host)
-        if (!editing) {
-            contentColumn.addView(separator())
-            contentColumn.addView(messageFooter(message))
-        }
+        contentColumn.addView(separator().apply {
+            if (editing) visibility = View.INVISIBLE
+        })
+        contentColumn.addView(messageFooter(message).apply {
+            if (editing) {
+                visibility = View.INVISIBLE
+                isEnabled = false
+            }
+        })
         card.addView(contentColumn)
+        lockedHeight?.let {
+            card.minimumHeight = lockedHeight
+        }
         if (recentlyInsertedMessageIds.remove(message.id)) {
             card.post { animateMessageEntrance(card) }
         } else if (editTransitionMessageIds.remove(message.id)) {
@@ -2649,17 +2660,14 @@ class MainActivity : AppCompatActivity() {
     private fun animateEditCardTransition(view: View) {
         view.animate().cancel()
         view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        view.alpha = 0.78f
-        view.scaleX = 0.998f
-        view.scaleY = 0.998f
+        view.alpha = 0.9f
         view.animate()
             .alpha(1f)
-            .scaleX(1f)
-            .scaleY(1f)
-            .setDuration(300)
+            .setDuration(260)
             .setInterpolator(entranceInterpolator)
             .withEndAction { view.setLayerType(View.LAYER_TYPE_NONE, null) }
             .start()
+        animateMessageFrameSettled(view)
     }
 
     private fun animateContentSettled(view: View) {
@@ -2775,6 +2783,7 @@ class MainActivity : AppCompatActivity() {
         messagesScroll.stopScroll()
         val previousEditingId = editingMessageId
         if (previousEditingId != null) {
+            lockEditExitHeight(previousEditingId)
             commitEditingDraft(previousEditingId)
             editTransitionMessageIds.add(previousEditingId)
         }
@@ -2794,6 +2803,7 @@ class MainActivity : AppCompatActivity() {
     private fun finishEditingMessage() {
         val id = editingMessageId ?: return
         val anchor = captureScrollAnchor()
+        lockEditExitHeight(id)
         messagesScroll.stopScroll()
         followBottom = false
         commitEditingDraft(id)
@@ -2807,6 +2817,18 @@ class MainActivity : AppCompatActivity() {
         setEditingFloatingButtonVisible(false)
         refreshMessagesPreservingScroll(listOf(id), anchor, editMode = true)
         renderSessions()
+    }
+
+    private fun lockEditExitHeight(messageId: String) {
+        val height = currentBoundMessageCard(messageId)?.height ?: 0
+        if (height > 0) editExitLockedHeights[messageId] = height
+    }
+
+    private fun currentBoundMessageCard(messageId: String): View? {
+        val position = messagesAdapter.positionOfMessage(messageId)
+        if (position == RecyclerView.NO_POSITION) return null
+        val holder = messagesLayoutManager.findViewByPosition(position) as? ViewGroup ?: return null
+        return holder.getChildAt(0)
     }
 
     private fun commitEditingDraft(messageId: String) {
