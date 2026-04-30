@@ -501,9 +501,9 @@ data class NativeAiResult(val content: String, val thinking: String = "")
 class NativeAiClient {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
     private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(0, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(0, TimeUnit.SECONDS)
         .callTimeout(0, TimeUnit.SECONDS)
         .build()
 

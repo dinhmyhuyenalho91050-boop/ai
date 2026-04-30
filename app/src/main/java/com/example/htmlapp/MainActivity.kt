@@ -4478,8 +4478,8 @@ class MainActivity : AppCompatActivity() {
 
         fun prefixAt(prefixLength: Int, fallback: String): String {
             val end = prefixLength.coerceIn(0, length)
-            if (end == length) return cachedFull.ifEmpty { fallback.prefixAt(end) }
-            if (chunks.isEmpty()) return fallback.prefixAt(end)
+            if (end == length) return cachedFull.ifEmpty { fallback.substring(0, min(end, fallback.length)) }
+            if (chunks.isEmpty()) return fallback.substring(0, min(end, fallback.length))
             val out = StringBuilder(end)
             var remaining = end
             val iterator = chunks.iterator()
