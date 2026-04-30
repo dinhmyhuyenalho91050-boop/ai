@@ -1769,32 +1769,22 @@ class MainActivity : AppCompatActivity() {
         val scanEnd = (text.length - streamTailTargetChars).coerceAtLeast(frozenEnd)
         val mapping = buildStreamDisplayMapping(text, scanEnd)
         if (mapping.text.isEmpty()) return frozenEnd
-        val measured = MeasuredText.Builder(mapping.text.toCharArray())
-            .appendStyleRun(views.prefix.paint, mapping.text.length, false)
-            .build()
-        val constraints = LineBreaker.ParagraphConstraints().apply {
-            setWidth(contentWidth.toFloat().coerceAtLeast(1f))
-        }
-        val layout = LineBreaker.Builder()
-            .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
-            .setHyphenationFrequency(LineBreaker.HYPHENATION_FREQUENCY_NONE)
-            .build()
-            .computeLineBreaks(measured, constraints, 0)
         var boundary = frozenEnd
-        for (line in 0 until layout.lineCount) {
-            val renderedEnd = layout.getLineBreakOffset(line).coerceIn(0, mapping.rawEnds.size)
-            if (renderedEnd <= 0) continue
-            val rawEnd = mapping.rawEnds[renderedEnd - 1].coerceIn(0, scanEnd)
-            if (rawEnd <= frozenEnd) continue
-            if (rawEnd < streamFrozenPrefixMinChars) continue
-            val endsWithNewline = rawEnd > 0 && text[rawEnd - 1] == '\n'
-            val truncatedLastLine = line == layout.lineCount - 1 &&
-                rawEnd >= scanEnd &&
-                scanEnd < text.length &&
-                !endsWithNewline
-            if (truncatedLastLine) continue
-            if (mapping.isPlainAt(rawEnd)) {
-                boundary = rawEnd
+        forEachLineBreakEnd(mapping.text, views.prefix.paint, contentWidth) { renderedEnd ->
+            if (renderedEnd > 0) {
+                val rawEnd = mapping.rawEnds[renderedEnd - 1].coerceIn(0, scanEnd)
+                val endsWithNewline = rawEnd > 0 && text[rawEnd - 1] == '\n'
+                val truncatedLastLine = renderedEnd >= mapping.text.length &&
+                    rawEnd >= scanEnd &&
+                    scanEnd < text.length &&
+                    !endsWithNewline
+                if (rawEnd > frozenEnd &&
+                    rawEnd >= streamFrozenPrefixMinChars &&
+                    !truncatedLastLine &&
+                    mapping.isPlainAt(rawEnd)
+                ) {
+                    boundary = rawEnd
+                }
             }
         }
         segment.freezeScanWidth = contentWidth
@@ -1802,6 +1792,45 @@ class MainActivity : AppCompatActivity() {
         segment.freezeScanTextLength = text.length
         segment.freezeScanBoundary = boundary
         return boundary
+    }
+
+    private inline fun forEachLineBreakEnd(
+        text: String,
+        paint: TextPaint,
+        width: Int,
+        consume: (Int) -> Unit
+    ) {
+        if (text.isEmpty()) return
+        val breaker = LineBreaker.Builder()
+            .setBreakStrategy(LineBreaker.BREAK_STRATEGY_SIMPLE)
+            .setHyphenationFrequency(LineBreaker.HYPHENATION_FREQUENCY_NONE)
+            .build()
+        var paragraphStart = 0
+        while (paragraphStart < text.length) {
+            val newline = text.indexOf('\n', paragraphStart)
+            val paragraphEnd = if (newline >= 0) newline else text.length
+            if (paragraphEnd > paragraphStart) {
+                val paragraph = text.substring(paragraphStart, paragraphEnd)
+                val measured = MeasuredText.Builder(paragraph.toCharArray())
+                    .appendStyleRun(paint, paragraph.length, false)
+                    .build()
+                val constraints = LineBreaker.ParagraphConstraints().apply {
+                    setWidth(width.toFloat().coerceAtLeast(1f))
+                }
+                val result = breaker.computeLineBreaks(measured, constraints, 0)
+                for (line in 0 until result.lineCount) {
+                    var renderedEnd = paragraphStart + result.getLineBreakOffset(line)
+                    if (newline >= 0 && renderedEnd == paragraphEnd) {
+                        renderedEnd = newline + 1
+                    }
+                    consume(renderedEnd.coerceIn(0, text.length))
+                }
+            } else if (newline >= 0) {
+                consume((newline + 1).coerceIn(0, text.length))
+            }
+            if (newline < 0) break
+            paragraphStart = newline + 1
+        }
     }
 
     private fun findNewlineFreezeBoundary(text: String, frozenEnd: Int): Int {
