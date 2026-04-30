@@ -98,6 +98,7 @@ class MainActivity : AppCompatActivity() {
     private val messageRenderedContent = mutableMapOf<String, String>()
     private val messageRenderedThinking = mutableMapOf<String, String>()
     private val messageStreamSegments = mutableMapOf<String, StreamTextSegmentState>()
+    private val messageCardViews = mutableMapOf<String, View>()
     private val streamBodyHeightAnimationTokens = mutableMapOf<String, Int>()
     private val streamBodyHeightAnimators = mutableMapOf<String, ValueAnimator>()
     private val streamBodyHeightTargets = mutableMapOf<String, Int>()
@@ -159,6 +160,7 @@ class MainActivity : AppCompatActivity() {
     private val streamTailTargetChars = 720
     private val streamTailMaxChars = 1200
     private val streamFrozenPrefixMinChars = 700
+    private val streamFreezeScanStepChars = 160
     private val streamBottomScrollFrameMs = 16L
     private var streamBottomFollowScheduled = false
     private val scrollTouchCooldownMs = 280L
@@ -984,6 +986,7 @@ class MainActivity : AppCompatActivity() {
         messageRenderedContent.clear()
         messageRenderedThinking.clear()
         messageStreamSegments.clear()
+        messageCardViews.clear()
         streamLiveModeNow = false
         streamThrottledModeNow = false
         val session = state.ensureSession()
@@ -1027,6 +1030,7 @@ class MainActivity : AppCompatActivity() {
         messageThinkingSummaries.remove(messageId)
         messageRenderedContent.remove(messageId)
         messageRenderedThinking.remove(messageId)
+        messageCardViews.remove(messageId)
     }
 
     private inner class MessageAdapter : RecyclerView.Adapter<MessageAdapter.MessageHolder>() {
@@ -1149,6 +1153,7 @@ class MainActivity : AppCompatActivity() {
             contentColumn.addView(messageFooter(message))
         }
         card.addView(contentColumn)
+        messageCardViews[message.id] = card
         if (recentlyInsertedMessageIds.remove(message.id)) {
             card.post { animateMessageEntrance(card) }
         } else if (editTransitionMessageIds.remove(message.id)) {
@@ -1403,16 +1408,38 @@ class MainActivity : AppCompatActivity() {
             return StreamBodyUpdate(changed = true, heightChanged = heightChanged)
         }
         if (final || previous != content) {
+            val wasStreamingBody = message.role == "assistant" &&
+                (messageStreamSegments.containsKey(message.id) || !views.tail.isTextEmpty())
+            stopStreamingBodyHeightAnimation(message.id, views.host)
+            if (final && wasStreamingBody && content.isNotEmpty()) {
+                val oldHeight = currentBodyHeight(views.host)
+                val oldWidth = views.host.width
+                if (oldHeight > 0 && oldWidth > 0) pinBodyHeight(views.host, oldHeight)
+                val renderUpdate = renderStreamingBodySegments(message.id, views, content)
+                views.tail.showCursor = false
+                messageStreamSegments.remove(message.id)
+                messageRenderedContent[message.id] = content
+                val targetHeight = if (oldWidth > 0) measureStreamingBodyHeight(views, oldWidth) else 0
+                if (targetHeight > 0) {
+                    pinBodyHeight(views.host, targetHeight)
+                } else {
+                    ensureBodyWrapContent(views.host)
+                }
+                animateContentSettled(message.id, views.host)
+                return StreamBodyUpdate(
+                    changed = true,
+                    heightChanged = renderUpdate.heightMayHaveChanged || targetHeight != oldHeight
+                )
+            }
             streamBodyMeasureStates.remove(message.id)
             messageStreamSegments.remove(message.id)
-            stopStreamingBodyHeightAnimation(message.id, views.host)
             views.prefix.text = formatMessageText(content)
             views.prefix.visibility = if (content.isEmpty()) View.GONE else View.VISIBLE
             views.tail.clearText()
             views.tail.visibility = View.GONE
             messageRenderedContent[message.id] = content
             if (final && message.role == "assistant") {
-                animateContentSettled(views.host)
+                animateContentSettled(message.id, views.host)
             }
             return StreamBodyUpdate(changed = true, heightChanged = true)
         }
@@ -1470,7 +1497,7 @@ class MainActivity : AppCompatActivity() {
             segment.reset()
         }
         var heightMayHaveChanged = false
-        val nextFreezeEnd = findStreamFreezeBoundary(rawContent, segment.frozenRawLength)
+        val nextFreezeEnd = findStreamFreezeBoundary(rawContent, segment.frozenRawLength, views, segment)
         if (nextFreezeEnd > segment.frozenRawLength) {
             val prefixRaw = rawContent.substring(0, nextFreezeEnd)
             if (prefixRaw != segment.prefixRaw) {
@@ -1483,6 +1510,7 @@ class MainActivity : AppCompatActivity() {
             segment.frozenRawLength = nextFreezeEnd
             segment.tailFormatter = newStreamFormatter()
             segment.tailRaw = ""
+            segment.clearFreezeScanCache()
         } else if (segment.prefixRaw.isNotEmpty() &&
             (views.prefix.visibility != View.VISIBLE || views.prefix.text.isEmpty())
         ) {
@@ -1505,6 +1533,7 @@ class MainActivity : AppCompatActivity() {
             val formatter = segment.tailFormatter ?: newStreamFormatter().also { segment.tailFormatter = it }
             val renderedTail = formatter.render(tailRaw).text
             val oldVisibility = views.tail.visibility
+            views.tail.showCursor = tailRaw.isNotEmpty()
             val tailHeightChanged = views.tail.setStreamText(renderedTail)
             val nextVisibility = if (tailRaw.isEmpty()) View.GONE else View.VISIBLE
             views.tail.visibility = nextVisibility
@@ -1522,23 +1551,71 @@ class MainActivity : AppCompatActivity() {
         return SpannableStringBuilder(formatter.render(raw).text)
     }
 
-    private fun findStreamFreezeBoundary(text: String, frozenEnd: Int): Int {
+    private fun findStreamFreezeBoundary(
+        text: String,
+        frozenEnd: Int,
+        views: StreamBodyViews,
+        segment: StreamTextSegmentState
+    ): Int {
         if (text.length - frozenEnd <= streamTailMaxChars) return frozenEnd
+        val contentWidth = (views.host.width - views.host.paddingLeft - views.host.paddingRight)
+            .coerceAtLeast(0)
+        if (contentWidth <= 0) return findNewlineFreezeBoundary(text, frozenEnd)
+        if (segment.freezeScanWidth == contentWidth &&
+            segment.freezeScanFrozenEnd == frozenEnd &&
+            segment.freezeScanBoundary == frozenEnd &&
+            text.length - segment.freezeScanTextLength < streamFreezeScanStepChars
+        ) {
+            return frozenEnd
+        }
+        val scanEnd = (text.length - streamTailTargetChars).coerceAtLeast(frozenEnd)
+        val mapping = buildStreamDisplayMapping(text, scanEnd)
+        if (mapping.text.isEmpty()) return frozenEnd
+        val layout = StaticLayout.Builder.obtain(
+            mapping.text,
+            0,
+            mapping.text.length,
+            views.prefix.paint,
+            contentWidth
+        )
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setLineSpacing(views.prefix.lineSpacingExtra, views.prefix.lineSpacingMultiplier)
+            .setIncludePad(views.prefix.includeFontPadding)
+            .setBreakStrategy(views.prefix.breakStrategy)
+            .setHyphenationFrequency(views.prefix.hyphenationFrequency)
+            .build()
+        var boundary = frozenEnd
+        for (line in 0 until layout.lineCount) {
+            val renderedEnd = layout.getLineEnd(line).coerceIn(0, mapping.rawEnds.size)
+            if (renderedEnd <= 0) continue
+            val rawEnd = mapping.rawEnds[renderedEnd - 1].coerceIn(0, scanEnd)
+            if (rawEnd <= frozenEnd) continue
+            if (rawEnd < streamFrozenPrefixMinChars) continue
+            val endsWithNewline = rawEnd > 0 && text[rawEnd - 1] == '\n'
+            val truncatedLastLine = line == layout.lineCount - 1 &&
+                rawEnd >= scanEnd &&
+                scanEnd < text.length &&
+                !endsWithNewline
+            if (truncatedLastLine) continue
+            if (mapping.isPlainAt(rawEnd)) {
+                boundary = rawEnd
+            }
+        }
+        segment.freezeScanWidth = contentWidth
+        segment.freezeScanFrozenEnd = frozenEnd
+        segment.freezeScanTextLength = text.length
+        segment.freezeScanBoundary = boundary
+        return boundary
+    }
+
+    private fun findNewlineFreezeBoundary(text: String, frozenEnd: Int): Int {
         val scanEnd = (text.length - streamTailTargetChars).coerceAtLeast(frozenEnd)
         var boundary = frozenEnd
-        var fallback = frozenEnd
         var mode = StreamMode.PLAIN
         var index = frozenEnd.coerceIn(0, scanEnd)
         while (index < scanEnd) {
             val ch = text[index]
             mode = nextStreamMode(mode, ch)
-            if (index + 1 > frozenEnd &&
-                index + 1 >= streamFrozenPrefixMinChars &&
-                mode == StreamMode.PLAIN
-            ) {
-                if (ch.isWhitespace()) fallback = index + 1
-                if (isStreamFreezeChar(ch)) boundary = index + 1
-            }
             if (ch == '\n') {
                 var end = index + 1
                 while (end < scanEnd && text[end] == '\n') end += 1
@@ -1550,9 +1627,64 @@ class MainActivity : AppCompatActivity() {
                 index += 1
             }
         }
-        if (boundary > frozenEnd) return boundary
-        if (fallback > frozenEnd && text.length - frozenEnd > streamTailMaxChars * 2) return fallback
-        return frozenEnd
+        return boundary
+    }
+
+    private fun buildStreamDisplayMapping(text: String, rawEndExclusive: Int): StreamDisplayMapping {
+        val rawLimit = rawEndExclusive.coerceIn(0, text.length)
+        val rendered = StringBuilder(rawLimit)
+        val rawEnds = ArrayList<Int>(rawLimit)
+        val plainAfterRaw = BooleanArray(rawLimit + 1)
+        var mode = StreamMode.PLAIN
+        var specialStart = -1
+        plainAfterRaw[0] = true
+        fun append(ch: Char, rawIndex: Int) {
+            rendered.append(ch)
+            rawEnds.add(rawIndex + 1)
+        }
+        for (index in 0 until rawLimit) {
+            val ch = text[index]
+            when {
+                mode == StreamMode.PLAIN && (ch == '"' || ch == '\uFF02') -> {
+                    mode = StreamMode.DOUBLE_QUOTE
+                    specialStart = rendered.length
+                    append(ch, index)
+                }
+                mode == StreamMode.DOUBLE_QUOTE &&
+                    (ch == '"' || ch == '\uFF02' || ch == '\u201C' || ch == '\u201D') -> {
+                    append(ch, index)
+                    mode = StreamMode.PLAIN
+                    specialStart = -1
+                }
+                mode == StreamMode.PLAIN && ch == '\u201C' -> {
+                    mode = StreamMode.CHINESE_QUOTE
+                    specialStart = rendered.length
+                    append(ch, index)
+                }
+                mode == StreamMode.CHINESE_QUOTE &&
+                    (ch == '\u201D' || ch == '"' || ch == '\uFF02' || ch == '\u201C') -> {
+                    append(ch, index)
+                    mode = StreamMode.PLAIN
+                    specialStart = -1
+                }
+                mode == StreamMode.PLAIN && (ch == '*' || ch == '\uFF0A') -> {
+                    mode = StreamMode.STAR
+                    specialStart = rendered.length
+                    append(ch, index)
+                }
+                mode == StreamMode.STAR && (ch == '*' || ch == '\uFF0A') -> {
+                    if (specialStart in 0 until rendered.length) {
+                        rendered.deleteCharAt(specialStart)
+                        rawEnds.removeAt(specialStart)
+                    }
+                    mode = StreamMode.PLAIN
+                    specialStart = -1
+                }
+                else -> append(ch, index)
+            }
+            plainAfterRaw[index + 1] = mode == StreamMode.PLAIN
+        }
+        return StreamDisplayMapping(rendered.toString(), rawEnds.toIntArray(), plainAfterRaw)
     }
 
     private fun nextStreamMode(mode: StreamMode, ch: Char): StreamMode {
@@ -2534,20 +2666,46 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
-    private fun animateContentSettled(view: View) {
+    private fun animateContentSettled(messageId: String, view: View) {
         view.animate().cancel()
         view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        view.alpha = 0.68f
-        view.scaleX = 0.998f
-        view.scaleY = 0.998f
+        view.alpha = 0.82f
+        view.scaleX = 0.999f
+        view.scaleY = 0.999f
         view.animate()
             .alpha(1f)
             .scaleX(1f)
             .scaleY(1f)
-            .setDuration(420)
+            .setDuration(520)
             .setInterpolator(entranceInterpolator)
             .withEndAction { view.setLayerType(View.LAYER_TYPE_NONE, null) }
             .start()
+        messageCardViews[messageId]?.let { animateMessageFrameSettled(it) }
+    }
+
+    private fun animateMessageFrameSettled(card: View) {
+        val overlay = rounded(Color.rgb(96, 165, 250), dp(14), dp(1), color(R.color.chat_accent_blue))
+        card.foreground = overlay
+        card.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        ValueAnimator.ofInt(54, 0).apply {
+            duration = 680L
+            interpolator = entranceInterpolator
+            addUpdateListener { animation ->
+                overlay.alpha = animation.animatedValue as Int
+                card.invalidate()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    card.foreground = null
+                    card.setLayerType(View.LAYER_TYPE_NONE, null)
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    card.foreground = null
+                    card.setLayerType(View.LAYER_TYPE_NONE, null)
+                }
+            })
+        }.start()
     }
 
     private fun messageHeader(message: ChatMessage, index: Int): View {
@@ -3918,7 +4076,11 @@ class MainActivity : AppCompatActivity() {
         var prefixRaw: String = "",
         var tailRaw: String = "",
         var prefixFormatter: StreamFormatState? = null,
-        var tailFormatter: StreamFormatState? = null
+        var tailFormatter: StreamFormatState? = null,
+        var freezeScanWidth: Int = -1,
+        var freezeScanFrozenEnd: Int = -1,
+        var freezeScanTextLength: Int = 0,
+        var freezeScanBoundary: Int = 0
     ) {
         fun reset() {
             frozenRawLength = 0
@@ -3926,6 +4088,14 @@ class MainActivity : AppCompatActivity() {
             tailRaw = ""
             prefixFormatter = null
             tailFormatter = null
+            clearFreezeScanCache()
+        }
+
+        fun clearFreezeScanCache() {
+            freezeScanWidth = -1
+            freezeScanFrozenEnd = -1
+            freezeScanTextLength = 0
+            freezeScanBoundary = 0
         }
     }
 
@@ -3945,6 +4115,13 @@ class MainActivity : AppCompatActivity() {
             textPaint.density = resources.displayMetrics.density
             cursorPaint.color = ContextCompat.getColor(context, R.color.chat_accent_blue)
         }
+
+        var showCursor: Boolean = true
+            set(value) {
+                if (field == value) return
+                field = value
+                invalidate()
+            }
 
         var typeface: Typeface?
             get() = textPaint.typeface
@@ -4038,12 +4215,13 @@ class MainActivity : AppCompatActivity() {
             layout.draw(canvas)
             drawCursor(canvas, layout, contentWidth)
             canvas.restore()
-            if (isShown && ViewCompat.isAttachedToWindow(this)) {
+            if (showCursor && isShown && ViewCompat.isAttachedToWindow(this)) {
                 postInvalidateDelayed(cursorBlinkMs)
             }
         }
 
         private fun drawCursor(canvas: Canvas, layout: StaticLayout, contentWidth: Int) {
+            if (!showCursor) return
             if ((android.os.SystemClock.uptimeMillis() / cursorBlinkMs) % 2L != 0L) return
             val line = (layout.lineCount - 1).coerceAtLeast(0)
             val x = (layout.getLineRight(line) + cursorGap)
@@ -4127,6 +4305,32 @@ class MainActivity : AppCompatActivity() {
         val changedStart: Int,
         val changedEnd: Int
     )
+
+    private data class StreamDisplayMapping(
+        val text: String,
+        val rawEnds: IntArray,
+        val plainAfterRaw: BooleanArray
+    ) {
+        fun isPlainAt(rawEnd: Int): Boolean {
+            return rawEnd in plainAfterRaw.indices && plainAfterRaw[rawEnd]
+        }
+
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (javaClass != other?.javaClass) return false
+            other as StreamDisplayMapping
+            return text == other.text &&
+                rawEnds.contentEquals(other.rawEnds) &&
+                plainAfterRaw.contentEquals(other.plainAfterRaw)
+        }
+
+        override fun hashCode(): Int {
+            var result = text.hashCode()
+            result = 31 * result + rawEnds.contentHashCode()
+            result = 31 * result + plainAfterRaw.contentHashCode()
+            return result
+        }
+    }
 
     private data class StreamBodyMeasureState(
         var width: Int = 0,
