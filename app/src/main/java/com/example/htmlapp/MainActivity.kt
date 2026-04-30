@@ -1190,7 +1190,7 @@ class MainActivity : AppCompatActivity() {
         val draft = if (editingMessageId == message.id) editingMessageDraft else message.content
         val host = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
+            setPadding(dp(2), dp(6), dp(2), dp(6))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1429,7 +1429,12 @@ class MainActivity : AppCompatActivity() {
         if (oldHeight > 0 && oldWidth > 0) {
             pinBodyHeight(views.host, oldHeight)
         }
-        val renderUpdate = renderStreamingBodySegments(messageId, views, rawContent)
+        val renderUpdate = renderStreamingBodySegments(
+            messageId,
+            views,
+            rawContent,
+            unifiedLayout = shouldUseUnifiedStreamLayout(messageId)
+        )
         if (oldHeight <= 0 || oldWidth <= 0) {
             ensureBodyWrapContent(views.host)
             return true
@@ -1462,7 +1467,16 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    private fun renderStreamingBodySegments(messageId: String, views: StreamBodyViews, rawContent: String): StreamSegmentUpdate {
+    private fun shouldUseUnifiedStreamLayout(messageId: String): Boolean {
+        return streamLiveModeNow || isStreamTargetVisible(messageId)
+    }
+
+    private fun renderStreamingBodySegments(
+        messageId: String,
+        views: StreamBodyViews,
+        rawContent: String,
+        unifiedLayout: Boolean
+    ): StreamSegmentUpdate {
         val segment = messageStreamSegments.getOrPut(messageId) { StreamTextSegmentState() }
         if (rawContent.length < segment.frozenRawLength ||
             segment.prefixRaw.isNotEmpty() && !rawContent.startsWith(segment.prefixRaw)
@@ -1470,8 +1484,20 @@ class MainActivity : AppCompatActivity() {
             segment.reset()
         }
         var heightMayHaveChanged = false
-        val nextFreezeEnd = findStreamFreezeBoundary(rawContent, segment.frozenRawLength)
-        if (nextFreezeEnd > segment.frozenRawLength) {
+        val nextFreezeEnd = if (unifiedLayout) {
+            segment.frozenRawLength
+        } else {
+            findStreamFreezeBoundary(rawContent, segment.frozenRawLength)
+        }
+        if (unifiedLayout && (segment.frozenRawLength > 0 || segment.prefixRaw.isNotEmpty())) {
+            segment.reset()
+            if (views.prefix.visibility != View.GONE || views.prefix.text.isNotEmpty()) {
+                views.prefix.text = ""
+                views.prefix.visibility = View.GONE
+                views.invalidatePrefixMeasure()
+                heightMayHaveChanged = true
+            }
+        } else if (nextFreezeEnd > segment.frozenRawLength) {
             val prefixRaw = rawContent.substring(0, nextFreezeEnd)
             if (prefixRaw != segment.prefixRaw) {
                 views.prefix.text = renderStreamPrefix(segment, prefixRaw)
@@ -1523,6 +1549,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun findStreamFreezeBoundary(text: String, frozenEnd: Int): Int {
+        if (text.length - frozenEnd <= streamTailMaxChars) return frozenEnd
+        val scanEnd = (text.length - streamTailTargetChars).coerceAtLeast(frozenEnd)
+        var boundary = frozenEnd
+        var fallback = frozenEnd
+        var mode = StreamMode.PLAIN
+        var index = frozenEnd.coerceIn(0, scanEnd)
+        while (index < scanEnd) {
+            val ch = text[index]
+            mode = nextStreamMode(mode, ch)
+            if (index + 1 > frozenEnd &&
+                index + 1 >= streamFrozenPrefixMinChars &&
+                mode == StreamMode.PLAIN
+            ) {
+                if (ch.isWhitespace()) fallback = index + 1
+                if (isStreamFreezeChar(ch)) boundary = index + 1
+            }
+            if (ch == '\n') {
+                var end = index + 1
+                while (end < scanEnd && text[end] == '\n') end += 1
+                if (end > frozenEnd && end >= streamFrozenPrefixMinChars && mode == StreamMode.PLAIN) {
+                    boundary = end
+                }
+                index = end
+            } else {
+                index += 1
+            }
+        }
+        if (boundary > frozenEnd) return boundary
+        if (fallback > frozenEnd && text.length - frozenEnd > streamTailMaxChars * 2) return fallback
         return frozenEnd
     }
 
@@ -2309,7 +2364,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun restoreScrollAnchorAfterEdit(anchor: ScrollAnchor) {
         val token = ++editScrollRestoreToken
-        val delays = longArrayOf(0L, 32L, 96L, 180L, 320L)
+        val delays = longArrayOf(0L, 32L, 96L, 180L, 320L, 520L, 760L)
         delays.forEach { delay ->
             mainHandler.postDelayed({
                 if (token != editScrollRestoreToken || userTouchingMessages) return@postDelayed
@@ -2492,14 +2547,14 @@ class MainActivity : AppCompatActivity() {
     private fun animateEditCardTransition(view: View) {
         view.animate().cancel()
         view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        view.alpha = 0.9f
+        view.alpha = 0.78f
         view.scaleX = 0.998f
         view.scaleY = 0.998f
         view.animate()
             .alpha(1f)
             .scaleX(1f)
             .scaleY(1f)
-            .setDuration(240)
+            .setDuration(300)
             .setInterpolator(entranceInterpolator)
             .withEndAction { view.setLayerType(View.LAYER_TYPE_NONE, null) }
             .start()
@@ -2508,10 +2563,14 @@ class MainActivity : AppCompatActivity() {
     private fun animateContentSettled(view: View) {
         view.animate().cancel()
         view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        view.alpha = 0.92f
+        view.alpha = 0.68f
+        view.scaleX = 0.998f
+        view.scaleY = 0.998f
         view.animate()
             .alpha(1f)
-            .setDuration(260)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(420)
             .setInterpolator(entranceInterpolator)
             .withEndAction { view.setLayerType(View.LAYER_TYPE_NONE, null) }
             .start()
