@@ -129,6 +129,9 @@ class MainActivity : AppCompatActivity() {
     private var editingFloatingButton: TextView? = null
     private var baseMessagesBottomPadding = 0
     private var editScrollRestoreToken = 0
+    private var sendButtonVisualSending = false
+    private var sendButtonAnimationToken = 0
+    private val recentlyInsertedMessageIds = mutableSetOf<String>()
 
     private val defaultRenderMessageLimit = 80
     private val loadOlderMessageBatch = 40
@@ -218,6 +221,7 @@ class MainActivity : AppCompatActivity() {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     messageTouchToken++
+                    editScrollRestoreToken++
                     userTouchingMessages = true
                     followBottom = isNearBottom()
                     updateStreamDistanceModes()
@@ -369,7 +373,6 @@ class MainActivity : AppCompatActivity() {
         backdrop.setOnClickListener { setSidebarVisible(false) }
         sendButton.setOnClickListener {
             if (isSending) {
-                animateSendAction()
                 stopSending()
             } else {
                 submitMessage()
@@ -630,24 +633,22 @@ class MainActivity : AppCompatActivity() {
         if (text.isEmpty()) {
             when (last?.role) {
                 "user" -> {
-                    animateSendAction()
                     followBottom = true
                     requestAssistant()
                 }
                 "assistant" -> {
-                    animateSendAction()
                     followBottom = true
                     requestAssistant(continueMessage = last)
                 }
             }
             return
         }
-        animateSendAction()
-        session.history.add(ChatMessage(role = "user", content = text, modelName = preset?.name.orEmpty()))
+        val userMessage = ChatMessage(role = "user", content = text, modelName = preset?.name.orEmpty())
+        session.history.add(userMessage)
+        recentlyInsertedMessageIds.add(userMessage.id)
         followBottom = true
         inputMessage.setText("")
         repository.save(state)
-        renderMessages(scrollToBottom = true)
         renderSessions()
         requestAssistant()
     }
@@ -657,6 +658,7 @@ class MainActivity : AppCompatActivity() {
         val preset = state.currentPreset()
         val assistant = continueMessage ?: ChatMessage(role = "assistant", content = "", modelName = preset?.name.orEmpty()).also {
             session.history.add(it)
+            recentlyInsertedMessageIds.add(it.id)
         }
         val continuationPrefill = continueMessage?.content.orEmpty()
         val promptForRegex = state.promptFor(session).copy()
@@ -782,36 +784,56 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setSendingUi(sending: Boolean) {
+        val visualChanged = sendButtonVisualSending != sending
         isSending = sending
+        sendButtonVisualSending = sending
+        if (visualChanged) {
+            animateSendButtonState(sending)
+        } else {
+            applySendButtonVisual(sending)
+            if (!sending) settleSendButton()
+        }
+    }
+
+    private fun applySendButtonVisual(sending: Boolean) {
         sendButton.text = if (sending) "停止" else getString(R.string.action_send)
         sendButton.background = if (sending) {
             roundedGradient(color(R.color.chat_danger), Color.rgb(220, 38, 38), dp(8))
         } else {
             roundedGradient(color(R.color.chat_accent_blue), Color.rgb(59, 130, 246), dp(8))
         }
-        if (!sending) {
-            settleSendButton()
-        }
     }
 
-    private fun animateSendAction() {
+    private fun animateSendButtonState(sending: Boolean) {
+        val token = ++sendButtonAnimationToken
         sendButton.animate().cancel()
+        sendButton.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         sendButton.pivotX = sendButton.width / 2f
         sendButton.pivotY = sendButton.height / 2f
         sendButton.animate()
-            .scaleX(0.92f)
-            .scaleY(0.92f)
+            .scaleX(0.94f)
+            .scaleY(0.94f)
             .translationY(dp(2).toFloat())
-            .setDuration(110)
+            .alpha(0.84f)
+            .setDuration(100)
             .setInterpolator(softInterpolator)
             .withEndAction {
-                sendButton.animate()
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .translationY(0f)
-                    .setDuration(240)
-                    .setInterpolator(entranceInterpolator)
-                    .start()
+                if (token == sendButtonAnimationToken) {
+                    applySendButtonVisual(sending)
+                    sendButton.animate()
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .translationY(0f)
+                        .alpha(1f)
+                        .setDuration(260)
+                        .setInterpolator(entranceInterpolator)
+                        .withEndAction {
+                            if (token == sendButtonAnimationToken) {
+                                sendButton.setLayerType(View.LAYER_TYPE_NONE, null)
+                            }
+                        }
+                        .start()
+                }
             }
             .start()
     }
@@ -1019,6 +1041,13 @@ class MainActivity : AppCompatActivity() {
             return index + if (hiddenCount > 0) 1 else 0
         }
 
+        fun notifyMessageChanged(messageId: String): Boolean {
+            val position = positionOfMessage(messageId)
+            if (position == RecyclerView.NO_POSITION) return false
+            notifyItemChanged(position)
+            return true
+        }
+
         override fun getItemViewType(position: Int): Int {
             return if (hiddenCount > 0 && position == 0) viewTypeLoadMore else viewTypeMessage
         }
@@ -1111,6 +1140,9 @@ class MainActivity : AppCompatActivity() {
             contentColumn.addView(messageFooter(message))
         }
         card.addView(contentColumn)
+        if (recentlyInsertedMessageIds.remove(message.id)) {
+            card.post { animateMessageEntrance(card) }
+        }
         return card
     }
 
@@ -1173,7 +1205,13 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
+            setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus) {
+                    setSelection(text?.length ?: 0)
+                }
+            }
         }
+        installNestedEditScroll(edit)
         edit.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -1183,22 +1221,12 @@ class MainActivity : AppCompatActivity() {
         })
         host.addView(edit)
         host.alpha = 0f
-        host.translationY = dp(6).toFloat()
         host.animate()
             .alpha(1f)
-            .translationY(0f)
-            .setDuration(260)
+            .setDuration(180)
             .setInterpolator(entranceInterpolator)
             .start()
         editingMessageEditor = edit
-        edit.post {
-            if (editingMessageId == message.id) {
-                edit.requestFocus()
-                edit.setSelection(edit.text?.length ?: 0)
-                val inputMethod = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                inputMethod.showSoftInput(edit, InputMethodManager.SHOW_IMPLICIT)
-            }
-        }
         messageRenderedContent[message.id] = draft
         return StreamBodyViews(
             host = host,
@@ -2284,7 +2312,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun restoreScrollAnchorAfterEdit(anchor: ScrollAnchor) {
         val token = ++editScrollRestoreToken
-        val delays = longArrayOf(0L, 80L, 180L, 320L, 520L, 760L)
+        val delays = longArrayOf(0L, 32L, 96L, 180L)
         delays.forEach { delay ->
             mainHandler.postDelayed({
                 if (token != editScrollRestoreToken || userTouchingMessages) return@postDelayed
@@ -2417,6 +2445,24 @@ class MainActivity : AppCompatActivity() {
             .start()
     }
 
+    private fun animateMessageEntrance(view: View) {
+        view.animate().cancel()
+        view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        view.alpha = 0f
+        view.scaleX = 0.995f
+        view.scaleY = 0.995f
+        view.translationY = dp(14).toFloat()
+        view.animate()
+            .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .translationY(0f)
+            .setDuration(340)
+            .setInterpolator(entranceInterpolator)
+            .withEndAction { view.setLayerType(View.LAYER_TYPE_NONE, null) }
+            .start()
+    }
+
     private fun messageHeader(message: ChatMessage, index: Int): View {
         val roleLabel = if (message.role == "assistant") "ASSISTANT" else "USER"
         val modelLabel = message.modelName.ifBlank { state.currentPreset()?.name.orEmpty() }
@@ -2479,26 +2525,30 @@ class MainActivity : AppCompatActivity() {
             finishEditingMessage()
             return
         }
-        if (editingMessageId != null) {
-            finishEditingMessage()
-        }
-        editingMessageEditor?.let { editingMessageDraft = it.text.toString() }
         val anchor = captureScrollAnchor()
+        messagesScroll.stopScroll()
+        val previousEditingId = editingMessageId
+        if (previousEditingId != null) {
+            commitEditingDraft(previousEditingId)
+        }
         followBottom = false
         editingMessageId = message.id
         editingMessageDraft = message.content
         editingMessageEditor = null
         setEditingFloatingButtonVisible(true)
-        renderMessages(scrollToBottom = false)
-        anchor?.let { restoreScrollAnchorAfterEdit(it) }
+        refreshMessagesPreservingScroll(
+            listOfNotNull(previousEditingId, message.id),
+            anchor,
+            editMode = true
+        )
     }
 
     private fun finishEditingMessage() {
         val id = editingMessageId ?: return
-        val text = editingMessageEditor?.text?.toString() ?: editingMessageDraft
         val anchor = captureScrollAnchor()
+        messagesScroll.stopScroll()
         followBottom = false
-        state.activeSession()?.history?.firstOrNull { it.id == id }?.content = text
+        commitEditingDraft(id)
         editingMessageId = null
         editingMessageDraft = ""
         editingMessageEditor = null
@@ -2506,9 +2556,31 @@ class MainActivity : AppCompatActivity() {
         inputMethod.hideSoftInputFromWindow(root.windowToken, 0)
         repository.save(state)
         setEditingFloatingButtonVisible(false)
-        renderMessages(scrollToBottom = false)
-        anchor?.let { restoreScrollAnchorAfterEdit(it) }
+        refreshMessagesPreservingScroll(listOf(id), anchor, editMode = true)
         renderSessions()
+    }
+
+    private fun commitEditingDraft(messageId: String) {
+        val text = editingMessageEditor?.text?.toString() ?: editingMessageDraft
+        state.activeSession()?.history?.firstOrNull { it.id == messageId }?.content = text
+        repository.save(state)
+    }
+
+    private fun refreshMessagesPreservingScroll(
+        messageIds: List<String>,
+        anchor: ScrollAnchor?,
+        editMode: Boolean = false
+    ) {
+        var usedPartialRefresh = true
+        messageIds.distinct().forEach { id ->
+            usedPartialRefresh = messagesAdapter.notifyMessageChanged(id) && usedPartialRefresh
+        }
+        if (!usedPartialRefresh) {
+            renderMessages(scrollToBottom = false)
+        }
+        if (anchor != null) {
+            if (editMode) restoreScrollAnchorAfterEdit(anchor) else restoreScrollAnchorSoon(anchor)
+        }
     }
 
     private fun setEditingFloatingButtonVisible(visible: Boolean) {
