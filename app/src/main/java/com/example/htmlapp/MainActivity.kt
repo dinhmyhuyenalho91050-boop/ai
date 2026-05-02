@@ -90,8 +90,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var inputMessage: EditText
     private lateinit var sendButton: TextView
     private lateinit var composer: View
+    private lateinit var modelSelector: LinearLayout
+    private lateinit var inputRow: LinearLayout
     private lateinit var backdrop: View
     private lateinit var sidebar: LinearLayout
+    private lateinit var sidebarModelSelector: LinearLayout
+    private lateinit var newChatButton: TextView
     private lateinit var sessionList: LinearLayout
     private lateinit var modelTabs: List<TextView>
     private lateinit var sidebarModelTabs: List<TextView>
@@ -472,8 +476,12 @@ class MainActivity : AppCompatActivity() {
         inputMessage = findViewById(R.id.input_message)
         sendButton = findViewById(R.id.btn_send)
         composer = findViewById(R.id.composer)
+        modelSelector = findViewById(R.id.model_selector)
+        inputRow = findViewById(R.id.input_row)
         backdrop = findViewById(R.id.backdrop)
         sidebar = findViewById(R.id.sidebar)
+        sidebarModelSelector = findViewById(R.id.sidebar_model_selector)
+        newChatButton = findViewById(R.id.btn_new_chat)
         sessionList = findViewById(R.id.session_list)
         modelTabs = listOf(findViewById(R.id.model_gpt), findViewById(R.id.model_deepseek))
         sidebarModelTabs = listOf(
@@ -523,7 +531,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupClicks() {
         findViewById<TextView>(R.id.btn_sessions).setOnClickListener { setSidebarVisible(true) }
         findViewById<TextView>(R.id.btn_settings).setOnClickListener { showSettingsDialog() }
-        findViewById<TextView>(R.id.btn_new_chat).setOnClickListener { showPromptSelector() }
+        newChatButton.setOnClickListener { showPromptSelector() }
         backdrop.setOnClickListener { setSidebarVisible(false) }
         sendButton.setOnClickListener {
             if (isSending) {
@@ -766,6 +774,23 @@ class MainActivity : AppCompatActivity() {
     private fun renderModelTabs() {
         val enabled = state.enabledPresets().take(2)
         state.currentModelIndex = state.currentModelIndex.coerceIn(0, max(0, enabled.size - 1))
+        val showSelector = enabled.size > 1
+        modelSelector.visibility = if (showSelector) View.VISIBLE else View.GONE
+        sidebarModelSelector.visibility = if (showSelector) View.VISIBLE else View.GONE
+        (inputRow.layoutParams as? LinearLayout.LayoutParams)?.let { params ->
+            val top = if (showSelector) dp(11) else 0
+            if (params.topMargin != top) {
+                params.topMargin = top
+                inputRow.layoutParams = params
+            }
+        }
+        (newChatButton.layoutParams as? LinearLayout.LayoutParams)?.let { params ->
+            val start = if (showSelector) dp(8) else 0
+            if (params.marginStart != start) {
+                params.marginStart = start
+                newChatButton.layoutParams = params
+            }
+        }
         listOf(modelTabs, sidebarModelTabs).forEach { tabs ->
             tabs.forEachIndexed { index, tab ->
                 val preset = enabled.getOrNull(index)
