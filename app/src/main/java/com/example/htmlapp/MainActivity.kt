@@ -138,6 +138,8 @@ class MainActivity : AppCompatActivity() {
     private var editingMessageEditor: EditText? = null
     private var editingFloatingButton: TextView? = null
     private var baseMessagesBottomPadding = 0
+    private var currentImeBottom = 0
+    private var currentImeVisible = false
     private var editScrollRestoreToken = 0
     private var sendButtonVisualSending = false
     private var sendButtonAnimationToken = 0
@@ -489,6 +491,8 @@ class MainActivity : AppCompatActivity() {
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            currentImeBottom = ime.bottom
+            currentImeVisible = insets.isVisible(WindowInsetsCompat.Type.ime()) && ime.bottom > dp(80)
             view.setPadding(
                 systemBars.left,
                 systemBars.top,
@@ -2755,6 +2759,10 @@ class MainActivity : AppCompatActivity() {
         delays.forEach { delay ->
             mainHandler.postDelayed({
                 if (token != editScrollRestoreToken || userTouchingMessages) return@postDelayed
+                if (shouldSettleBottomForImpossibleEditAnchor(anchor)) {
+                    settleBottomAfterEdit()
+                    return@postDelayed
+                }
                 keepProgrammaticScrollActive()
                 followBottom = false
                 messagesLayoutManager.scrollToPositionWithOffset(anchor.position, anchor.offset)
@@ -2766,6 +2774,20 @@ class MainActivity : AppCompatActivity() {
                         messagesScroll.scrollBy(0, delta)
                     }
                 }
+                updateStreamDistanceModes()
+            }, delay)
+        }
+    }
+
+    private fun settleBottomAfterEdit() {
+        val token = ++editScrollRestoreToken
+        val delays = longArrayOf(0L, 32L, 96L, 180L, 320L, 520L)
+        delays.forEach { delay ->
+            mainHandler.postDelayed({
+                if (token != editScrollRestoreToken || userTouchingMessages) return@postDelayed
+                followBottom = true
+                keepProgrammaticScrollActive()
+                scrollToBottomNow()
                 updateStreamDistanceModes()
             }, delay)
         }
@@ -3118,10 +3140,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun finishEditingMessage() {
         val id = editingMessageId ?: return
-        val anchor = captureScrollAnchor()
+        val capturedAnchor = captureScrollAnchor()
+        val finishAtBottom = shouldSettleBottomForImpossibleEditAnchor(capturedAnchor)
+        val anchor = if (finishAtBottom) null else capturedAnchor
         lockEditExitHeight(id)
         messagesScroll.stopScroll()
-        followBottom = false
+        followBottom = finishAtBottom
         commitEditingDraft(id)
         editTransitionMessageIds.add(id)
         editingMessageId = null
@@ -3132,7 +3156,24 @@ class MainActivity : AppCompatActivity() {
         repository.save(state)
         setEditingFloatingButtonVisible(false)
         refreshMessagesPreservingScroll(listOf(id), anchor, editMode = true)
+        if (finishAtBottom) settleBottomAfterEdit()
         renderSessions()
+    }
+
+    private fun shouldSettleBottomForImpossibleEditAnchor(anchor: ScrollAnchor?): Boolean {
+        anchor ?: return false
+        val maxOffsetNow = maxScrollOffset()
+        if (maxOffsetNow <= 0) return true
+        val expectedKeyboardRelease = if (currentImeVisible && currentImeBottom > 0) currentImeBottom else 0
+        val maxOffsetAfterKeyboard = (maxOffsetNow - expectedKeyboardRelease).coerceAtLeast(0)
+        return anchor.absoluteOffset >= maxOffsetAfterKeyboard - dp(24)
+    }
+
+    private fun maxScrollOffset(): Int {
+        val range = messagesScroll.computeVerticalScrollRange()
+        val extent = messagesScroll.computeVerticalScrollExtent()
+        if (range <= 0 || extent <= 0) return 0
+        return (range - extent).coerceAtLeast(0)
     }
 
     private fun lockEditExitHeight(messageId: String) {
