@@ -23,4 +23,5 @@
     <color name="chat_separator">#10FFFFFF</color>
     <color name="chat_thinking_bg">#1660A5FA</color>
     <color name="chat_thinking_border">#5860A5FA</color>
+    <color name="splash_bg">#F8E5F1</color>
 </resources>

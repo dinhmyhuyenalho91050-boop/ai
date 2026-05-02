@@ -7,11 +7,14 @@ import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.RecordingCanvas
 import android.graphics.RenderEffect
 import android.graphics.RenderNode
@@ -162,6 +165,8 @@ class MainActivity : AppCompatActivity() {
     private var uiPerformanceHintTargetNs = 0L
     private var uiPerformanceHintPowerEfficient: Boolean? = null
     private var streamBottomFollowToken = 0
+    private var launchSplashOverlay: LaunchSplashView? = null
+    private var launchSplashStartedAt = 0L
 
     private val defaultRenderMessageLimit = 80
     private val loadOlderMessageBatch = 40
@@ -221,10 +226,11 @@ class MainActivity : AppCompatActivity() {
         window.navigationBarColor = Color.TRANSPARENT
         setContentView(R.layout.activity_main)
 
+        bindViews()
+        installLaunchSplashOverlay()
         repository = NativeChatRepository(applicationContext)
         state = repository.load()
         registerImportLauncher()
-        bindViews()
         setupDevicePerformanceControls()
         setupEdgeToEdge()
         setupTitleGradient()
@@ -234,6 +240,7 @@ class MainActivity : AppCompatActivity() {
         setupBackNavigation()
         renderAll()
         hideSystemBars()
+        dismissLaunchSplashOverlay()
         migrateLegacyWebStateIfNeeded()
     }
 
@@ -246,7 +253,62 @@ class MainActivity : AppCompatActivity() {
         aiClient.abort()
         uiPerformanceHintSession?.close()
         uiPerformanceHintSession = null
+        launchSplashOverlay?.release()
+        launchSplashOverlay = null
         super.onDestroy()
+    }
+
+    private fun installLaunchSplashOverlay() {
+        launchSplashStartedAt = android.os.SystemClock.uptimeMillis()
+        val splash = LaunchSplashView(this).apply {
+            setBackgroundColor(color(R.color.splash_bg))
+            alpha = 1f
+            scaleX = 1.018f
+            scaleY = 1.018f
+            isClickable = true
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        }
+        launchSplashOverlay = splash
+        addContentView(
+            splash,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        splash.post {
+            if (launchSplashOverlay !== splash) return@post
+            splash.animate()
+                .scaleX(1f)
+                .scaleY(1f)
+                .setDuration(720L)
+                .setInterpolator(softInterpolator)
+                .start()
+        }
+    }
+
+    private fun dismissLaunchSplashOverlay() {
+        val splash = launchSplashOverlay ?: return
+        val elapsed = android.os.SystemClock.uptimeMillis() - launchSplashStartedAt
+        val delay = (560L - elapsed).coerceAtLeast(0L)
+        splash.postDelayed({
+            if (launchSplashOverlay !== splash) return@postDelayed
+            splash.animate().cancel()
+            splash.animate()
+                .alpha(0f)
+                .scaleX(1.045f)
+                .scaleY(1.045f)
+                .setDuration(520L)
+                .setInterpolator(softInterpolator)
+                .withEndAction {
+                    if (launchSplashOverlay === splash) {
+                        launchSplashOverlay = null
+                        (splash.parent as? ViewGroup)?.removeView(splash)
+                        splash.release()
+                    }
+                }
+                .start()
+        }, delay)
     }
 
     @SuppressLint("NewApi")
@@ -4554,6 +4616,38 @@ class MainActivity : AppCompatActivity() {
             freezeScanFrozenEnd = -1
             freezeScanTextLength = 0
             freezeScanBoundary = 0
+        }
+    }
+
+    private class LaunchSplashView(context: Context) : View(context) {
+        private var bitmap: Bitmap? = BitmapFactory.decodeResource(resources, R.drawable.splash_launch)
+        private val destination = RectF()
+        private val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val image = bitmap ?: return
+            if (width <= 0 || height <= 0 || image.width <= 0 || image.height <= 0) return
+            val scale = max(
+                width / image.width.toFloat(),
+                height / image.height.toFloat()
+            )
+            val drawWidth = image.width * scale
+            val drawHeight = image.height * scale
+            val left = (width - drawWidth) * 0.5f
+            val top = height - drawHeight
+            destination.set(left, top, left + drawWidth, top + drawHeight)
+            canvas.drawBitmap(image, null, destination, imagePaint)
+        }
+
+        fun release() {
+            bitmap?.recycle()
+            bitmap = null
+        }
+
+        override fun onDetachedFromWindow() {
+            release()
+            super.onDetachedFromWindow()
         }
     }
 
