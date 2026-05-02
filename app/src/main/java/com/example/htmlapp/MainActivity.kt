@@ -166,7 +166,6 @@ class MainActivity : AppCompatActivity() {
     private var uiPerformanceHintPowerEfficient: Boolean? = null
     private var streamBottomFollowToken = 0
     private var launchSplashOverlay: LaunchSplashView? = null
-    private var launchSplashStartedAt = 0L
 
     private val defaultRenderMessageLimit = 80
     private val loadOlderMessageBatch = 40
@@ -259,12 +258,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun installLaunchSplashOverlay() {
-        launchSplashStartedAt = android.os.SystemClock.uptimeMillis()
         val splash = LaunchSplashView(this).apply {
             setBackgroundColor(color(R.color.splash_bg))
             alpha = 1f
-            scaleX = 1.018f
-            scaleY = 1.018f
             isClickable = true
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         }
@@ -276,39 +272,16 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
-        splash.post {
-            if (launchSplashOverlay !== splash) return@post
-            splash.animate()
-                .scaleX(1f)
-                .scaleY(1f)
-                .setDuration(720L)
-                .setInterpolator(softInterpolator)
-                .start()
-        }
     }
 
     private fun dismissLaunchSplashOverlay() {
         val splash = launchSplashOverlay ?: return
-        val elapsed = android.os.SystemClock.uptimeMillis() - launchSplashStartedAt
-        val delay = (560L - elapsed).coerceAtLeast(0L)
-        splash.postDelayed({
-            if (launchSplashOverlay !== splash) return@postDelayed
-            splash.animate().cancel()
-            splash.animate()
-                .alpha(0f)
-                .scaleX(1.045f)
-                .scaleY(1.045f)
-                .setDuration(520L)
-                .setInterpolator(softInterpolator)
-                .withEndAction {
-                    if (launchSplashOverlay === splash) {
-                        launchSplashOverlay = null
-                        (splash.parent as? ViewGroup)?.removeView(splash)
-                        splash.release()
-                    }
-                }
-                .start()
-        }, delay)
+        splash.post {
+            if (launchSplashOverlay !== splash) return@post
+            launchSplashOverlay = null
+            (splash.parent as? ViewGroup)?.removeView(splash)
+            splash.release()
+        }
     }
 
     @SuppressLint("NewApi")
