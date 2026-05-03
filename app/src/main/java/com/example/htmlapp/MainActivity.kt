@@ -127,6 +127,7 @@ class MainActivity : AppCompatActivity() {
     private var pendingImportReplace = false
     @Volatile private var followBottom = true
     private var bottomScrollScheduled = false
+    private var bottomScrollToken = 0
     private var scrollTrackScheduled = false
     private var streamAnimatorScheduled = false
     @Volatile private var streamLiveModeNow = false
@@ -148,6 +149,7 @@ class MainActivity : AppCompatActivity() {
     private var currentImeBottom = 0
     private var currentImeVisible = false
     private var editScrollRestoreToken = 0
+    private var messageTopScrollToken = 0
     private var sendButtonVisualSending = false
     private var sendButtonAnimationToken = 0
     private val compositeEffectTokens = WeakHashMap<View, Int>()
@@ -1650,14 +1652,23 @@ class MainActivity : AppCompatActivity() {
         val bottomDistance = remainingScrollToBottom()
         val stick = shouldFollowBottomForUpdate(bottomDistance)
         updateStreamDistanceModes(bottomDistance)
-        followBottom = stick
+        val revealFinalAtTop = revealFromTopWhenStuck && final && !streaming
+        if (revealFinalAtTop && stick) {
+            cancelPendingBottomScroll()
+            followBottom = false
+        } else {
+            followBottom = stick
+        }
         val anchor = if ((streaming || final) && !stick && !userTouchingMessages) captureScrollAnchor() else null
         val bodyUpdate = updateBodyText(message, streaming, final)
         updateThinkingPanel(message)
         anchor?.let { restoreScrollAnchorSoon(it) }
+        if (revealFinalAtTop && stick) {
+            scrollMessageToTopAfterLayout(message.id)
+            return
+        }
         if (stick) {
             when {
-                revealFromTopWhenStuck && final && !streaming -> scrollMessageToTopSoon(message.id)
                 streaming -> if (bodyUpdate.heightChanged) scrollToBottomDuringStream()
                 else -> if (bodyUpdate.changed || final) scrollToBottomSoon()
             }
@@ -2764,9 +2775,16 @@ class MainActivity : AppCompatActivity() {
         followBottom = false
         streamBottomFollowToken++
         streamBottomFollowScheduled = false
-        bottomScrollScheduled = false
+        cancelPendingBottomScroll()
         lastBottomTargetY = -1
         messagesScroll.stopScroll()
+    }
+
+    private fun cancelPendingBottomScroll() {
+        bottomScrollToken++
+        bottomScrollScheduled = false
+        streamBottomFollowToken++
+        streamBottomFollowScheduled = false
     }
 
     private fun captureScrollAnchor(): ScrollAnchor? {
@@ -2866,6 +2884,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun scrollMessageToTopAfterLayout(messageId: String) {
+        if (userTouchingMessages) return
+        val token = ++messageTopScrollToken
+        val delays = longArrayOf(0L, 16L, 48L, 96L, 180L, 300L)
+        delays.forEach { delay ->
+            mainHandler.postDelayed({
+                if (token != messageTopScrollToken || userTouchingMessages) return@postDelayed
+                val position = messagesAdapter.positionOfMessage(messageId)
+                if (position == RecyclerView.NO_POSITION) return@postDelayed
+                keepProgrammaticScrollActive()
+                followBottom = false
+                messagesLayoutManager.scrollToPositionWithOffset(position, dp(8))
+                updateStreamDistanceModes()
+            }, delay)
+        }
+    }
+
     private fun scrollMessageToTopForEdit(messageId: String) {
         val token = ++editScrollRestoreToken
         messagesScroll.post {
@@ -2899,8 +2934,10 @@ class MainActivity : AppCompatActivity() {
         if (userTouchingMessages) return
         if (bottomScrollScheduled) return
         bottomScrollScheduled = true
+        val token = bottomScrollToken
         messagesScroll.post {
             bottomScrollScheduled = false
+            if (token != bottomScrollToken) return@post
             if (userTouchingMessages) return@post
             if (scrollRemainingToBottom(animated)) {
                 followBottom = true
