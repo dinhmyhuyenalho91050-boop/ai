@@ -895,7 +895,7 @@ class MainActivity : AppCompatActivity() {
         Thread {
             var lastFrameAt = 0L
             var latestContent = ""
-            var latestThinking = ""
+            var latestThinking = continuationThinking
             var latestDisplayContent = continuationPrefill
             var renderedContentLength = continuationPrefill.length
             var renderedThinkingLength = assistant.thinking.length
@@ -910,7 +910,7 @@ class MainActivity : AppCompatActivity() {
                     continuationThinking.takeIf { continueMessage != null && it.isNotBlank() }
                 ) { content, thinking ->
                     latestContent = content
-                    latestThinking = thinking
+                    latestThinking = mergeContinuationContent(continuationThinking, thinking)
                     latestDisplayContent = mergeContinuationContent(continuationPrefill, content)
                     val now = android.os.SystemClock.uptimeMillis()
                     val contentDelta = (latestDisplayContent.length - renderedContentLength).coerceAtLeast(0)
@@ -944,12 +944,13 @@ class MainActivity : AppCompatActivity() {
                     mergeContinuationContent(continuationPrefill, result.content),
                     promptForRegex
                 )
+                val finalThinking = mergeContinuationContent(continuationThinking, result.thinking)
                 mainHandler.post {
                     stoppedAssistantIds.remove(assistant.id)
                     if (activeAssistantId == assistant.id) activeAssistantId = null
                     nonStreamingAssistantIds.remove(assistant.id)
                     assistant.content = finalContent
-                    assistant.thinking = result.thinking
+                    assistant.thinking = finalThinking
                     repository.save(state)
                     setSendingUi(false)
                     if (preset?.config?.stream == true || streamTargets.containsKey(assistant.id)) {
