@@ -3649,7 +3649,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun fillGeneralPane(host: LinearLayout): () -> Boolean {
         host.addView(dialogTitle("通用设置"))
-        val orientation = selectField("屏幕方向", orientationOptions(), state.orientationMode)
+        val orientationRef = selectField("屏幕方向", orientationOptions(), state.orientationMode)
         host.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = rounded(color(R.color.chat_card), dp(12), dp(1), color(R.color.chat_border))
@@ -3658,10 +3658,10 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(14) }
-            addView(orientation.container)
+            addView(orientationRef.container)
         })
         return {
-            state.orientationMode = normalizedOrientationMode(orientation.value())
+            state.orientationMode = normalizedOrientationMode(orientationRef.value())
             true
         }
     }
