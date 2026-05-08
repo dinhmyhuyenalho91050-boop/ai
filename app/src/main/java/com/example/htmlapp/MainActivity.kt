@@ -7,6 +7,7 @@ import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -222,6 +223,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        repository = NativeChatRepository(applicationContext)
+        state = repository.load()
+        applyScreenOrientationPreference()
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
@@ -229,8 +233,6 @@ class MainActivity : AppCompatActivity() {
 
         bindViews()
         installLaunchSplashOverlay()
-        repository = NativeChatRepository(applicationContext)
-        state = repository.load()
         registerImportLauncher()
         setupDevicePerformanceControls()
         setupEdgeToEdge()
@@ -243,6 +245,23 @@ class MainActivity : AppCompatActivity() {
         hideSystemBars()
         dismissLaunchSplashOverlay()
         migrateLegacyWebStateIfNeeded()
+    }
+
+    private fun applyScreenOrientationPreference() {
+        state.orientationMode = normalizedOrientationMode(state.orientationMode)
+        requestedOrientation = when (state.orientationMode) {
+            "landscape" -> ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+            "portrait" -> ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+            else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
+    private fun normalizedOrientationMode(value: String): String {
+        return when (value.trim().lowercase(Locale.ROOT)) {
+            "landscape", "横屏", "horizontal" -> "landscape"
+            "portrait", "竖屏", "vertical" -> "portrait"
+            else -> "system"
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -397,6 +416,7 @@ class MainActivity : AppCompatActivity() {
                 runCatching {
                     repository.importBackup(state, JSONObject(text), pendingImportReplace)
                     state.ensureSession()
+                    applyScreenOrientationPreference()
                     renderAll()
                     toast("导入成功")
                 }.onFailure { toast("导入失败: ${it.message}") }
@@ -3494,7 +3514,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(18), dp(18), dp(18))
         }
-        val tabs = listOf("模型预设", "提示词", "备份")
+        val tabs = listOf("通用", "模型预设", "提示词", "备份")
         val tabViews = mutableListOf<TextView>()
         var saveCurrentPane: (() -> Boolean)? = null
 
@@ -3559,6 +3579,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 if (saveCurrentPane?.invoke() == false) return@setOnClickListener
                 repository.save(state)
+                applyScreenOrientationPreference()
                 renderAll()
                 toast("已保存")
             }
@@ -3583,8 +3604,9 @@ class MainActivity : AppCompatActivity() {
             contentHost.animate().cancel()
             contentHost.removeAllViews()
             saveCurrentPane = when (index) {
-                0 -> fillModelsPane(contentHost)
-                1 -> fillPromptsPane(contentHost)
+                0 -> fillGeneralPane(contentHost)
+                1 -> fillModelsPane(contentHost)
+                2 -> fillPromptsPane(contentHost)
                 else -> fillBackupPane(contentHost, dialog)
             }
             contentHost.alpha = 0f
@@ -3623,6 +3645,33 @@ class MainActivity : AppCompatActivity() {
                 .start()
         }
         dialog.show()
+    }
+
+    private fun fillGeneralPane(host: LinearLayout): () -> Boolean {
+        host.addView(dialogTitle("通用设置"))
+        val orientation = selectField("屏幕方向", orientationOptions(), state.orientationMode)
+        host.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(color(R.color.chat_card), dp(12), dp(1), color(R.color.chat_border))
+            setPadding(dp(14), dp(14), dp(14), 0)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(14) }
+            addView(orientation.container)
+        })
+        return {
+            state.orientationMode = normalizedOrientationMode(orientation.value())
+            true
+        }
+    }
+
+    private fun orientationOptions(): List<Pair<String, String>> {
+        return listOf(
+            "system" to "跟随系统",
+            "landscape" to "横屏",
+            "portrait" to "竖屏"
+        )
     }
 
     private fun fillModelsPane(host: LinearLayout): () -> Boolean {
@@ -3995,6 +4044,7 @@ class MainActivity : AppCompatActivity() {
                                 state = NativeChatState.defaults()
                                 state.ensureSession()
                                 repository.save(state)
+                                applyScreenOrientationPreference()
                                 dialog.dismiss()
                                 renderAll()
                                 toast("已清空")

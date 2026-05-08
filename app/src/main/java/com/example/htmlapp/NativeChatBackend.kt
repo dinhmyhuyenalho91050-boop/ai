@@ -234,7 +234,8 @@ data class NativeChatState(
     val promptPresets: MutableMap<String, PromptPreset> = linkedMapOf(),
     val sessions: MutableMap<String, ChatSession> = linkedMapOf(),
     var currentId: String? = null,
-    var currentModelIndex: Int = 0
+    var currentModelIndex: Int = 0,
+    var orientationMode: String = "system"
 ) {
     fun enabledPresets(): List<ModelPreset> = modelPresets.filter { it.enabled }
 
@@ -277,6 +278,7 @@ data class NativeChatState(
 
     fun toBackupJson(includeSessions: Boolean = true, includePresets: Boolean = true): JSONObject {
         val root = JSONObject().put("version", "9.3").put("timestamp", System.currentTimeMillis())
+            .put("orientationMode", orientationMode)
         if (includePresets) {
             val models = JSONArray()
             modelPresets.forEach { models.put(it.toJson()) }
@@ -364,6 +366,7 @@ class NativeChatRepository(private val context: Context) {
                 }
                 state.currentId = json.optString("currentId").ifBlank { null }
                 state.currentModelIndex = json.optInt("currentModelIndex", 0)
+                state.orientationMode = json.optString("orientationMode", "system")
             }
             if (sessionsFile.exists()) {
                 val sessions = JSONObject(sessionsFile.readText(Charsets.UTF_8))
@@ -392,6 +395,7 @@ class NativeChatRepository(private val context: Context) {
             .put("promptPresets", prompts)
             .put("currentId", state.currentId)
             .put("currentModelIndex", state.currentModelIndex)
+            .put("orientationMode", state.orientationMode)
 
         val sessionsJson = JSONObject()
         state.sessions.forEach { (id, session) -> sessionsJson.put(id, session.toJson()) }
@@ -418,6 +422,7 @@ class NativeChatRepository(private val context: Context) {
                 }
             }
             state.currentId = data.optString("currentId").ifBlank { null }
+            state.orientationMode = data.optString("orientationMode", state.orientationMode)
         } else {
             data.optJSONArray("modelPresets")?.let { arr ->
                 for (i in 0 until arr.length()) {
