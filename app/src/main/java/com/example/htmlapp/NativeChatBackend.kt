@@ -100,6 +100,7 @@ data class ModelConfig(
     var thinkingEffort: String = "high",
     var thinkingLevel: String = "high",
     var thinkingBudget: Int = -1,
+    var sendThinkingOnContinue: Boolean = false,
     var proxyUrl: String = "",
     var proxyPass: String = ""
 ) {
@@ -118,6 +119,7 @@ data class ModelConfig(
             .put("thinkingEffort", thinkingEffort)
             .put("thinkingLevel", thinkingLevel)
             .put("thinkingBudget", thinkingBudget)
+            .put("sendThinkingOnContinue", sendThinkingOnContinue)
             .put("proxyUrl", proxyUrl)
             .put("proxyPass", proxyPass)
     }
@@ -138,6 +140,7 @@ data class ModelConfig(
                 thinkingEffort = json.optString("thinkingEffort", "high"),
                 thinkingLevel = json.optString("thinkingLevel", "high"),
                 thinkingBudget = json.optInt("thinkingBudget", -1),
+                sendThinkingOnContinue = json.optBoolean("sendThinkingOnContinue", false),
                 proxyUrl = json.optString("proxyUrl", ""),
                 proxyPass = json.optString("proxyPass", "")
             )
@@ -519,6 +522,7 @@ class NativeAiClient {
         state: NativeChatState,
         session: ChatSession,
         continuationPrefill: String? = null,
+        continuationThinking: String? = null,
         onDelta: (content: String, thinking: String) -> Unit
     ): NativeAiResult {
         val preset = state.currentPreset() ?: throw IllegalStateException("无可用模型预设")
@@ -530,7 +534,7 @@ class NativeAiClient {
         ) {
             return runMultiStep(state, session, prompt, preset, runner, onDelta)
         }
-        return sendWithMessages(buildMessages(session, prompt, preset, continuationPrefill), preset, onDelta)
+        return sendWithMessages(buildMessages(session, prompt, preset, continuationPrefill, continuationThinking), preset, onDelta)
     }
 
     private fun sendWithMessages(
@@ -549,7 +553,8 @@ class NativeAiClient {
         session: ChatSession,
         prompt: PromptPreset,
         preset: ModelPreset,
-        continuationPrefill: String? = null
+        continuationPrefill: String? = null,
+        continuationThinking: String? = null
     ): List<JSONObject> {
         val messages = mutableListOf<JSONObject>()
         if (prompt.sysPrompt.isNotBlank()) {
@@ -576,14 +581,24 @@ class NativeAiClient {
             }
         }
         val prefillContent = continuationPrefill ?: prompt.assistantPrefill
-        if (prefillContent.isNotBlank()) {
+        val type = preset.type.lowercase(Locale.ROOT)
+        val prefillThinking = continuationThinking
+            ?.takeIf { continuationPrefill != null }
+            ?.takeIf { preset.config.sendThinkingOnContinue }
+            ?.takeIf { supportsReasoningContentInput(type) }
+            ?.takeIf { it.isNotBlank() }
+        if (prefillContent.isNotBlank() || prefillThinking != null) {
             val prefill = JSONObject().put("role", "assistant").put("content", prefillContent)
-            val type = preset.type.lowercase(Locale.ROOT)
             if (type == "deepseek") prefill.put("prefix", true)
             if (type == "kimi") prefill.put("partial", true)
+            if (prefillThinking != null) prefill.put("reasoning_content", prefillThinking)
             messages.add(prefill)
         }
         return messages
+    }
+
+    private fun supportsReasoningContentInput(type: String): Boolean {
+        return type != "anthropic" && type != "gemini" && type != "gemini-proxy"
     }
 
     private fun runMultiStep(

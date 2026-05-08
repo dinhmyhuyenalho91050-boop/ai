@@ -878,6 +878,7 @@ class MainActivity : AppCompatActivity() {
             recentlyInsertedMessageIds.add(it.id)
         }
         val continuationPrefill = continueMessage?.content.orEmpty()
+        val continuationThinking = continueMessage?.thinking.orEmpty()
         val promptForRegex = state.promptFor(session).copy()
         assistant.modelName = preset?.name.orEmpty()
         if (preset?.config?.stream == true) {
@@ -902,7 +903,12 @@ class MainActivity : AppCompatActivity() {
             val requestHint = beginBackgroundWorkHint(50_000_000L)
             try {
                 runCatching {
-                aiClient.send(state, session, continuationPrefill.takeIf { it.isNotBlank() }) { content, thinking ->
+                aiClient.send(
+                    state,
+                    session,
+                    continuationPrefill.takeIf { continueMessage != null },
+                    continuationThinking.takeIf { continueMessage != null && it.isNotBlank() }
+                ) { content, thinking ->
                     latestContent = content
                     latestThinking = thinking
                     latestDisplayContent = mergeContinuationContent(continuationPrefill, content)
@@ -4350,6 +4356,7 @@ class MainActivity : AppCompatActivity() {
         val maxTokens = field("最大输出长度(0=不发送)", tokenValue.toString())
         val stream = selectField("流式输出", yesNoOptions(), if (preset.config.stream) "true" else "false")
         val useThinking = selectField("启用思维链", yesNoOptions(), if (preset.config.useThinking) "true" else "false")
+        val sendThinkingOnContinue = selectField("续写传思维链", yesNoOptions(), if (preset.config.sendThinkingOnContinue) "true" else "false")
         val thinkingEffort = when (typeValue) {
             "gemini", "gemini-proxy", "kimi" -> null
             else -> selectField("思维链级别", effortOptions(typeValue), preset.config.thinkingEffort)
@@ -4374,6 +4381,7 @@ class MainActivity : AppCompatActivity() {
         }
         rows.add(stream.container)
         rows.add(useThinking.container)
+        rows.add(sendThinkingOnContinue.container)
         if (thinkingEffort != null) rows.add(thinkingEffort.container)
         if (thinkingLevel != null) rows.add(thinkingLevel.container)
         if (thinkingBudget != null) rows.add(thinkingBudget.container)
@@ -4395,6 +4403,7 @@ class MainActivity : AppCompatActivity() {
             maxTokens = maxTokens,
             stream = stream,
             useThinking = useThinking,
+            sendThinkingOnContinue = sendThinkingOnContinue,
             thinkingEffort = thinkingEffort,
             thinkingBudget = thinkingBudget,
             thinkingLevel = thinkingLevel
@@ -5395,6 +5404,7 @@ class MainActivity : AppCompatActivity() {
         val maxTokens: FieldRef,
         val stream: SelectRef,
         val useThinking: SelectRef,
+        val sendThinkingOnContinue: SelectRef,
         val thinkingEffort: SelectRef?,
         val thinkingBudget: FieldRef?,
         val thinkingLevel: SelectRef?
@@ -5422,6 +5432,7 @@ class MainActivity : AppCompatActivity() {
             }
             preset.config.stream = stream.value() == "true"
             preset.config.useThinking = useThinking.value() == "true"
+            preset.config.sendThinkingOnContinue = sendThinkingOnContinue.value() == "true"
             thinkingEffort?.let { preset.config.thinkingEffort = it.value() }
             thinkingBudget?.let { preset.config.thinkingBudget = it.value().toIntOrNull() ?: preset.config.thinkingBudget }
             thinkingLevel?.let { preset.config.thinkingLevel = it.value() }
