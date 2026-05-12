@@ -235,7 +235,7 @@ data class NativeChatState(
     val sessions: MutableMap<String, ChatSession> = linkedMapOf(),
     var currentId: String? = null,
     var currentModelIndex: Int = 0,
-    var orientationMode: String = "system"
+    var orientationMode: String = "portrait"
 ) {
     fun enabledPresets(): List<ModelPreset> = modelPresets.filter { it.enabled }
 
@@ -366,7 +366,7 @@ class NativeChatRepository(private val context: Context) {
                 }
                 state.currentId = json.optString("currentId").ifBlank { null }
                 state.currentModelIndex = json.optInt("currentModelIndex", 0)
-                state.orientationMode = json.optString("orientationMode", "system")
+                state.orientationMode = "portrait"
             }
             if (sessionsFile.exists()) {
                 val sessions = JSONObject(sessionsFile.readText(Charsets.UTF_8))
@@ -422,7 +422,7 @@ class NativeChatRepository(private val context: Context) {
                 }
             }
             state.currentId = data.optString("currentId").ifBlank { null }
-            state.orientationMode = data.optString("orientationMode", state.orientationMode)
+            state.orientationMode = "portrait"
         } else {
             data.optJSONArray("modelPresets")?.let { arr ->
                 for (i in 0 until arr.length()) {

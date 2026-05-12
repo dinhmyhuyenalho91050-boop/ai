@@ -248,20 +248,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyScreenOrientationPreference() {
-        state.orientationMode = normalizedOrientationMode(state.orientationMode)
-        requestedOrientation = when (state.orientationMode) {
-            "landscape" -> ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
-            "portrait" -> ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
-            else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        }
-    }
-
-    private fun normalizedOrientationMode(value: String): String {
-        return when (value.trim().lowercase(Locale.ROOT)) {
-            "landscape", "横屏", "horizontal" -> "landscape"
-            "portrait", "竖屏", "vertical" -> "portrait"
-            else -> "system"
-        }
+        state.orientationMode = "portrait"
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -1372,21 +1360,25 @@ class MainActivity : AppCompatActivity() {
             val messageIndex = position - if (hiddenCount > 0) 1 else 0
             val message = visibleMessages.getOrNull(messageIndex) ?: return
             holder.boundMessageId = message.id
+            val isLastVisibleMessage = messageIndex == visibleMessages.lastIndex
             val lockedHeight = editExitLockedHeights.remove(message.id)?.takeIf { it > 0 }
             val heightKey = messageHeightKey(message, messagesScroll.width)
-            val cachedHeight = lockedHeight ?: heightKey?.let { messageHeightCache[it] }
+            val cachedHeight = lockedHeight ?: heightKey?.takeUnless { isLastVisibleMessage }?.let { messageHeightCache[it] }
             holder.container.minimumHeight = cachedHeight ?: 0
-            holder.container.addView(messageCard(message, visibleStartIndex + messageIndex + 1, cachedHeight).apply {
+            holder.container.addView(messageCard(message, visibleStartIndex + messageIndex + 1).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     cachedHeight ?: ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { bottomMargin = dp(16) }
             })
-            if (heightKey != null) {
+            if (heightKey != null && lockedHeight == null) {
                 holder.container.doOnLayout {
                     val measured = holder.container.getChildAt(0)?.height ?: 0
                     if (measured > 0) messageHeightCache[heightKey] = measured
                 }
+            }
+            if (lockedHeight != null) {
+                releaseLockedMessageHeightAfterBind(holder.container, message.id, heightKey, lockedHeight)
             }
             if (streamTargets.containsKey(message.id)) scheduleVisibleStreamRefresh()
         }
@@ -1405,7 +1397,75 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun messageCard(message: ChatMessage, index: Int, lockedHeight: Int? = null): View {
+    private fun releaseLockedMessageHeightAfterBind(
+        container: FrameLayout,
+        messageId: String,
+        heightKey: MessageHeightKey?,
+        lockedHeight: Int
+    ) {
+        container.post {
+            if (!ViewCompat.isAttachedToWindow(container)) return@post
+            if (messagesAdapter.positionOfMessage(messageId) == RecyclerView.NO_POSITION) return@post
+            val card = container.getChildAt(0) ?: return@post
+            val params = card.layoutParams ?: return@post
+            if (params.height != lockedHeight) return@post
+            val targetHeight = measureMessageCardNaturalHeight(card, container.width.takeIf { it > 0 } ?: messagesScroll.width)
+            if (targetHeight <= 0) {
+                container.minimumHeight = 0
+                setMessageCardHeight(card, ViewGroup.LayoutParams.WRAP_CONTENT)
+                return@post
+            }
+            heightKey?.let { messageHeightCache[it] = targetHeight }
+            if (abs(targetHeight - lockedHeight) <= dp(2)) {
+                container.minimumHeight = 0
+                setMessageCardHeight(card, ViewGroup.LayoutParams.WRAP_CONTENT)
+                return@post
+            }
+            if (targetHeight < lockedHeight) container.minimumHeight = 0
+            val anchor = if (!followBottom && !userTouchingMessages) captureScrollAnchor() else null
+            ValueAnimator.ofInt(lockedHeight, targetHeight).apply {
+                duration = (abs(targetHeight - lockedHeight) * 2L).coerceIn(140L, 260L)
+                interpolator = softInterpolator
+                addUpdateListener { animation ->
+                    setMessageCardHeight(card, animation.animatedValue as Int)
+                    if (followBottom && !userTouchingMessages) scrollToBottomNow()
+                }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) = finish()
+                    override fun onAnimationCancel(animation: Animator) = finish()
+
+                    private fun finish() {
+                        container.minimumHeight = 0
+                        setMessageCardHeight(card, ViewGroup.LayoutParams.WRAP_CONTENT)
+                        if (followBottom && !userTouchingMessages) {
+                            scrollToBottomNow()
+                        } else {
+                            anchor?.let { restoreScrollAnchorSoon(it) }
+                        }
+                    }
+                })
+            }.start()
+        }
+    }
+
+    private fun measureMessageCardNaturalHeight(card: View, widthHint: Int): Int {
+        val width = widthHint.coerceAtLeast(dp(80))
+        card.measure(
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        return card.measuredHeight
+    }
+
+    private fun setMessageCardHeight(card: View, height: Int) {
+        val params = card.layoutParams ?: return
+        if (params.height != height) {
+            params.height = height
+            card.layoutParams = params
+        }
+    }
+
+    private fun messageCard(message: ChatMessage, index: Int): View {
         val isAssistant = message.role == "assistant"
         val editing = message.id == editingMessageId
         val accent = if (isAssistant) Color.rgb(100, 210, 255) else color(R.color.chat_accent_blue)
@@ -1450,9 +1510,6 @@ class MainActivity : AppCompatActivity() {
             }
         })
         card.addView(contentColumn)
-        lockedHeight?.let {
-            card.minimumHeight = lockedHeight
-        }
         if (recentlyInsertedMessageIds.remove(message.id)) {
             card.post { animateMessageEntrance(card) }
         } else if (editTransitionMessageIds.remove(message.id)) {
@@ -1734,7 +1791,6 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     ensureBodyWrapContent(views.host)
                 }
-                animateContentSettled(views.host)
                 return StreamBodyUpdate(
                     changed = true,
                     heightChanged = renderUpdate.heightMayHaveChanged || targetHeight != oldHeight
@@ -1747,9 +1803,6 @@ class MainActivity : AppCompatActivity() {
             views.tail.clearText()
             views.tail.visibility = View.GONE
             messageRenderedContent[message.id] = content
-            if (final && message.role == "assistant") {
-                animateContentSettled(views.host)
-            }
             return StreamBodyUpdate(changed = true, heightChanged = true)
         }
         return StreamBodyUpdate()
@@ -2898,6 +2951,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun settleBottomAfterListMutation() {
+        val token = ++bottomScrollToken
+        bottomScrollScheduled = false
+        streamBottomFollowToken++
+        streamBottomFollowScheduled = false
+        messagesScroll.stopScroll()
+        val delays = longArrayOf(0L, 16L, 48L, 96L, 180L, 320L, 520L)
+        delays.forEach { delay ->
+            mainHandler.postDelayed({
+                if (token != bottomScrollToken || userTouchingMessages) return@postDelayed
+                followBottom = true
+                lastBottomTargetY = -1
+                scrollToBottomNow()
+                updateStreamDistanceModes()
+            }, delay)
+        }
+    }
+
     private fun scrollMessageToTopSoon(messageId: String) {
         if (userTouchingMessages) return
         messagesScroll.post {
@@ -3131,30 +3202,6 @@ class MainActivity : AppCompatActivity() {
         animateMessageFrameSettled(view)
     }
 
-    private fun animateContentSettled(view: View) {
-        view.animate().cancel()
-        animateCompositeLayer(view, 520L)
-        view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        view.alpha = 0.82f
-        view.scaleX = 0.999f
-        view.scaleY = 0.999f
-        view.animate()
-            .alpha(1f)
-            .scaleX(1f)
-            .scaleY(1f)
-            .setDuration(520)
-            .setInterpolator(entranceInterpolator)
-            .withEndAction { view.setLayerType(View.LAYER_TYPE_NONE, null) }
-            .start()
-        findMessageCardForBody(view)?.let { animateMessageFrameSettled(it) }
-    }
-
-    private fun findMessageCardForBody(body: View): View? {
-        val contentColumn = body.parent as? View ?: return null
-        val card = contentColumn.parent as? View ?: return null
-        return card.takeIf { it.isShown && ViewCompat.isAttachedToWindow(it) }
-    }
-
     private fun animateMessageFrameSettled(card: View) {
         val overlay = rounded(Color.rgb(96, 165, 250), dp(14), dp(1), color(R.color.chat_accent_blue))
         card.foreground = overlay
@@ -3315,7 +3362,12 @@ class MainActivity : AppCompatActivity() {
     private fun commitEditingDraft(messageId: String) {
         val text = editingMessageEditor?.text?.toString() ?: editingMessageDraft
         state.activeSession()?.history?.firstOrNull { it.id == messageId }?.content = text
+        purgeMessageHeightCache(messageId)
         repository.save(state)
+    }
+
+    private fun purgeMessageHeightCache(messageId: String) {
+        messageHeightCache.keys.removeAll { it.id == messageId }
     }
 
     private fun refreshMessagesPreservingScroll(
@@ -3399,7 +3451,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun deleteMessage(message: ChatMessage) {
-        val stick = isNearBottom()
+        val session = state.activeSession() ?: return
+        val deletingLastMessage = session.history.lastOrNull()?.id == message.id
+        val stick = deletingLastMessage || isNearBottom()
         val anchor = if (stick) null else captureScrollAnchor()
         if (editingMessageId == message.id) {
             editingMessageId = null
@@ -3407,10 +3461,15 @@ class MainActivity : AppCompatActivity() {
             editingMessageEditor = null
             setEditingFloatingButtonVisible(false)
         }
-        state.activeSession()?.history?.removeAll { it.id == message.id }
+        session.history.removeAll { it.id == message.id }
+        messageHeightCache.clear()
         repository.save(state)
-        renderMessages(scrollToBottom = stick)
-        anchor?.let { restoreScrollAnchorSoon(it) }
+        renderMessages(scrollToBottom = false)
+        if (stick) {
+            settleBottomAfterListMutation()
+        } else {
+            anchor?.let { restoreScrollAnchorSoon(it) }
+        }
         renderSessions()
     }
 
@@ -3514,7 +3573,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(18), dp(18), dp(18))
         }
-        val tabs = listOf("通用", "模型预设", "提示词", "备份")
+        val tabs = listOf("模型预设", "提示词", "备份")
         val tabViews = mutableListOf<TextView>()
         var saveCurrentPane: (() -> Boolean)? = null
 
@@ -3604,9 +3663,8 @@ class MainActivity : AppCompatActivity() {
             contentHost.animate().cancel()
             contentHost.removeAllViews()
             saveCurrentPane = when (index) {
-                0 -> fillGeneralPane(contentHost)
-                1 -> fillModelsPane(contentHost)
-                2 -> fillPromptsPane(contentHost)
+                0 -> fillModelsPane(contentHost)
+                1 -> fillPromptsPane(contentHost)
                 else -> fillBackupPane(contentHost, dialog)
             }
             contentHost.alpha = 0f
@@ -3645,33 +3703,6 @@ class MainActivity : AppCompatActivity() {
                 .start()
         }
         dialog.show()
-    }
-
-    private fun fillGeneralPane(host: LinearLayout): () -> Boolean {
-        host.addView(dialogTitle("通用设置"))
-        val orientationRef = selectField("屏幕方向", orientationOptions(), state.orientationMode)
-        host.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = rounded(color(R.color.chat_card), dp(12), dp(1), color(R.color.chat_border))
-            setPadding(dp(14), dp(14), dp(14), 0)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(14) }
-            addView(orientationRef.container)
-        })
-        return {
-            state.orientationMode = normalizedOrientationMode(orientationRef.value())
-            true
-        }
-    }
-
-    private fun orientationOptions(): List<Pair<String, String>> {
-        return listOf(
-            "system" to "跟随系统",
-            "landscape" to "横屏",
-            "portrait" to "竖屏"
-        )
     }
 
     private fun fillModelsPane(host: LinearLayout): () -> Boolean {
