@@ -187,10 +187,6 @@ class MainActivity : AppCompatActivity() {
     private val streamRevealTouchFrameMs = 120L
     private val streamUiCommitFrameMs = 48L
     private val streamContentMaxCharsPerTick = 2048
-    private val streamCollapsedThinkingFrameMs = 500L
-    private val streamExpandedThinkingFrameMs = 120L
-    private val streamThinkingCharsPerSecond = 240f
-    private val streamMaxThinkingCharsPerFrame = 64
     private val streamTailTargetChars = 720
     private val streamTailMaxChars = 1200
     private val streamFrozenPrefixMinChars = 700
@@ -918,7 +914,10 @@ class MainActivity : AppCompatActivity() {
                     continuationThinking.takeIf { continueMessage != null && it.isNotBlank() }
                 ) { content, thinking ->
                     latestContent = content
-                    latestThinking = mergeContinuationContent(continuationThinking, thinking)
+                    latestThinking = preferLongerCompatible(
+                        mergeContinuationContent(continuationThinking, thinking),
+                        latestThinking
+                    )
                     latestDisplayContent = mergeContinuationContent(continuationPrefill, content)
                     val now = android.os.SystemClock.uptimeMillis()
                     val contentDelta = (latestDisplayContent.length - renderedContentLength).coerceAtLeast(0)
@@ -952,7 +951,10 @@ class MainActivity : AppCompatActivity() {
                     mergeContinuationContent(continuationPrefill, result.content),
                     promptForRegex
                 )
-                val finalThinking = mergeContinuationContent(continuationThinking, result.thinking)
+                val finalThinking = preferLongerCompatible(
+                    mergeContinuationContent(continuationThinking, result.thinking),
+                    latestThinking
+                )
                 mainHandler.post {
                     stoppedAssistantIds.remove(assistant.id)
                     if (activeAssistantId == assistant.id) activeAssistantId = null
@@ -1019,6 +1021,12 @@ class MainActivity : AppCompatActivity() {
         if (prefix.isBlank()) return generated
         if (generated.isBlank()) return prefix
         return if (generated.startsWith(prefix)) generated else prefix + generated
+    }
+
+    private fun preferLongerCompatible(primary: String, fallback: String): String {
+        if (fallback.length <= primary.length) return primary
+        if (fallback.startsWith(primary) || primary.isBlank()) return fallback
+        return primary
     }
 
     private fun stopSending() {
@@ -2480,7 +2488,6 @@ class MainActivity : AppCompatActivity() {
                 }
                 val targetVisible = isStreamTargetVisible(target.message.id)
                 refreshContentReleaseEnd(target)
-                val elapsedMs = revealElapsedMs(target, now)
                 val contentEnd = target.contentReleaseEnd.coerceIn(0, target.targetContent.length)
                 val contentStepLimit = streamContentMaxCharsPerTick
                 if (!targetVisible) {
@@ -2519,31 +2526,15 @@ class MainActivity : AppCompatActivity() {
                     }
                     continue
                 }
-                val thinkingExpanded = target.message.id in messageThinkingExpanded
-                val thinkingInterval = if (thinkingExpanded) streamExpandedThinkingFrameMs else streamCollapsedThinkingFrameMs
-                val thinkingDue = target.finishWhenCaught ||
-                    !target.thinkingPrefixValid ||
-                    now - target.lastThinkingUiCommitAt >= thinkingInterval
-                val thinkingBudget = if (thinkingDue) {
-                    revealBudget(
-                        target.thinkingRevealCarry,
-                        streamThinkingCharsPerSecond,
-                        elapsedMs,
-                        streamMaxThinkingCharsPerFrame
-                    )
+                val nextThinkingLength = if (target.thinkingPrefixValid) {
+                    advanceVisibleLength(target.visibleThinkingLength, target.targetThinking.length, contentStepLimit)
                 } else {
-                    RevealBudget(0, target.thinkingRevealCarry)
+                    target.targetThinking.length
                 }
-                target.thinkingRevealCarry = thinkingBudget.carry
                 val nextContentLength = if (target.contentPrefixValid) {
                     advanceVisibleLength(target.visibleContentLength, contentEnd, contentStepLimit)
                 } else {
                     contentEnd
-                }
-                val nextThinkingLength = if (target.thinkingPrefixValid && !target.finishWhenCaught) {
-                    advanceVisibleLength(target.visibleThinkingLength, target.targetThinking.length, thinkingBudget.chars)
-                } else {
-                    target.targetThinking.length
                 }
                 val contentChanged = nextContentLength != target.visibleContentLength || !target.contentPrefixValid
                 val thinkingChanged = nextThinkingLength != target.visibleThinkingLength || !target.thinkingPrefixValid
@@ -2590,7 +2581,6 @@ class MainActivity : AppCompatActivity() {
         target.lastUiCommitAt = now
         target.lastRevealAt = now
         target.forceNextUiCommit = false
-        if (thinkingChanged) target.lastThinkingUiCommitAt = now
         val display = target.message.copy(content = nextContent, thinking = nextThinking)
         updateMessageViews(display, streaming = streaming, final = !streaming)
     }
@@ -2635,20 +2625,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun isSentenceEnd(ch: Char): Boolean {
         return ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?'
-    }
-
-    private fun revealElapsedMs(target: StreamRenderTarget, now: Long): Long {
-        val previous = target.lastTickAt
-        target.lastTickAt = now
-        if (previous <= 0L) return streamRevealFrameMs
-        return (now - previous).coerceIn(1L, streamRevealTouchFrameMs)
-    }
-
-    private fun revealBudget(carry: Float, charsPerSecond: Float, elapsedMs: Long, maxChars: Int): RevealBudget {
-        val available = carry + charsPerSecond * elapsedMs / 1000f
-        val chars = min(maxChars, available.toInt())
-        val nextCarry = (available - chars).coerceIn(0f, maxChars.toFloat())
-        return RevealBudget(chars, nextCarry)
     }
 
     private fun shouldCommitStreamFrame(
@@ -5224,12 +5200,9 @@ class MainActivity : AppCompatActivity() {
         var finishWhenCaught: Boolean = false,
         var lastRevealAt: Long = 0L,
         var lastTargetUpdateAt: Long = 0L,
-        var lastTickAt: Long = 0L,
         var contentReleaseEnd: Int = 0,
         var unreleasedContentSince: Long = 0L,
-        var thinkingRevealCarry: Float = 0f,
         var lastUiCommitAt: Long = 0L,
-        var lastThinkingUiCommitAt: Long = 0L,
         var lastOffscreenUiCommitAt: Long = 0L,
         var forceNextUiCommit: Boolean = false,
         var contentPrefixValid: Boolean = true,
@@ -5285,11 +5258,6 @@ class MainActivity : AppCompatActivity() {
             if (cachedFull.isNotEmpty()) chunks.addLast(cachedFull)
         }
     }
-
-    private data class RevealBudget(
-        val chars: Int,
-        val carry: Float
-    )
 
     private data class StreamRenderResult(
         val text: CharSequence,

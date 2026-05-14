@@ -1151,15 +1151,26 @@ class NativeAiClient {
 
     private fun parseOpenAINonStream(json: JSONObject): NativeAiResult {
         val message = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message") ?: JSONObject()
-        val thinking = message.optString("reasoning_content", "")
         val contentValue = message.opt("content")
+        val thinking = buildString {
+            appendCleanThinking(message.opt("reasoning_content"))
+            appendCleanThinking(message.opt("reasoning"))
+            appendCleanThinking(message.opt("reasoning_text"))
+            append(extractThinkingParts(contentValue))
+        }
         return NativeAiResult(extractTextParts(contentValue).ifBlank { "(空响应)" }, thinking)
     }
 
     private fun parseOpenAIStreamLine(json: JSONObject): NativeAiResult {
         val delta = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: JSONObject()
-        val thinking = delta.optString("reasoning_content", "")
-        return NativeAiResult(extractTextParts(delta.opt("content")), thinking)
+        val contentValue = delta.opt("content")
+        val thinking = buildString {
+            appendCleanThinking(delta.opt("reasoning_content"))
+            appendCleanThinking(delta.opt("reasoning"))
+            appendCleanThinking(delta.opt("reasoning_text"))
+            append(extractThinkingParts(contentValue))
+        }
+        return NativeAiResult(extractTextParts(contentValue), thinking)
     }
 
     private fun parseAnthropicNonStream(json: JSONObject): NativeAiResult {
@@ -1241,6 +1252,58 @@ class NativeAiClient {
                 text.toString()
             }
             else -> ""
+        }
+    }
+
+    private fun extractThinkingParts(value: Any?): String {
+        return when (value) {
+            is JSONArray -> {
+                val thinking = StringBuilder()
+                for (i in 0 until value.length()) {
+                    val part = value.optJSONObject(i) ?: continue
+                    when (part.optString("type").lowercase(Locale.ROOT)) {
+                        "thinking", "reasoning", "reasoning_content", "reasoning_text", "thought" -> {
+                            thinking.appendCleanThinking(part.opt("thinking"))
+                            thinking.appendCleanThinking(part.opt("reasoning"))
+                            thinking.appendCleanThinking(part.opt("reasoning_content"))
+                            thinking.appendCleanThinking(part.opt("text"))
+                        }
+                    }
+                }
+                thinking.toString()
+            }
+            is JSONObject -> when (value.optString("type").lowercase(Locale.ROOT)) {
+                "thinking", "reasoning", "reasoning_content", "reasoning_text", "thought" -> buildString {
+                    appendCleanThinking(value.opt("thinking"))
+                    appendCleanThinking(value.opt("reasoning"))
+                    appendCleanThinking(value.opt("reasoning_content"))
+                    appendCleanThinking(value.opt("text"))
+                    appendCleanThinking(value.opt("content"))
+                }
+                else -> ""
+            }
+            else -> ""
+        }
+    }
+
+    private fun StringBuilder.appendCleanThinking(value: Any?) {
+        when (value) {
+            is String -> {
+                val cleaned = cleanStreamPart(value)
+                if (cleaned.isNotEmpty()) append(cleaned)
+            }
+            is JSONArray -> {
+                for (i in 0 until value.length()) {
+                    appendCleanThinking(value.opt(i))
+                }
+            }
+            is JSONObject -> {
+                appendCleanThinking(value.opt("thinking"))
+                appendCleanThinking(value.opt("reasoning"))
+                appendCleanThinking(value.opt("reasoning_content"))
+                appendCleanThinking(value.opt("text"))
+                appendCleanThinking(value.opt("content"))
+            }
         }
     }
 
